@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>ads-autopilot — спецификация взаимодействия с API Яндекс Директа</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif;
+    font-size: 10.5pt; line-height: 1.5; color: #1a1a1a; margin: 0;
+  }
+  h1 { font-size: 17pt; margin: 0 0 2mm; }
+  h2 { font-size: 12.5pt; margin: 7mm 0 2mm; padding-bottom: 1.5mm;
+       border-bottom: 1.5px solid #d0d0d0; }
+  h3 { font-size: 11pt; margin: 4mm 0 1.5mm; }
+  .sub { color: #555; font-size: 9.5pt; margin-bottom: 5mm; }
+  table { width: 100%; border-collapse: collapse; margin: 2mm 0 3mm; font-size: 9.5pt; }
+  th, td { border: 1px solid #cfcfcf; padding: 1.8mm 2.2mm; text-align: left;
+           vertical-align: top; }
+  th { background: #f2f2f2; font-weight: 600; }
+  code { font-family: "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 9pt;
+         background: #f3f3f3; padding: 0 1mm; border-radius: 2px; }
+  ol, ul { margin: 1.5mm 0 3mm; padding-left: 6mm; }
+  li { margin-bottom: 1.2mm; }
+  .term { background: #1e1e1e; color: #e8e8e8; padding: 3mm 4mm; border-radius: 3px;
+          font-family: "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 8.5pt;
+          line-height: 1.45; white-space: pre-wrap; margin: 2mm 0 3mm; }
+  .term .ok { color: #7ec96b; }
+  .term .warn { color: #e5c07b; }
+  .term .dim { color: #9a9a9a; }
+  .note { background: #f7f7f7; border-left: 3px solid #999; padding: 2.5mm 3mm;
+          margin: 2mm 0 3mm; font-size: 9.5pt; }
+  .flow { font-family: "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 9pt;
+          line-height: 1.7; background: #fafafa; border: 1px solid #e0e0e0;
+          padding: 3mm; border-radius: 3px; margin: 2mm 0 3mm; white-space: pre-wrap; }
+  .foot { margin-top: 8mm; padding-top: 2mm; border-top: 1px solid #ddd;
+          font-size: 8.5pt; color: #666; }
+  .pb { page-break-before: always; }
+</style>
+</head>
+<body>
+
+<h1>ads-autopilot</h1>
+<div class="sub">
+  Спецификация взаимодействия с API Яндекс Директа v5 · приложение <code>auto_smart_school</code> · 8 августа 2026
+</div>
+
+<h2>1. Назначение</h2>
+<p>
+  Серверная система автоматического управления рекламными кампаниями в Яндекс Директе.
+  Используется для ведения собственных рекламных аккаунтов: первичная сборка структуры
+  аккаунта и ежедневная оптимизация по данным Яндекс Метрики.
+</p>
+<p>
+  Пользовательского веб-интерфейса для сторонних рекламодателей нет. Управление —
+  через CLI на сервере и Telegram-бота для подтверждения критичных изменений.
+</p>
+
+<h2>2. Техническая база</h2>
+<table>
+  <tr><th style="width:32%">Параметр</th><th>Значение</th></tr>
+  <tr><td>Платформа</td><td>Node.js 22, TypeScript, серверное приложение на выделенном VPS</td></tr>
+  <tr><td>Протокол</td><td>HTTPS POST, JSON, API Директа v5</td></tr>
+  <tr><td>Base URL</td><td><code>https://api.direct.yandex.com/json/v5/</code></td></tr>
+  <tr><td>Песочница</td><td><code>https://api-sandbox.direct.yandex.com/json/v5/</code></td></tr>
+  <tr><td>Авторизация</td><td>OAuth 2.0 Яндекс ID, заголовок <code>Authorization: Bearer</code></td></tr>
+  <tr><td>Хранение токенов</td><td>PostgreSQL, шифрование AES-256-GCM, ключ в переменных окружения. В логи токен пишется только последними 4 символами</td></tr>
+  <tr><td>Заголовки запроса</td><td><code>Accept-Language: ru</code>, при работе от агентства — <code>Client-Login</code></td></tr>
+</table>
+
+<h2>3. Используемые сервисы API</h2>
+<table>
+  <tr><th style="width:22%">Операция</th><th>Сервисы и методы</th></tr>
+  <tr>
+    <td>Чтение</td>
+    <td><code>clients.get</code>, <code>campaigns.get</code>, <code>adgroups.get</code>,
+        <code>ads.get</code>, <code>keywords.get</code>,
+        <code>dictionaries.get</code> (справочник регионов), <code>reports</code></td>
+  </tr>
+  <tr>
+    <td>Создание</td>
+    <td><code>campaigns.add</code>, <code>adgroups.add</code>, <code>ads.add</code>,
+        <code>keywords.add</code>, <code>sitelinks.add</code>,
+        <code>adextensions.add</code>, <code>audiencetargets.add</code></td>
+  </tr>
+  <tr>
+    <td>Изменение</td>
+    <td><code>campaigns.update</code>, <code>adgroups.update</code>, <code>ads.update</code>,
+        <code>keywords.update</code>, <code>bids.set</code>, <code>keywordbids.set</code></td>
+  </tr>
+  <tr>
+    <td>Управление показами</td>
+    <td><code>campaigns.suspend</code>, <code>campaigns.resume</code>,
+        <code>keywords.delete</code>, <code>ads.suspend</code></td>
+  </tr>
+</table>
+
+<h2>4. Схема взаимодействия</h2>
+
+<h3>4.1. Первичная сборка аккаунта (разовая операция, по команде оператора)</h3>
+<p>
+  Структура аккаунта описана в системе как типизированная конфигурация: кампании,
+  группы, ключевые фразы, тексты объявлений, быстрые ссылки, уточнения, регионы
+  и бюджеты. Перед отправкой конфигурация проходит локальную валидацию по лимитам
+  Директа — длина заголовков и текстов, количество слов во фразе, число фраз в группе,
+  дубли фраз между группами. Заведомо некорректные объекты в Директ не отправляются.
+</p>
+<div class="flow">валидация конфигурации (локально, без обращений к API)
+    ↓
+campaigns.add          → сохраняем CampaignIds
+    ↓
+adgroups.add           → сохраняем AdGroupIds
+    ↓
+keywords.add           → пакетами, до 10 000 объектов на запрос
+    ↓
+ads.add                → кампании создаются остановленными
+    ↓
+sitelinks.add / adextensions.add / audiencetargets.add
+    ↓
+campaigns.get          → сверка созданного с конфигурацией</div>
+<p>
+  Объём одного прогона — порядка 300 объектов. Кампании создаются в состоянии
+  «остановлена»: показы включает человек после визуальной проверки.
+</p>
+
+<h3 class="pb">4.2. Ежедневный цикл оптимизации (1 раз в сутки, ночью)</h3>
+<div class="flow">reports  → статистика по кампаниям, группам и фразам за вчера и за 7 дней
+reports  → отчёт по поисковым запросам
+    ↓
+правила оптимизации выполняются локально, без обращений к API
+    ↓
+keywords.update / keywords.delete   — фразы без конверсий
+campaigns.update                    — перераспределение недельных бюджетов
+adgroups.update                     — минус-фразы из поисковых запросов
+campaigns.suspend                   — только после подтверждения человеком</div>
+<p>
+  Порядок 20–50 запросов в сутки на один рекламный аккаунт. Изменение бюджета
+  более чем на 20% и остановка кампании не применяются автоматически: система
+  отправляет запрос на подтверждение в Telegram и ждёт ответа оператора.
+</p>
+
+<h3>4.3. Контроль модерации (2 раза в сутки)</h3>
+<div class="flow">ads.get (FieldNames: Id, State, Status, StatusClarification)
+    ↓
+отклонённые объявления → переписывание текста → ads.update</div>
+
+<h2>5. Соблюдение ограничений API</h2>
+<ul>
+  <li>Не более 5 одновременных запросов на рекламодателя.</li>
+  <li>Объекты передаются пакетами, а не по одному.</li>
+  <li>Остаток баллов читается из заголовка <code>Units</code> после каждого ответа;
+      при приближении к суточной квоте работа останавливается до следующих суток.</li>
+  <li>Ошибка 56 (превышение частоты) — повтор с экспоненциальной задержкой,
+      не более 3 попыток.</li>
+  <li>Ошибка 152 (исчерпание баллов) не повторяется: работа откладывается
+      до обновления квоты.</li>
+  <li>Ошибки 53, 54, 58 не повторяются — требуют вмешательства оператора.</li>
+  <li><code>RequestId</code> из заголовка ответа сохраняется в журнале ошибок
+      для обращений в поддержку.</li>
+</ul>
+
+<h2>6. Интерфейс оператора</h2>
+<p>
+  Проверка доступа к API и состояния аккаунта выполняется командой
+  <code>pnpm yd:check</code>. Фактический вывод команды на момент подачи заявки:
+</p>
+<div class="term">$ YANDEX_DIRECT_TOKEN=*** pnpm yd:check
+
+Окружение: production
+Токен: ***HJ-k
+<span class="warn">Доступа нет: Приложению не одобрен доступ к API.
+Директ → Настройки → API → заявка на доступ.</span>
+<span class="dim">RequestId: 1210628317638061436</span></div>
+<p>После получения доступа та же команда выводит:</p>
+<div class="term">Окружение: production
+Токен: ***HJ-k
+Аккаунт: &lt;логин&gt; (ClientId &lt;id&gt;, RUB, CLIENT)
+Кампаний в аккаунте: 11
+  &lt;id&gt;  SUSPENDED/ACCEPTED  SS | Поиск | Взрослые | Петергоф
+  &lt;id&gt;  SUSPENDED/ACCEPTED  SS | Поиск | Дети и школьники | Петергоф
+  ...
+Баллы: списано 20, осталось 63980 из 64000
+<span class="ok">Доступ есть — можно заливать кампании.</span></div>
+
+<h2>7. Безопасность</h2>
+<ul>
+  <li>OAuth-токены хранятся только в зашифрованном виде и никогда не передаются третьим лицам.</li>
+  <li>Все обращения к учётным данным пишутся в журнал доступа.</li>
+  <li>Приложение работает только с теми рекламными аккаунтами, владелец которых
+      явно выдал токен.</li>
+  <li>Данные статистики не публикуются и не передаются за пределы системы.</li>
+</ul>
+
+<div class="foot">
+  ads-autopilot · приложение auto_smart_school · документ подготовлен для заявки
+  на доступ к API Яндекс Директа
+</div>
+
+</body>
+</html>

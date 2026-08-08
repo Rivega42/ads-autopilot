@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+:root {
+  --surface: #fcfcfb;
+  --panel: #ffffff;
+  --line: #e4e3df;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-3: #86847e;
+  --series-1: #2a78d6;
+  --good: #1baf7a;
+  --bad: #e34948;
+  --warn: #eda100;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #dfdfdb; font-family: "DejaVu Sans", Arial, sans-serif; color: var(--ink); }
+.shot { width: 1200px; background: var(--surface); padding: 0 0 26px; }
+.badge {
+  background: #2b2b28; color: #fff; font-size: 12px; letter-spacing: .06em;
+  text-transform: uppercase; padding: 9px 22px; display: flex;
+  justify-content: space-between; align-items: center;
+}
+.badge span:last-child { color: #b8b7b0; letter-spacing: .02em; text-transform: none; }
+.pad { padding: 22px 26px 0; }
+
+/* ---------- shared chrome ---------- */
+.app { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.topbar {
+  display: flex; align-items: center; gap: 18px; padding: 13px 18px;
+  border-bottom: 1px solid var(--line); background: #fafaf8;
+}
+.logo { font-weight: 700; font-size: 15px; }
+.logo em { font-style: normal; color: var(--series-1); }
+.nav { display: flex; gap: 20px; font-size: 13.5px; color: var(--ink-2); }
+.nav b { font-weight: 600; color: var(--ink); border-bottom: 2px solid var(--series-1); padding-bottom: 3px; }
+.acct { margin-left: auto; font-size: 12.5px; color: var(--ink-3); }
+
+/* ---------- stat tiles ---------- */
+.tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; padding: 18px; }
+.tile { border: 1px solid var(--line); border-radius: 7px; padding: 13px 14px; }
+.tile .k { font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; }
+.tile .v { font-size: 25px; font-weight: 700; margin-top: 5px; letter-spacing: -.01em; }
+.tile .d { font-size: 12px; margin-top: 3px; color: var(--ink-2); }
+.up { color: var(--good); font-weight: 600; }
+.down { color: var(--bad); font-weight: 600; }
+
+/* ---------- table ---------- */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em;
+     color: var(--ink-3); font-weight: 600; padding: 9px 14px; border-bottom: 1px solid var(--line); }
+td { padding: 10px 14px; border-bottom: 1px solid #f0efec; vertical-align: middle; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.name { font-weight: 600; }
+.pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+        padding: 2px 8px; border-radius: 20px; border: 1px solid; font-weight: 600; }
+.pill.on { color: #147d58; border-color: #a5e0c9; background: #eaf8f2; }
+.pill.off { color: #6b6a66; border-color: #dcdbd6; background: #f4f3f0; }
+.pill.wait { color: #8a6100; border-color: #f0d79a; background: #fdf5e3; }
+.dotc { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+
+/* ---------- bar chart ---------- */
+.chart { padding: 4px 18px 18px; }
+.chart h3 { font-size: 13.5px; margin-bottom: 2px; }
+.chart .cap { font-size: 12px; color: var(--ink-3); margin-bottom: 14px; }
+.row { display: grid; grid-template-columns: 210px 1fr 70px; align-items: center;
+       gap: 12px; margin-bottom: 9px; font-size: 12.5px; }
+.row .lbl { color: var(--ink-2); text-align: right; }
+.track { height: 100%; }
+.bar { height: 17px; background: var(--series-1); border-radius: 0 4px 4px 0; }
+.row .val { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* ---------- telegram ---------- */
+.tg { width: 500px; background: #e8ecef; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.tg-head { background: #517da2; color: #fff; padding: 11px 15px; font-size: 14px; font-weight: 600; }
+.tg-head small { display: block; font-weight: 400; font-size: 11.5px; color: #d3e2ef; margin-top: 2px; }
+.tg-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.msg { background: #fff; border-radius: 10px; padding: 11px 13px; font-size: 13px; line-height: 1.5;
+       box-shadow: 0 1px 1px rgba(0,0,0,.07); }
+.msg .t { font-weight: 700; margin-bottom: 6px; }
+.msg .time { font-size: 10.5px; color: var(--ink-3); text-align: right; margin-top: 5px; }
+.msg kbd { font-family: "DejaVu Sans Mono", monospace; font-size: 11.5px; background: #f3f3f0;
+           padding: 0 4px; border-radius: 3px; }
+.btns { display: flex; gap: 7px; margin-top: 10px; }
+.btn { flex: 1; text-align: center; font-size: 12.5px; font-weight: 600; padding: 8px;
+       border-radius: 7px; border: 1px solid #cfdae4; background: #f2f7fb; color: #2f6b9e; }
+.btn.primary { background: #2f6b9e; color: #fff; border-color: #2f6b9e; }
+.ln { display: flex; justify-content: space-between; padding: 2px 0; }
+.ln span:last-child { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* ---------- terminal ---------- */
+.term { background: #1c1c1b; border-radius: 8px; overflow: hidden; }
+.term-head { background: #2c2c2a; padding: 9px 13px; display: flex; gap: 7px; align-items: center; }
+.term-head i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+.term-head span { color: #a3a29c; font-size: 12px; margin-left: 10px;
+                  font-family: "DejaVu Sans Mono", monospace; }
+.term pre { color: #e6e6e3; padding: 15px 18px; font-size: 12.5px; line-height: 1.62;
+            font-family: "DejaVu Sans Mono", monospace; white-space: pre-wrap; }
+.g { color: #7ec96b; } .y { color: #e5c07b; } .b { color: #6fb3ee; }
+.d { color: #8d8c86; } .r { color: #ef7d7c; } .w { color: #fff; font-weight: 700; }
+
+/* ---------- log ---------- */
+.log { padding: 4px 18px 18px; }
+.entry { display: grid; grid-template-columns: 78px 26px 1fr auto; gap: 12px;
+         padding: 11px 0; border-bottom: 1px solid #f0efec; font-size: 13px; align-items: start; }
+.entry .ts { color: var(--ink-3); font-variant-numeric: tabular-nums; font-size: 12px; padding-top: 1px; }
+.ico { width: 22px; height: 22px; border-radius: 6px; display: flex; align-items: center;
+       justify-content: center; font-size: 12px; font-weight: 700; color: #fff; }
+.entry .why { color: var(--ink-2); font-size: 12.5px; margin-top: 2px; }
+.tag { font-size: 11px; padding: 2px 8px; border-radius: 5px; background: #f2f1ee;
+       color: var(--ink-2); border: 1px solid var(--line); white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<!-- ============ 1. ДАШБОРД: ОБЗОР ============ -->
+<div class="shot" id="s1">
+  <div class="badge"><span>Макет интерфейса · не скриншот работающей системы</span><span>ads-autopilot · экран 1 из 4</span></div>
+  <div class="pad">
+  <div class="app">
+    <div class="topbar">
+      <div class="logo">ads<em>·</em>autopilot</div>
+      <div class="nav"><b>Кампании</b><span>Оптимизация</span><span>Креативы</span><span>Отчёты</span><span>Настройки</span></div>
+      <div class="acct">Яндекс Директ · SmartSay · баллы 63 980 / 64 000</div>
+    </div>
+
+    <div class="tiles">
+      <div class="tile"><div class="k">Расход за 7 дней</div><div class="v">12 840 ₽</div><div class="d"><span class="up">↓ 6%</span> к прошлой неделе</div></div>
+      <div class="tile"><div class="k">Заявки</div><div class="v">17</div><div class="d"><span class="up">↑ 4</span> к прошлой неделе</div></div>
+      <div class="tile"><div class="k">CPL</div><div class="v">755 ₽</div><div class="d">цель ≤ 1 000 ₽</div></div>
+      <div class="tile"><div class="k">CTR на поиске</div><div class="v">11,2%</div><div class="d">без бренда — 9,4%</div></div>
+      <div class="tile"><div class="k">Правок за сутки</div><div class="v">23</div><div class="d">1 ждёт подтверждения</div></div>
+    </div>
+
+    <table>
+      <tr>
+        <th style="width:34%">Кампания</th><th>Статус</th>
+        <th class="num">Расход</th><th class="num">Клики</th><th class="num">Заявки</th>
+        <th class="num">CPL</th><th class="num">Бюджет / нед</th>
+      </tr>
+      <tr>
+        <td class="name">SS | Поиск | Взрослые | Петергоф</td>
+        <td><span class="pill on">● работает</span></td>
+        <td class="num">4 210 ₽</td><td class="num">96</td><td class="num">7</td>
+        <td class="num">601 ₽</td><td class="num">4 500 ₽</td>
+      </tr>
+      <tr>
+        <td class="name">SS | Поиск | Дети и школьники | Петергоф</td>
+        <td><span class="pill on">● работает</span></td>
+        <td class="num">3 380 ₽</td><td class="num">78</td><td class="num">6</td>
+        <td class="num">563 ₽</td><td class="num">3 500 ₽</td>
+      </tr>
+      <tr>
+        <td class="name">SS | Поиск | Дошкольники 3–6 | Петергоф</td>
+        <td><span class="pill on">● работает</span></td>
+        <td class="num">2 405 ₽</td><td class="num">61</td><td class="num">3</td>
+        <td class="num">802 ₽</td><td class="num">2 500 ₽</td>
+      </tr>
+      <tr>
+        <td class="name">SS | Поиск | Бренд</td>
+        <td><span class="pill on">● работает</span></td>
+        <td class="num">640 ₽</td><td class="num">44</td><td class="num">1</td>
+        <td class="num">640 ₽</td><td class="num">700 ₽</td>
+      </tr>
+      <tr>
+        <td class="name">SS | Ретаргетинг | Были на сайте без заявки</td>
+        <td><span class="pill wait">◐ набор аудитории</span></td>
+        <td class="num">205 ₽</td><td class="num">19</td><td class="num">0</td>
+        <td class="num">—</td><td class="num">1 000 ₽</td>
+      </tr>
+      <tr>
+        <td class="name">SS | Поиск | Языковой лагерь и каникулы | СЗФО</td>
+        <td><span class="pill off">○ пауза до февраля</span></td>
+        <td class="num">0 ₽</td><td class="num">0</td><td class="num">0</td>
+        <td class="num">—</td><td class="num">3 000 ₽</td>
+      </tr>
+    </table>
+
+    <div class="chart">
+      <h3>Заявки по кампаниям за 7 дней</h3>
+      <div class="cap">Значение подписано у каждой полосы — цвет не несёт отдельного смысла</div>
+      <div class="row"><div class="lbl">Взрослые | Петергоф</div><div class="track"><div class="bar" style="width:100%"></div></div><div class="val">7</div></div>
+      <div class="row"><div class="lbl">Дети и школьники</div><div class="track"><div class="bar" style="width:85.7%"></div></div><div class="val">6</div></div>
+      <div class="row"><div class="lbl">Дошкольники 3–6</div><div class="track"><div class="bar" style="width:42.9%"></div></div><div class="val">3</div></div>
+      <div class="row"><div class="lbl">Бренд</div><div class="track"><div class="bar" style="width:14.3%"></div></div><div class="val">1</div></div>
+      <div class="row"><div class="lbl">Ретаргетинг</div><div class="track"><div class="bar" style="width:0"></div></div><div class="val">0</div></div>
+    </div>
+  </div>
+  </div>
+</div>
+
+<!-- ============ 2. ЖУРНАЛ ОПТИМИЗАТОРА ============ -->
+<div class="shot" id="s2">
+  <div class="badge"><span>Макет интерфейса · не скриншот работающей системы</span><span>ads-autopilot · экран 2 из 4</span></div>
+  <div class="pad">
+  <div class="app">
+    <div class="topbar">
+      <div class="logo">ads<em>·</em>autopilot</div>
+      <div class="nav"><span>Кампании</span><b>Оптимизация</b><span>Креативы</span><span>Отчёты</span><span>Настройки</span></div>
+      <div class="acct">Цикл от 08.08.2026, 03:00 · 41 запрос к API · списано 180 баллов</div>
+    </div>
+
+    <div class="tiles" style="grid-template-columns:repeat(4,1fr)">
+      <div class="tile"><div class="k">Применено правок</div><div class="v">22</div><div class="d">автоматически, по правилам</div></div>
+      <div class="tile"><div class="k">Ждут подтверждения</div><div class="v">1</div><div class="d">отправлено в Telegram</div></div>
+      <div class="tile"><div class="k">Новых минус-фраз</div><div class="v">14</div><div class="d">из отчёта по запросам</div></div>
+      <div class="tile"><div class="k">Ошибок API</div><div class="v">0</div><div class="d">повторов не потребовалось</div></div>
+    </div>
+
+    <div class="log">
+      <div class="entry">
+        <div class="ts">03:00:12</div>
+        <div><div class="ico" style="background:#2a78d6">↓</div></div>
+        <div>
+          <div><b>keywords.update</b> — ставка снижена на 6 фразах в группе «Испанский | взрослые»</div>
+          <div class="why">Правило: 120+ кликов за 14 дней, ноль конверсий. Освобождено 480 ₽/нед</div>
+        </div>
+        <div><span class="tag">применено</span></div>
+      </div>
+      <div class="entry">
+        <div class="ts">03:00:48</div>
+        <div><div class="ico" style="background:#2a78d6">–</div></div>
+        <div>
+          <div><b>adgroups.update</b> — добавлено 14 минус-фраз в 4 группы</div>
+          <div class="why">Источник: отчёт по поисковым запросам. Среди добавленных — «репетитор на дом», «курсы переподготовки»</div>
+        </div>
+        <div><span class="tag">применено</span></div>
+      </div>
+      <div class="entry">
+        <div class="ts">03:01:20</div>
+        <div><div class="ico" style="background:#1baf7a">↑</div></div>
+        <div>
+          <div><b>campaigns.update</b> — недельный бюджет «Дети и школьники» 3 500 → 3 900 ₽</div>
+          <div class="why">CPL 563 ₽ против целевых 1 000 ₽. Рост в пределах 20%, подтверждение не требуется</div>
+        </div>
+        <div><span class="tag">применено</span></div>
+      </div>
+      <div class="entry">
+        <div class="ts">03:01:55</div>
+        <div><div class="ico" style="background:#eda100">!</div></div>
+        <div>
+          <div><b>campaigns.update</b> — предложено: бюджет «Онлайн-школа | РФ» 2 500 → 1 200 ₽</div>
+          <div class="why">Сокращение на 52% превышает порог 20% — отправлено на подтверждение оператору в Telegram</div>
+        </div>
+        <div><span class="tag">ждёт ответа</span></div>
+      </div>
+      <div class="entry">
+        <div class="ts">03:02:31</div>
+        <div><div class="ico" style="background:#e34948">✕</div></div>
+        <div>
+          <div><b>ads.update</b> — переписано и отправлено повторно 1 объявление</div>
+          <div class="why">Отклонено модерацией: превосходная степень в заголовке. Формулировка заменена, объект возвращён на проверку</div>
+        </div>
+        <div><span class="tag">применено</span></div>
+      </div>
+      <div class="entry" style="border-bottom:none">
+        <div class="ts">03:03:04</div>
+        <div><div class="ico" style="background:#2a78d6">✓</div></div>
+        <div>
+          <div><b>campaigns.get</b> — сверка состояния аккаунта с конфигурацией</div>
+          <div class="why">Расхождений не найдено: 11 кампаний, 26 групп, 213 фраз</div>
+        </div>
+        <div><span class="tag">проверка</span></div>
+      </div>
+    </div>
+  </div>
+  </div>
+</div>
+
+<!-- ============ 3. TELEGRAM ============ -->
+<div class="shot" id="s3">
+  <div class="badge"><span>Макет интерфейса · не скриншот работающей системы</span><span>ads-autopilot · экран 3 из 4</span></div>
+  <div class="pad" style="display:flex; gap:24px; justify-content:center; padding-bottom:0">
+    <div class="tg">
+      <div class="tg-head">ads-autopilot<small>подтверждение изменений</small></div>
+      <div class="tg-body">
+        <div class="msg">
+          <div class="t">⚠️ Нужно подтверждение</div>
+          Кампания <kbd>SS | Поиск | Онлайн-школа | РФ</kbd><br><br>
+          Предлагаю снизить недельный бюджет <b>2 500 → 1 200 ₽</b>.<br><br>
+          <div class="ln"><span>CPL за 14 дней</span><span>3 180 ₽</span></div>
+          <div class="ln"><span>Целевой CPL</span><span>1 000 ₽</span></div>
+          <div class="ln"><span>Заявок за период</span><span>2</span></div>
+          <div class="ln"><span>Расход</span><span>6 360 ₽</span></div>
+          <br>
+          Сокращение 52% — выше порога 20%, поэтому сам не применяю.
+          <div class="btns">
+            <div class="btn primary">Применить</div>
+            <div class="btn">Отклонить</div>
+            <div class="btn">Детали</div>
+          </div>
+          <div class="time">03:01</div>
+        </div>
+
+        <div class="msg">
+          <div class="t">📊 Отчёт за 7 августа</div>
+          <div class="ln"><span>Расход</span><span>1 940 ₽</span></div>
+          <div class="ln"><span>Клики</span><span>44</span></div>
+          <div class="ln"><span>Заявки</span><span>3</span></div>
+          <div class="ln"><span>CPL</span><span>647 ₽</span></div>
+          <br>
+          Лучшая кампания: <b>Дети и школьники</b>, CPL 563 ₽.<br>
+          Добавлено 14 минус-фраз, снижены ставки на 6 фразах.<br>
+          1 объявление отклонено модерацией — переписано и отправлено повторно.
+          <div class="time">09:00</div>
+        </div>
+
+        <div class="msg">
+          <div class="t">✅ Модерация пройдена</div>
+          Объявление в группе «Английский | взрослые» принято после правки формулировки.
+          <div class="time">14:22</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="width:520px">
+      <div class="app" style="height:100%">
+        <div class="topbar"><div class="logo">Правила подтверждения</div></div>
+        <div style="padding:16px 18px; font-size:13px; line-height:1.65; color:var(--ink-2)">
+          <p style="margin-bottom:12px">Оператор подтверждает изменение, если выполняется хотя бы одно условие:</p>
+          <table style="font-size:12.5px">
+            <tr><th>Событие</th><th class="num">Порог</th></tr>
+            <tr><td>Изменение недельного бюджета</td><td class="num">&gt; 20%</td></tr>
+            <tr><td>Остановка кампании</td><td class="num">всегда</td></tr>
+            <tr><td>Смена стратегии назначения ставок</td><td class="num">всегда</td></tr>
+            <tr><td>Удаление ключевых фраз за раз</td><td class="num">&gt; 20 шт.</td></tr>
+            <tr><td>Изменение географии показов</td><td class="num">всегда</td></tr>
+            <tr><td>Расход за сутки выше плана</td><td class="num">&gt; 30%</td></tr>
+          </table>
+          <p style="margin-top:14px">Всё остальное — корректировки ставок, минус-фразы, отключение площадок РСЯ, повторная отправка отклонённых объявлений — применяется автоматически и попадает в журнал оптимизации.</p>
+          <p style="margin-top:12px">Без ответа оператора в течение 2 часов изменение не применяется и переносится в следующий цикл.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 4. CLI ============ -->
+<div class="shot" id="s4">
+  <div class="badge"><span>Макет интерфейса · не скриншот работающей системы</span><span>ads-autopilot · экран 4 из 4</span></div>
+  <div class="pad">
+    <div class="term">
+      <div class="term-head">
+        <i style="background:#ef6a5e"></i><i style="background:#f5bf4f"></i><i style="background:#61c454"></i>
+        <span>roman@vps · ~/projects/ads-autopilot</span>
+      </div>
+<pre><span class="d">$</span> <span class="w">pnpm campaign:deploy --account smartsay --dry-run</span>
+
+<span class="b">Валидация конфигурации</span>
+  <span class="g">✓</span> 11 кампаний, 26 групп, 213 ключевых фраз, 78 объявлений
+  <span class="g">✓</span> лимиты Директа: заголовки, тексты, быстрые ссылки, уточнения
+  <span class="g">✓</span> дублей фраз между группами не найдено
+  <span class="g">✓</span> все посадочные отвечают 200
+
+<span class="d">Пробный прогон — запросы к API не отправляются.</span>
+
+<span class="d">$</span> <span class="w">pnpm campaign:deploy --account smartsay</span>
+
+<span class="b">Аккаунт</span>   smartsay · RUB · баллы 64 000 / 64 000
+<span class="b">Режим</span>     production · кампании создаются остановленными
+
+  <span class="g">✓</span> campaigns.add      11 объектов      <span class="d">баллы −110</span>
+  <span class="g">✓</span> adgroups.add       26 объектов      <span class="d">баллы −130</span>
+  <span class="g">✓</span> keywords.add      213 объектов      <span class="d">баллы −213</span>
+  <span class="g">✓</span> ads.add            78 объектов      <span class="d">баллы −390</span>
+  <span class="g">✓</span> sitelinks.add       8 наборов       <span class="d">баллы −40</span>
+  <span class="g">✓</span> adextensions.add   10 уточнений     <span class="d">баллы −50</span>
+  <span class="y">⚠</span> keywords.add      <span class="y">1 фраза отклонена: «английский рядом» — стоп-слово</span>
+    <span class="d">→ записано в журнал, остальные объекты созданы</span>
+
+<span class="b">Сверка</span>
+  <span class="g">✓</span> campaigns.get — состояние совпадает с конфигурацией
+
+<span class="w">Готово за 1 мин 12 с.</span> Списано 933 балла, осталось 63 067.
+Все кампании в статусе <span class="y">SUSPENDED</span> — включите показы после проверки:
+  <span class="d">https://direct.yandex.ru/dna/grid/campaigns</span>
+
+<span class="d">$</span> <span class="w">pnpm yd:check</span>
+
+Окружение: production
+Токен: ***HJ-k
+Аккаунт: smartsay (ClientId 1234567, RUB, CLIENT)
+Кампаний в аккаунте: 11
+  <span class="d">2841001</span>  SUSPENDED/ACCEPTED  SS | Поиск | Взрослые | Петергоф
+  <span class="d">2841002</span>  SUSPENDED/ACCEPTED  SS | Поиск | Дети и школьники | Петергоф
+  <span class="d">2841003</span>  SUSPENDED/ACCEPTED  SS | Поиск | Дошкольники 3–6 | Петергоф
+  <span class="d">…</span>
+Баллы: списано 20, осталось 63 047 из 64 000
+<span class="g">Доступ есть — можно заливать кампании.</span>
+
+<span class="d">$</span> <span class="w">▊</span></pre>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
