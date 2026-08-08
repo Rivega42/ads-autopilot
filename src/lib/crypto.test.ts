@@ -29,7 +29,7 @@ describe('crypto', () => {
     const [v, iv, tag, ct] = encrypt('secret').split('.');
     // Меняем один байт данных: GCM обязан поймать это по тегу аутентификации.
     const tamperedCt = Buffer.from(ct!, 'base64url');
-    tamperedCt[0] ^= 0xff;
+    tamperedCt.writeUInt8(tamperedCt.readUInt8(0) ^ 0xff, 0);
     expect(() => decrypt([v, iv, tag, tamperedCt.toString('base64url')].join('.'))).toThrow();
   });
 
