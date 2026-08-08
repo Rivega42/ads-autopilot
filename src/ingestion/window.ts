@@ -2,7 +2,6 @@ import { subDays } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 
 import type { DateRange } from '@/channels/types.js';
-
 import { MSK } from '@/constants.js';
 import { ymdMsk } from '@/lib/dates.js';
 
@@ -43,7 +42,7 @@ export function ymdToDateColumn(ymd: string): Date {
 export function datesInRange(range: DateRange): string[] {
   const out: string[] = [];
   const last = ymdToDateColumn(range.to).getTime();
-  for (let cursor = ymdToDateColumn(range.from); cursor.getTime() <= last; ) {
+  for (let cursor = ymdToDateColumn(range.from); cursor.getTime() <= last;) {
     out.push(cursor.toISOString().slice(0, 10));
     cursor = new Date(cursor.getTime() + 24 * 3600 * 1000);
   }

@@ -1,8 +1,7 @@
 import type { PrismaClient, Provider } from '@prisma/client';
 
-import type { ChannelAdapter, ChannelContext } from '@/channels/types.js';
-
 import { buildContext, getAdapter } from '@/channels/registry.js';
+import type { ChannelAdapter, ChannelContext } from '@/channels/types.js';
 import { prisma } from '@/db/prisma.js';
 
 /**

@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelContext } from '@/channels/types.js';
-
 import {
   fakeAdapter,
   remoteAd,
@@ -153,10 +152,17 @@ describe('syncEntities', () => {
     await syncEntities(
       CLIENT,
       'YANDEX_DIRECT',
-      deps(fakeAdapter('YANDEX_DIRECT', { campaigns: [remoteCampaign()], adGroups: [remoteAdGroup()] })),
+      deps(
+        fakeAdapter('YANDEX_DIRECT', {
+          campaigns: [remoteCampaign()],
+          adGroups: [remoteAdGroup()],
+        }),
+      ),
     );
     const adGroupId = db.store.adGroup[0]?.['id'];
-    db.seed('keyword', [{ id: 'kw-local', adGroupId, phrase: 'seo продвижение', externalId: null }]);
+    db.seed('keyword', [
+      { id: 'kw-local', adGroupId, phrase: 'seo продвижение', externalId: null },
+    ]);
 
     await syncEntities(
       CLIENT,

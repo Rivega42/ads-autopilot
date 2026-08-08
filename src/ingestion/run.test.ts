@@ -1,14 +1,8 @@
+import type { Provider } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Provider } from '@prisma/client';
-
 import type { ChannelContext } from '@/channels/types.js';
-
-import {
-  fakeAdapter,
-  remoteAdGroup,
-  remoteCampaign,
-} from '@/ingestion/__tests__/fake-adapter.js';
+import { fakeAdapter, remoteAdGroup, remoteCampaign } from '@/ingestion/__tests__/fake-adapter.js';
 import { FakePrisma } from '@/ingestion/__tests__/fake-prisma.js';
 import { AuthError } from '@/lib/errors.js';
 

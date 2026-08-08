@@ -1,14 +1,13 @@
 import type { Provider } from '@prisma/client';
 
+import { registeredChannels } from '@/channels/registry.js';
 import type { DateRange } from '@/channels/types.js';
 import type { IngestionDeps } from '@/ingestion/deps.js';
-import type { IngestionFailure } from '@/ingestion/errors.js';
-import type { MetrikaSource, MetrikaSettings } from '@/ingestion/metrika.js';
-
-import { registeredChannels } from '@/channels/registry.js';
 import { resolveDeps } from '@/ingestion/deps.js';
 import { syncEntities } from '@/ingestion/entities.js';
+import type { IngestionFailure } from '@/ingestion/errors.js';
 import { describeFailure, recordFailure } from '@/ingestion/errors.js';
+import type { MetrikaSource, MetrikaSettings } from '@/ingestion/metrika.js';
 import { syncMetrikaConversions } from '@/ingestion/metrika.js';
 import { syncSearchQueries } from '@/ingestion/search-queries.js';
 import { syncStats } from '@/ingestion/stats.js';

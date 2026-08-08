@@ -1,4 +1,10 @@
-import { AdFormat, AdGroupStatus, CampaignStatus, KeywordStatus, ModerationStatus } from '@prisma/client';
+import {
+  AdFormat,
+  AdGroupStatus,
+  CampaignStatus,
+  KeywordStatus,
+  ModerationStatus,
+} from '@prisma/client';
 import { Prisma } from '@prisma/client';
 
 /** Decimal(12,2) — бюджеты и ставки. */

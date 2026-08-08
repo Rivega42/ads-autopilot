@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelContext, StatRow } from '@/channels/types.js';
-
 import { fakeAdapter } from '@/ingestion/__tests__/fake-adapter.js';
 import { FakePrisma } from '@/ingestion/__tests__/fake-prisma.js';
 

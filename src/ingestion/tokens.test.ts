@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelContext } from '@/channels/types.js';
-
 import { FakePrisma } from '@/ingestion/__tests__/fake-prisma.js';
 import { AuthError } from '@/lib/errors.js';
 

@@ -9,7 +9,6 @@ import {
 
 import type { ChannelAdapter, ChannelContext, RemoteAd, RemoteKeyword } from '@/channels/types.js';
 import type { IngestionDeps } from '@/ingestion/deps.js';
-
 import { resolveDeps } from '@/ingestion/deps.js';
 import {
   MONEY_SCALE,

@@ -2,13 +2,12 @@ import { StatEntityType, type PrismaClient } from '@prisma/client';
 
 import type { DateRange } from '@/channels/types.js';
 import type { MetrikaClientOptions, MetrikaGoalStat } from '@/clients/metrika.js';
-import type { IngestionDeps } from '@/ingestion/deps.js';
-
 import { MetrikaClient } from '@/clients/metrika.js';
+import { env } from '@/env.js';
+import type { IngestionDeps } from '@/ingestion/deps.js';
 import { resolveDeps } from '@/ingestion/deps.js';
 import { ratioOrNull, SPEND_SCALE } from '@/ingestion/mapping.js';
 import { STATS_WINDOW_DAYS, trailingWindowMsk, ymdToDateColumn } from '@/ingestion/window.js';
-import { env } from '@/env.js';
 import { logger } from '@/logger.js';
 
 const log = logger.child({ scope: 'ingestion:metrika' });
@@ -72,9 +71,7 @@ export function readMetrikaSettings(credentials: Record<string, unknown>): Metri
   const counterId = num(credentials['metrikaCounterId'] ?? credentials['metrika_counter_id']);
   const goalId = num(credentials['metrikaGoalId'] ?? credentials['metrika_goal_id']);
   const token =
-    str(credentials['metrikaToken']) ??
-    env.YANDEX_METRIKA_TOKEN ??
-    str(credentials['accessToken']);
+    str(credentials['metrikaToken']) ?? env.YANDEX_METRIKA_TOKEN ?? str(credentials['accessToken']);
 
   if (counterId === undefined || goalId === undefined || token === undefined) return null;
 

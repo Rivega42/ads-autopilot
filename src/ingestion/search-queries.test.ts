@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelContext, SearchQueryRow } from '@/channels/types.js';
-
 import { fakeAdapter } from '@/ingestion/__tests__/fake-adapter.js';
 import { FakePrisma } from '@/ingestion/__tests__/fake-prisma.js';
 
@@ -107,7 +106,9 @@ describe('syncSearchQueries', () => {
   });
 
   it('игнорирует архивные группы при разборе адреса', async () => {
-    db.seed('adGroup', [{ id: 'ag-old', campaignId: 'camp-1', externalId: '199', status: 'ARCHIVED' }]);
+    db.seed('adGroup', [
+      { id: 'ag-old', campaignId: 'camp-1', externalId: '199', status: 'ARCHIVED' },
+    ]);
     const adapter = fakeAdapter('YANDEX_DIRECT', { searchQueries: [queryRow()] });
 
     const result = await syncSearchQueries(CLIENT, 'YANDEX_DIRECT', deps(adapter));

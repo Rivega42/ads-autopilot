@@ -2,9 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChannelContext } from '@/channels/types.js';
 import type { MetrikaGoalStat } from '@/clients/metrika.js';
-import type { MetrikaSource } from '@/ingestion/metrika.js';
-
 import { FakePrisma } from '@/ingestion/__tests__/fake-prisma.js';
+import type { MetrikaSource } from '@/ingestion/metrika.js';
 
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 

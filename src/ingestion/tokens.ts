@@ -1,18 +1,17 @@
 import type { Provider } from '@prisma/client';
 
 import type { ChannelContext } from '@/channels/types.js';
+import { getVkAccessToken } from '@/clients/vk-ads/auth.js';
 import type { YandexCredentials } from '@/clients/yandex-direct/auth.js';
-import type { IngestionDeps } from '@/ingestion/deps.js';
-import type { IngestionFailure } from '@/ingestion/errors.js';
-
 import {
   isTokenNearExpiry,
   parseCredentials,
   prismaCredentialStore,
   refreshAccessToken,
 } from '@/clients/yandex-direct/auth.js';
-import { getVkAccessToken } from '@/clients/vk-ads/auth.js';
+import type { IngestionDeps } from '@/ingestion/deps.js';
 import { resolveDeps } from '@/ingestion/deps.js';
+import type { IngestionFailure } from '@/ingestion/errors.js';
 import { describeFailure, recordFailure } from '@/ingestion/errors.js';
 import { logger } from '@/logger.js';
 

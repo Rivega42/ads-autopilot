@@ -2,7 +2,6 @@ import { AdGroupStatus, type PrismaClient, type Provider } from '@prisma/client'
 
 import type { DateRange, SearchQueryRow } from '@/channels/types.js';
 import type { IngestionDeps } from '@/ingestion/deps.js';
-
 import { resolveDeps } from '@/ingestion/deps.js';
 import { SPEND_SCALE, toDecimal } from '@/ingestion/mapping.js';
 import { STATS_WINDOW_DAYS, trailingWindowMsk, ymdToDateColumn } from '@/ingestion/window.js';
