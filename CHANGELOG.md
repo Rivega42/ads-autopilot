@@ -10,13 +10,23 @@
 ## [Unreleased]
 
 ### Added
+
 - Milestone 1 в процессе.
+- Первая реальная рекламная кампания: аккаунт Яндекс Директа для языковой
+  школы SmartSay (`src/campaigns/smartsay/`, `docs/campaigns/smartsay/`).
+  11 кампаний, 26 групп, 213 ключевых фраз, 114 общих минус-слов
+- `src/campaigns/smartsay/limits.ts` — лимиты Яндекс Директа и валидаторы
+  (заголовки, тексты, быстрые ссылки, уточнения, длина и число слов во фразе).
+  Переиспользуется продуктом при генерации креативов
+- `pnpm campaign:smartsay` — генерация файлов для загрузки в Директ Коммандер
+  из типизированного blueprint'а
 
 ---
 
 ## [0.0.1] — 2026-08-08
 
 ### Added
+
 - Начальный commit с ТЗ (`TZ.md`, 60 КБ, 14 разделов + приложения)
 - Полное описание Full-AI архитектуры (раздел 13 ТЗ)
 - Поддержка 7 рекламных каналов: Яндекс Директ, VK Реклама, TikTok Marketing,
@@ -28,6 +38,7 @@
 - CI workflow (базовый линт + typecheck + тесты)
 
 ### Infrastructure
+
 - Приватный GitHub-репо `Rivega42/ads-autopilot`
 - Default branch: `main`
 - Лицензия: Proprietary
@@ -35,5 +46,6 @@
 ---
 
 Ссылки:
+
 - [Unreleased]: https://github.com/Rivega42/ads-autopilot/compare/v0.0.1...HEAD
 - [0.0.1]: https://github.com/Rivega42/ads-autopilot/releases/tag/v0.0.1
