@@ -48,11 +48,13 @@ export function applyTurnUpdates(
   const rejected: RejectedUpdate[] = [];
   const accepted: BriefField[] = [];
 
-  for (const [field, value] of Object.entries(turn.updates) as [BriefField, unknown][]) {
+  const evidence = turn.evidence ?? {};
+
+  for (const [field, value] of Object.entries(turn.updates ?? {}) as [BriefField, unknown][]) {
     if (value === undefined) continue;
 
     if (isMoneyField(field)) {
-      const quote = turn.evidence[field];
+      const quote = evidence[field];
       if (quote === undefined || quote.trim() === '') {
         rejected.push({ field, reason: 'no-evidence', value });
         continue;

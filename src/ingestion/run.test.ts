@@ -158,23 +158,26 @@ describe('runIngestion', () => {
     adapter.getStats = async () => {
       throw new Error('report queue timed out');
     };
+    const getGoalConversions = vi.fn(async () => []);
 
     const summary = await runIngestion({
       db: db.asPrisma(),
       channels: CHANNELS,
+      clientId: 'cl1',
       adapterFor: () => adapter,
       contextFor: async (clientId): Promise<ChannelContext> => ({
         clientId,
-        credentials: {},
+        credentials: { metrikaCounterId: 1, metrikaGoalId: 2, accessToken: 'y0' },
         dryRun: true,
       }),
       range: RANGE,
-      metrikaFor: () => ({ getGoalConversions: async () => [] }),
+      metrikaFor: () => ({ getGoalConversions }),
     });
 
-    expect(summary.failures.map((f) => f.stage)).toEqual(['stats', 'stats']);
-    // Сущности всё равно записаны — их этап прошёл до падения отчёта.
-    expect(db.store.campaign).toHaveLength(2);
+    expect(summary.failures.map((f) => f.stage)).toEqual(['stats']);
+    // Сущности записаны, а конверсии всё равно поехали: отчёт упал, токен жив.
+    expect(db.store.campaign).toHaveLength(1);
+    expect(getGoalConversions).toHaveBeenCalledTimes(1);
   });
 
   it('повторный прогон не создаёт дублей', async () => {

@@ -14,17 +14,17 @@ export const interviewTurnSchema = z.object({
   asking: briefFieldSchema.nullish(),
 
   /** Только то, что стало известно из ПОСЛЕДНЕГО ответа клиента. */
-  updates: briefDraftSchema.default({}),
+  updates: briefDraftSchema.optional(),
 
   /**
    * Цитаты из ответов клиента для денежных полей: `{ "targetCpaRub": "2000 рублей" }`.
    * Интервью не принимает сумму, цитату для которой не нашло в сообщениях клиента, —
    * это единственная механическая защита от выдуманного CPA.
    */
-  evidence: z.record(z.string(), z.string()).default({}),
+  evidence: z.record(z.string(), z.string()).optional(),
 
   /** Модель считает интервью законченным. Решает всё равно схема брифа, не модель. */
-  done: z.boolean().default(false),
+  done: z.boolean().optional(),
 });
 
 export type InterviewTurn = z.infer<typeof interviewTurnSchema>;
