@@ -19,6 +19,7 @@ export type CallbackOutcomeKind =
   | 'already_handled'
   | 'expired'
   | 'not_found'
+  | 'forbidden'
   | 'ignored';
 
 export interface CallbackOutcome {
@@ -34,8 +35,19 @@ export interface CallbackRequest {
   data: string;
   /** Кто нажал: `@username` либо telegram id — уходит в `ChangeLog.approvedBy`. */
   actor: string;
+  /**
+   * Чат, в котором нажали кнопку. Обязателен: Telegram сохраняет инлайн-клавиатуру
+   * при пересылке сообщения, поэтому без сверки с `PendingApproval.chatId` карточку
+   * может нажать кто угодно, кому её переслали. undefined — источник неизвестен,
+   * такое нажатие отклоняем.
+   */
+  chatId: string | undefined;
   now?: Date;
 }
+
+/** Сообщение об отказе одно на все случаи: чужому не подсказываем, что заявка существует. */
+const FORBIDDEN_ANSWER =
+  'Эта карточка адресована другому чату — решение по ней можно принять только там.';
 
 /**
  * Обработка нажатия кнопки.
@@ -46,6 +58,9 @@ export interface CallbackRequest {
  * гонкой. Вместо этого статус захватывается условным UPDATE ... WHERE
  * status = PENDING: атомарность обеспечивает Postgres, выигрывает ровно один
  * вызов, остальные получают affected = 0 и вежливый отказ.
+ *
+ * Перед этим — проверка чата. Гонки здесь нет: `chatId` заявки неизменен, поэтому
+ * обычное чтение достаточно, а захват по-прежнему остаётся атомарным.
  */
 export async function processApprovalCallback(req: CallbackRequest): Promise<CallbackOutcome> {
   const parsed = decodeCallbackData(req.data);
@@ -54,7 +69,19 @@ export async function processApprovalCallback(req: CallbackRequest): Promise<Cal
   const now = req.now ?? new Date();
   const { approvalId, verdict } = parsed;
 
-  if (verdict === 'details') return details(approvalId);
+  const approval = await prisma.pendingApproval.findUnique({ where: { id: approvalId } });
+  if (!approval) {
+    return { kind: 'not_found', answer: 'Заявка не найдена — возможно, она удалена.', alert: true };
+  }
+  if (!chatAllowed(approval.chatId, req.chatId)) {
+    log.warn(
+      { approvalId, actor: req.actor, from: req.chatId, expected: approval.chatId, verdict },
+      'approval callback from foreign chat rejected',
+    );
+    return { kind: 'forbidden', answer: FORBIDDEN_ANSWER, alert: true };
+  }
+
+  if (verdict === 'details') return details(approval);
 
   const claimed = await claim(approvalId, verdict, req.actor, now);
   if (!claimed) return explainLostClaim(approvalId, now);
@@ -67,12 +94,17 @@ export async function processApprovalCallback(req: CallbackRequest): Promise<Cal
 
   const outcome = await applyApproval(approvalId, req.actor);
   if (outcome.status === 'APPLIED') {
+    const head = outcome.dryRun
+      ? 'Одобрено. Dry-run: в кабинет ничего не отправлено.'
+      : outcome.noop
+        ? 'Одобрено. Менять было нечего — в кабинете ничего не изменилось.'
+        : 'Одобрено и применено.';
     return {
       kind: 'applied',
-      answer: outcome.dryRun
-        ? 'Одобрено. Dry-run: в кабинет ничего не отправлено.'
-        : 'Одобрено и применено.',
-      alert: false,
+      // Предупреждение означает, что изменение выполнено, но что-то рядом не записалось;
+      // молчать об этом нельзя — оператор должен пойти и проверить.
+      answer: outcome.warning ? `${head} Внимание: ${outcome.warning}` : head,
+      alert: outcome.warning !== undefined,
     };
   }
   if (outcome.status === 'FAILED') {
@@ -83,6 +115,12 @@ export async function processApprovalCallback(req: CallbackRequest): Promise<Cal
     };
   }
   return { kind: 'already_handled', answer: 'Заявка уже обработана.', alert: false };
+}
+
+/** Нажатие засчитывается, только если пришло из того же чата, куда ушла карточка. */
+function chatAllowed(approvalChatId: string, from: string | undefined): boolean {
+  if (from === undefined) return false;
+  return from.trim() === approvalChatId.trim();
 }
 
 /**
@@ -133,11 +171,7 @@ async function explainLostClaim(approvalId: string, now: Date): Promise<Callback
   };
 }
 
-async function details(approvalId: string): Promise<CallbackOutcome> {
-  const approval = await prisma.pendingApproval.findUnique({ where: { id: approvalId } });
-  if (!approval) {
-    return { kind: 'not_found', answer: 'Заявка не найдена.', alert: true };
-  }
+function details(approval: PendingApproval): CallbackOutcome {
   const parsed = approvalActionSchema.safeParse(approval.payload);
   const body = parsed.success
     ? renderDetails(parsed.data)
@@ -174,6 +208,17 @@ export function actorFrom(ctx: Context): string {
 }
 
 /**
+ * Сколько ждём результат, прежде чем ответить на callback_query «в процессе».
+ *
+ * callback_query живёт недолго: применение с ретраями площадки идёт до двух минут,
+ * и к его концу `answerCallbackQuery` уже отвечает ошибкой — у человека остаются
+ * вечные часики. Поэтому длинную операцию квитируем заранее, а итог он видит в карточке.
+ */
+export const ANSWER_DEADLINE_MS = 2_000;
+
+const IN_PROGRESS_ANSWER = 'Принято, применяю. Итог появится в карточке.';
+
+/**
  * Адаптер grammY. Отвечать на callback_query обязательно, иначе у клиента
  * бесконечно крутится индикатор загрузки — поэтому answer идёт даже на падении.
  */
@@ -182,17 +227,32 @@ export async function handleApprovalCallback(ctx: Context): Promise<void> {
   const queryId = ctx.callbackQuery?.id;
   if (!data || !queryId) return;
 
-  let outcome: CallbackOutcome;
+  let answered = false;
+  let answerTask: Promise<void> = Promise.resolve();
+  const answerOnce = (text: string, alert: boolean): void => {
+    if (answered) return;
+    answered = true;
+    answerTask = getMessenger()
+      .answerCallbackQuery(queryId, text, alert)
+      .catch((err: unknown) => {
+        log.warn({ err: describeError(err) }, 'cannot answer callback query');
+      });
+  };
+
+  const timer = setTimeout(() => answerOnce(IN_PROGRESS_ANSWER, false), ANSWER_DEADLINE_MS);
   try {
-    outcome = await processApprovalCallback({ data, actor: actorFrom(ctx) });
+    const outcome = await processApprovalCallback({
+      data,
+      actor: actorFrom(ctx),
+      // Пересланная карточка приходит из другого чата — там нажатие не засчитается.
+      chatId: ctx.chat?.id === undefined ? undefined : String(ctx.chat.id),
+    });
+    answerOnce(outcome.answer, outcome.alert);
   } catch (err) {
     log.error({ err: describeError(err), data }, 'approval callback crashed');
-    outcome = { kind: 'apply_failed', answer: 'Внутренняя ошибка, попробуйте позже.', alert: true };
-  }
-
-  try {
-    await getMessenger().answerCallbackQuery(queryId, outcome.answer, outcome.alert);
-  } catch (err) {
-    log.warn({ err: describeError(err) }, 'cannot answer callback query');
+    answerOnce('Внутренняя ошибка, попробуйте позже.', true);
+  } finally {
+    clearTimeout(timer);
+    await answerTask;
   }
 }

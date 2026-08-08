@@ -16,7 +16,7 @@ import type {
 import { ChannelError } from '@/lib/errors.js';
 import { scoped } from '@/lib/logger.js';
 import { VK_CHANNEL } from '@/clients/vk/auth.js';
-import { createVkHttpClient, type VkHttpClient } from '@/clients/vk/http.js';
+import { createVkHttpClient, type VkHttpClient, type VkHttpDeps } from '@/clients/vk/http.js';
 import {
   chunk,
   listAdGroups,
@@ -248,12 +248,13 @@ export class VkAdsAdapter implements ChannelAdapter {
     };
     if (ctx.dryRun || changes.length === 0) return dry(plan);
 
-    const applied = await massUpdateEntities(
-      this.http(ctx),
-      VK_PATHS.adGroups,
-      changes.map((c) => ({ id: c.keywordExternalId, max_price: c.bid })),
-    );
-    return { applied: true, plan, result: { updated: applied } };
+    // Деньги проверяем до сети и целиком: половина применённых ставок хуже, чем ни одной.
+    const patches = changes.map((c) => ({
+      id: c.keywordExternalId,
+      max_price: toVkMoney(c.bid, 'max_price', { adGroupExternalId: c.keywordExternalId }),
+    }));
+    const outcome = await massUpdateEntities(this.http(ctx), VK_PATHS.adGroups, patches);
+    return writeResultOf(plan, outcome);
   }
 
   async setBudgets(ctx: ChannelContext, changes: BudgetChange[]): Promise<WriteResult> {
@@ -267,12 +268,14 @@ export class VkAdsAdapter implements ChannelAdapter {
     };
     if (ctx.dryRun || changes.length === 0) return dry(plan);
 
-    const applied = await massUpdateEntities(
-      this.http(ctx),
-      VK_PATHS.adPlans,
-      changes.map((c) => ({ id: c.campaignExternalId, budget_limit_day: c.dailyBudget })),
-    );
-    return { applied: true, plan, result: { updated: applied } };
+    const patches = changes.map((c) => ({
+      id: c.campaignExternalId,
+      budget_limit_day: toVkMoney(c.dailyBudget, 'budget_limit_day', {
+        adPlanExternalId: c.campaignExternalId,
+      }),
+    }));
+    const outcome = await massUpdateEntities(this.http(ctx), VK_PATHS.adPlans, patches);
+    return writeResultOf(plan, outcome);
   }
 
   pauseEntities(
