@@ -4,8 +4,8 @@ import {
   CampaignStatus,
   KeywordStatus,
   ModerationStatus,
+  Prisma,
 } from '@prisma/client';
-import { Prisma } from '@prisma/client';
 
 /** Decimal(12,2) — бюджеты и ставки. */
 export const MONEY_SCALE = 2;

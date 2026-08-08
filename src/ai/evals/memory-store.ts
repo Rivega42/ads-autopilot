@@ -63,9 +63,14 @@ export function createMemoryBriefStore(seed: readonly MemoryBriefRow[] = []): Me
     return undefined;
   };
 
+  // Копия, а не ссылка: Prisma отдаёт снимок строки, и оптимистичная блокировка
+  // проверяема только тогда, когда прочитанный `updatedAt` не меняется задним числом.
+  const snapshot = (row: MemoryBriefRow | undefined): MemoryBriefRow | null =>
+    row === undefined ? null : { ...row };
+
   const client = {
     findUnique: (args: FindArgs): Promise<MemoryBriefRow | null> =>
-      Promise.resolve(findRow(args.where) ?? null),
+      Promise.resolve(snapshot(findRow(args.where))),
 
     create: (args: CreateArgs): Promise<MemoryBriefRow> => {
       if (rows.has(args.data.clientId)) {
@@ -83,7 +88,7 @@ export function createMemoryBriefStore(seed: readonly MemoryBriefRow[] = []): Me
         updatedAt: nextUpdatedAt(),
       };
       rows.set(row.clientId, row);
-      return Promise.resolve(row);
+      return Promise.resolve({ ...row });
     },
 
     updateMany: (args: UpdateManyArgs): Promise<{ count: number }> => {
