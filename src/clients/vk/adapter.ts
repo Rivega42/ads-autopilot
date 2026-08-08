@@ -328,9 +328,46 @@ export class VkAdsAdapter implements ChannelAdapter {
 
     const created = await createEntity(http, VK_PATHS.banners, payload);
     const createdId = readCreatedId(created);
+    if (!createdId) {
+      // Без подтверждённого id замены удалять нечем подкреплённое: если схема
+      // ответа поехала, старый баннер снесён, а что создалось — неизвестно.
+      throw new ChannelError(
+        VK_CHANNEL,
+        `VK banner create returned no id, keeping ${adExternalId} alive`,
+        {
+          code: 'VK_BANNER_CREATE_NO_ID',
+          retryable: false,
+          context: { adExternalId, ack: describeAck(created) },
+        },
+      );
+    }
+
     // Старый удаляем только после успешного создания: иначе при падении
     // клиент останется вообще без объявления в группе.
-    await deleteEntity(http, VK_PATHS.banners, adExternalId);
+    try {
+      await deleteEntity(http, VK_PATHS.banners, adExternalId);
+    } catch (err) {
+      // Замена уже крутится и тратит деньги. Просто пробросить ошибку нельзя:
+      // модератор повторит вызов и создаст третий баннер. Поэтому гасим старый
+      // (status — абсолютное присваивание, повтор безопасен) и отдаём ошибку,
+      // из которой видно, что половина операции применена.
+      const paused = await pauseQuietly(http, adExternalId);
+      throw new ChannelError(
+        VK_CHANNEL,
+        `VK banner ${adExternalId} replaced by ${createdId}, but deleting the old one failed`,
+        {
+          code: 'VK_BANNER_REPLACE_ORPHAN',
+          retryable: false,
+          context: {
+            adExternalId,
+            createdBannerExternalId: createdId,
+            oldBannerPaused: paused,
+            note: 'не повторять целиком: замена уже создана, повтор создаст третий баннер',
+          },
+          cause: err,
+        },
+      );
+    }
 
     return {
       applied: true,
@@ -360,8 +397,8 @@ export class VkAdsAdapter implements ChannelAdapter {
     }
     if (ctx.dryRun || externalIds.length === 0) return dry(plan);
 
-    const applied = await setEntitiesStatus(this.http(ctx), path, externalIds, status);
-    return { applied: true, plan, result: { updated: applied } };
+    const outcome = await setEntitiesStatus(this.http(ctx), path, externalIds, status);
+    return writeResultOf(plan, outcome);
   }
 
   /** Фильтр по родителям тоже режется по 200 значений — это тот же лимит батча. */

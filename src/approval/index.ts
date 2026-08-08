@@ -11,14 +11,19 @@ export {
   requestApprovalIfNeeded,
   type CreateApprovalOptions,
 } from '@/approval/create.js';
-export { applyApproval, type ApplyOutcome } from '@/approval/apply.js';
+export { applyApproval, APPLY_LEASE_PREFIX, type ApplyOutcome } from '@/approval/apply.js';
 export {
   handleApprovalCallback,
   processApprovalCallback,
   type CallbackOutcome,
   type CallbackRequest,
 } from '@/approval/callbacks.js';
-export { expireApprovals, type ExpireResult } from '@/approval/expire.js';
+export {
+  expireApprovals,
+  reconcileStuckApprovals,
+  STUCK_APPROVAL_MINUTES,
+  type ExpireResult,
+} from '@/approval/expire.js';
 export {
   matchApprovalRule,
   requiresApproval,
@@ -31,9 +36,12 @@ export {
 export {
   approvalActionSchema,
   parseAction,
+  buildApprovalPayload,
+  readApprovalMeta,
   type ApprovalAction,
   type ApprovalActionKind,
   type ApprovalActionInput,
+  type ApprovalMeta,
 } from '@/approval/types.js';
 export { registerActionExecutor, type ActionExecutor } from '@/approval/execute.js';
 export {

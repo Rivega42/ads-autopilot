@@ -62,10 +62,86 @@ export async function expireApprovals(now: Date = new Date()): Promise<ExpireRes
     await notifyExpired(approval.chatId, approval.payload, approval.summary);
   }
 
-  if (expired > 0 || raced > 0) {
-    log.info({ expired, raced }, 'approvals expired');
+  // Сверку зовём отсюда: `expire-approvals` — единственный крон, который есть у
+  // approval-модуля, а зависшая заявка так же «не доведена до конца», как просроченная.
+  const stuck = await reconcileStuckApprovals(now);
+
+  if (expired > 0 || raced > 0 || stuck > 0) {
+    log.info({ expired, raced, stuck }, 'approvals expired');
   }
-  return { expired, raced };
+  return { expired, raced, stuck };
+}
+
+/**
+ * Сверка зависших заявок.
+ *
+ * Между захватом (APPROVED) и применением может пройти до двух минут реальной работы
+ * с площадкой. Перезапуск пода в этом окне оставляет строку APPROVED навсегда:
+ * крон экспирации смотрит только PENDING, кнопки в карточке молчат «уже обработана»,
+ * и никто не знает, ушли деньги или нет.
+ *
+ * Автоматически такие заявки НЕ применяются: неизвестно, успел ли пройти запрос в
+ * кабинет, и повторное применение стоит денег клиента. Наше дело — показать их человеку.
+ *
+ * @returns сколько заявок показали в этом прогоне.
+ */
+export async function reconcileStuckApprovals(now: Date = new Date()): Promise<number> {
+  const threshold = new Date(now.getTime() - STUCK_APPROVAL_MINUTES * 60_000);
+  const candidates = await prisma.pendingApproval.findMany({
+    where: {
+      status: ApprovalStatus.APPROVED,
+      respondedAt: { lte: threshold },
+      // Явная ветка `error: null`: LIKE по NULL даёт NULL, и строка без ошибки
+      // в условие `not startsWith` не попала бы.
+      OR: [{ error: null }, { error: { not: { startsWith: STUCK_NOTIFIED_PREFIX } } }],
+    },
+    take: 100,
+    orderBy: { respondedAt: 'asc' },
+  });
+
+  let notified = 0;
+  for (const approval of candidates) {
+    // Тем же условным UPDATE: два воркера не должны написать про одну заявку дважды.
+    const res = await prisma.pendingApproval.updateMany({
+      where: {
+        id: approval.id,
+        status: ApprovalStatus.APPROVED,
+        OR: [{ error: null }, { error: { not: { startsWith: STUCK_NOTIFIED_PREFIX } } }],
+      },
+      data: {
+        error: `${STUCK_NOTIFIED_PREFIX}${now.toISOString()} | было: ${approval.error ?? '—'}`,
+      },
+    });
+    if (res.count === 0) continue;
+    notified += 1;
+
+    log.error(
+      { approvalId: approval.id, respondedAt: approval.respondedAt, err: approval.error },
+      'approval stuck in APPROVED, apply outcome unknown',
+    );
+    await notifyStuck(approval.chatId, approval.summary, approval.respondedBy);
+  }
+  return notified;
+}
+
+async function notifyStuck(
+  chatId: string,
+  summary: string,
+  respondedBy: string | null,
+): Promise<void> {
+  const who = respondedBy ? ` (${respondedBy})` : '';
+  const what = summary.split('\n')[1] || summary;
+  try {
+    await getMessenger().sendMessage(
+      chatId,
+      `⚠️ Заявка одобрена${who} более ${STUCK_APPROVAL_MINUTES} минут назад, ` +
+        'но результат применения неизвестен: процесс прервался.\n' +
+        `${what}\n` +
+        'Автоматически ничего не повторяем — проверьте кабинет вручную.',
+    );
+  } catch (err) {
+    log.warn({ chatId, err: describeError(err) }, 'cannot notify about stuck approval');
+  }
 }
 
 /**
