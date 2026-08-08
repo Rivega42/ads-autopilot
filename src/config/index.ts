@@ -16,7 +16,8 @@ const boolish = (def: boolean) =>
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+  // 'silent' поддерживается pino и нужен тестам, чтобы прогон не тонул в логах.
+  LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']).default('info'),
   API_PORT: z.coerce.number().int().positive().default(3000),
   TZ: z.string().default('Europe/Moscow'),
 
