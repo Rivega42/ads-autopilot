@@ -206,9 +206,7 @@ export class FakeDb {
       const ids = where.entityId?.in;
       const broken = this.failOn.statsForClient;
       if (broken && this.campaigns.some((c) => c.clientId === broken.clientId)) {
-        const owned = this.campaigns
-          .filter((c) => c.clientId === broken.clientId)
-          .map((c) => c.id);
+        const owned = this.campaigns.filter((c) => c.clientId === broken.clientId).map((c) => c.id);
         if (ids?.some((id) => owned.includes(id))) throw broken.error;
       }
       return this.stats.filter(

@@ -327,7 +327,8 @@ export async function runAlertScan(options: AlertOptions = {}): Promise<AlertRun
 
   // Проверка расхода дорогая, а вчерашние цифры между тиками не меняются:
   // пускаем её раз в час, если вызывающий не потребовал обратного явно.
-  const checkSpend = options.checkSpend ?? limiter.allow(SPEND_SCAN_KEY, now, SPEND_SCAN_INTERVAL_MS);
+  const checkSpend =
+    options.checkSpend ?? limiter.allow(SPEND_SCAN_KEY, now, SPEND_SCAN_INTERVAL_MS);
 
   const alerts = await detectAlerts({ ...options, checkSpend });
   const summary: AlertRunSummary = {

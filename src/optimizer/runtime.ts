@@ -1,10 +1,4 @@
-import { Prisma } from '@prisma/client';
-
-import { buildContext, getAdapter } from '@/channels/registry.js';
-import type { StatLevel } from '@/channels/types.js';
-import { prisma } from '@/db/prisma.js';
-import { describeError } from '@/lib/errors.js';
-import { logger } from '@/logger.js';
+import { Prisma, type Provider } from '@prisma/client';
 
 import type {
   ApplyDb,
@@ -12,7 +6,13 @@ import type {
   PlatformWriteRequest,
   PlatformWriteResult,
 } from './apply.js';
-import type { DecisionAction, OptimizerEntityType } from './types.js';
+import type { OptimizerEntityType } from './types.js';
+
+import { buildContext, getAdapter } from '@/channels/registry.js';
+import type { StatLevel } from '@/channels/types.js';
+import { prisma } from '@/db/prisma.js';
+import { describeError } from '@/lib/errors.js';
+import { logger } from '@/logger.js';
 
 const log = logger.child({ scope: 'optimizer.runtime' });
 
@@ -136,24 +136,14 @@ export function createPlatformWriter(): (
 
 interface ResolvedTarget {
   clientId: string;
-  provider: Awaited<ReturnType<typeof getProviderOf>>;
+  provider: Provider;
   externalId: string;
-}
-
-type ProviderOf = ResolvedTarget['provider'];
-
-async function getProviderOf(campaignId: string) {
-  const row = await prisma.campaign.findUnique({
-    where: { id: campaignId },
-    select: { provider: true },
-  });
-  return row?.provider ?? 'YANDEX_DIRECT';
 }
 
 async function resolveTarget(
   entityType: OptimizerEntityType,
   entityId: string,
-): Promise<{ clientId: string; provider: ProviderOf; externalId: string } | null> {
+): Promise<ResolvedTarget | null> {
   switch (entityType) {
     case 'CAMPAIGN': {
       const row = await prisma.campaign.findUnique({

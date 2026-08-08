@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { detectAnomalies, detectSpendOutlier, DEFAULT_THRESHOLDS } from '@/reporter/anomalies.js';
-import { emptyCoverage, type CampaignMetrics, type DailyPoint, type PeriodMetrics } from '@/reporter/metrics.js';
+import {
+  emptyCoverage,
+  type CampaignMetrics,
+  type DailyPoint,
+  type PeriodMetrics,
+} from '@/reporter/metrics.js';
 
 const PERIOD = { from: '2026-08-03', to: '2026-08-09' };
 const PREVIOUS = { from: '2026-07-27', to: '2026-08-02' };

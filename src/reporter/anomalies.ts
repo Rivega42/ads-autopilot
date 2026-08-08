@@ -153,7 +153,9 @@ function collectScope(
     });
   }
 
-  const leadsChange = comparable ? pctChangeOrNull(current.conversions, previous.conversions) : null;
+  const leadsChange = comparable
+    ? pctChangeOrNull(current.conversions, previous.conversions)
+    : null;
   if (leadsChange !== null && leadsChange >= thresholds.spikePct) {
     out.push({
       kind: 'leads_spike',
@@ -277,7 +279,10 @@ export function detectSpendOutlier(
   const last = series[series.length - 1];
   if (!last || !last.hasRows) return null;
 
-  const history = series.slice(0, -1).filter((p) => p.hasRows).map((p) => p.spend);
+  const history = series
+    .slice(0, -1)
+    .filter((p) => p.hasRows)
+    .map((p) => p.spend);
   if (history.length < 3) return null;
 
   const baseline = meanOrNull(history);

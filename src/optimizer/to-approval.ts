@@ -1,9 +1,9 @@
 import type { Provider } from '@prisma/client';
 
-import type { ApprovalAction } from '@/approval/index.js';
-
 import type { ApprovalRequest } from './policy.js';
 import type { Decision } from './types.js';
+
+import type { ApprovalAction } from '@/approval/index.js';
 
 export interface ApprovalTarget {
   clientId: string;

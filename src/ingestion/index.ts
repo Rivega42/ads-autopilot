@@ -8,7 +8,12 @@
  */
 export { resolveDeps, type IngestionDeps } from '@/ingestion/deps.js';
 export { describeFailure, recordFailure, type IngestionFailure } from '@/ingestion/errors.js';
-export { syncEntities, type EntitySyncResult, type LevelSyncCount } from '@/ingestion/entities.js';
+export {
+  syncEntities,
+  MAX_ARCHIVE_SHARE,
+  type EntitySyncResult,
+  type LevelSyncCount,
+} from '@/ingestion/entities.js';
 export {
   syncStats,
   STAT_LEVELS,

@@ -205,7 +205,8 @@ async function syncAdGroups(
     count.archived += await archiveMissing(
       {
         count: () => db.adGroup.count({ where: missing }),
-        archive: () => db.adGroup.updateMany({ where: missing, data: { status: AdGroupStatus.ARCHIVED } }),
+        archive: () =>
+          db.adGroup.updateMany({ where: missing, data: { status: AdGroupStatus.ARCHIVED } }),
       },
       seen.length,
       { campaignId, level: 'adgroup' },
