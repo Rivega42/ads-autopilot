@@ -4,9 +4,9 @@ import { LlmApiError, LlmConfigError } from '../errors.js';
 import type { LlmProvider, LlmRequest, LlmResponse } from '../types.js';
 
 import { env } from '@/env.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('llm:anthropic');
+const log = logger.child({ scope: 'llm:anthropic' });
 
 /**
  * Основной провайдер. Работает через официальный @anthropic-ai/sdk — не через axios:

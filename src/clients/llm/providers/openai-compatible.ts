@@ -3,9 +3,9 @@ import OpenAI, { APIConnectionError, APIError } from 'openai';
 import { LlmApiError, LlmConfigError } from '../errors.js';
 import type { LlmProvider, LlmProviderName, LlmRequest, LlmResponse } from '../types.js';
 
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('llm:openai-compatible');
+const log = logger.child({ scope: 'llm:openai-compatible' });
 
 /**
  * Общая реализация для всех провайдеров, говорящих на протоколе

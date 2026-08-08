@@ -1,4 +1,4 @@
-import { Channel, type Prisma } from '@prisma/client';
+import { ApprovalKind, Provider, type Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 /**
@@ -15,7 +15,7 @@ const statLevelSchema = z.enum(['campaign', 'adgroup', 'ad', 'keyword']);
 /** Поля, общие для всех действий. `reason` — объяснение оптимизатора, оно уходит в карточку. */
 const baseAction = {
   clientId: z.string().min(1),
-  channel: z.nativeEnum(Channel),
+  channel: z.nativeEnum(Provider),
   reason: z.string().min(1),
 };
 
@@ -118,6 +118,28 @@ export type UploadCreativesAction = z.infer<typeof uploadCreativesActionSchema>;
 /** Нормализует произвольный вход в дескриптор (проставляет дефолты, режет лишнее). */
 export function parseAction(input: unknown): ApprovalAction {
   return approvalActionSchema.parse(input);
+}
+
+/**
+ * Вид заявки для колонки `PendingApproval.kind`.
+ *
+ * У возобновления, минус-слов и креативов своего члена в `ApprovalKind` нет, поэтому
+ * они едут на ближайшем по смыслу — так же, как ставки в `src/optimizer/policy.ts`.
+ * Авторитетный вид действия всегда лежит в `payload.kind`; колонка нужна для выборок.
+ */
+const APPROVAL_KIND_BY_ACTION: Record<ApprovalActionKind, ApprovalKind> = {
+  create_campaign: ApprovalKind.NEW_CAMPAIGN,
+  budget_change: ApprovalKind.BUDGET_CHANGE,
+  strategy_change: ApprovalKind.STRATEGY_CHANGE,
+  pause_entities: ApprovalKind.MASS_PAUSE,
+  resume_entities: ApprovalKind.MASS_PAUSE,
+  bid_change: ApprovalKind.BID_CHANGE,
+  add_negatives: ApprovalKind.STRATEGY_CHANGE,
+  upload_creatives: ApprovalKind.STRATEGY_CHANGE,
+};
+
+export function approvalKindOf(action: ApprovalAction): ApprovalKind {
+  return APPROVAL_KIND_BY_ACTION[action.kind];
 }
 
 /**

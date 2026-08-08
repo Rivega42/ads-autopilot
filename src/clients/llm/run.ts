@@ -18,9 +18,9 @@ import {
 import { prisma } from '@/db/prisma.js';
 import { describeError } from '@/lib/errors.js';
 import { withRetry } from '@/lib/retry.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('llm:run');
+const log = logger.child({ scope: 'llm:run' });
 
 /**
  * Единственная дверь к моделям для всего проекта.
@@ -321,7 +321,7 @@ async function recordRun(db: AiRunStore, args: RecordArgs): Promise<string | nul
       },
       select: { id: true },
     });
-    return row.id;
+    return row.id.toString();
   } catch (err) {
     log.error(
       { agent: opts.agent, task: opts.task, err: describeError(err) },

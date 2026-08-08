@@ -1,4 +1,4 @@
-import type { Channel } from '@prisma/client';
+import type { Provider } from '@prisma/client';
 
 import {
   AppError,
@@ -24,7 +24,7 @@ import {
  * Требуемые ТЗ *поведения* при этом все реализованы, просто привязаны к верным кодам.
  */
 
-export const YANDEX_CHANNEL = 'YANDEX_DIRECT' satisfies Channel;
+export const YANDEX_CHANNEL = 'YANDEX_DIRECT' satisfies Provider;
 
 /** Коды, которые встречаются в обработке. Полный список — в документации. */
 export const YandexErrorCode = {

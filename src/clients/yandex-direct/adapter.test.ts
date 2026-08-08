@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { ChannelContext, StatLevel } from '@/channels/types.js';
-import { YandexDirectAdapter } from '@/clients/yandex/adapter.js';
+import { YandexDirectAdapter } from '@/clients/yandex-direct/adapter.js';
 import {
   resetYandexRuntimeState,
   type HttpRequest,
   type HttpResponse,
-} from '@/clients/yandex/http.js';
+} from '@/clients/yandex-direct/http.js';
 
 interface Step {
   status?: number;

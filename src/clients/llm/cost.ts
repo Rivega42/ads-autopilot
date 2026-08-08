@@ -5,9 +5,9 @@ import { LlmBudgetError } from './errors.js';
 
 import { MSK } from '@/constants.js';
 import { mskDateToUtc } from '@/lib/dates.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('llm:cost');
+const log = logger.child({ scope: 'llm:cost' });
 
 export interface ModelPrice {
   /** USD за 1 000 000 входных токенов. */

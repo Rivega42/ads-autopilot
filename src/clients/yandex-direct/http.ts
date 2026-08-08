@@ -2,7 +2,7 @@ import axios from 'axios';
 import PQueue from 'p-queue';
 import type { ZodType } from 'zod';
 
-import { buildAuthHeaders, type YandexCredentials } from '@/clients/yandex/auth.js';
+import { buildAuthHeaders, type YandexCredentials } from '@/clients/yandex-direct/auth.js';
 import {
   extractErrorBody,
   mapHttpStatus,
@@ -11,14 +11,14 @@ import {
   RETRY_SOON_ATTEMPTS,
   shouldRetryYandex,
   YANDEX_CHANNEL,
-} from '@/clients/yandex/errors.js';
+} from '@/clients/yandex-direct/errors.js';
 import { YANDEX_DIRECT_BASE_URL } from '@/constants.js';
 import { env } from '@/env.js';
 import { ChannelError, OutOfUnitsError } from '@/lib/errors.js';
 import { withRetry } from '@/lib/retry.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('yandex.http');
+const log = logger.child({ scope: 'yandex.http' });
 
 /** Жёсткий лимит площадки: не более 5 одновременных запросов от одного рекламодателя. */
 export const MAX_CONCURRENT_REQUESTS = 5;
@@ -357,9 +357,7 @@ export class YandexHttpClient {
     };
 
     if (opts.bypassQueue) return run();
-    return getQueue(queues, this.advertiserKey, MAX_CONCURRENT_REQUESTS).add(run, {
-      throwOnTimeout: true,
-    });
+    return getQueue(queues, this.advertiserKey, MAX_CONCURRENT_REQUESTS).add(run);
   }
 
   /**

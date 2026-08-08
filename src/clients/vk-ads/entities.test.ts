@@ -12,8 +12,8 @@ import {
   VK_DEFAULT_STATUSES,
   VK_PATHS,
   VK_STATUS_BLOCKED,
-} from '@/clients/vk/entities.js';
-import { RateLimitGovernor, VkHttpClient, type VkTransport } from '@/clients/vk/http.js';
+} from '@/clients/vk-ads/entities.js';
+import { RateLimitGovernor, VkHttpClient, type VkTransport } from '@/clients/vk-ads/http.js';
 import { ChannelError } from '@/lib/errors.js';
 
 interface Recorded {

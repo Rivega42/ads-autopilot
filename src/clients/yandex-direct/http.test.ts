@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import type { YandexCredentials } from '@/clients/yandex/auth.js';
+import type { YandexCredentials } from '@/clients/yandex-direct/auth.js';
 import {
   MAX_CONCURRENT_REQUESTS,
   parseUnitsHeader,
@@ -10,7 +10,7 @@ import {
   type HttpRequest,
   type HttpResponse,
   type UnitsLedgerWriter,
-} from '@/clients/yandex/http.js';
+} from '@/clients/yandex-direct/http.js';
 import { AuthError, OutOfUnitsError } from '@/lib/errors.js';
 
 // ── Тестовая обвязка: сеть не трогаем, Prisma не поднимаем ───────────────────

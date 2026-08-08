@@ -1,7 +1,7 @@
 import { AppError, describeError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('retry');
+const log = logger.child({ scope: 'retry' });
 
 export interface RetryOptions {
   /** Сколько всего попыток, включая первую. */

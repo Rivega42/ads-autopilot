@@ -13,7 +13,7 @@ import {
   VK_SNAPSHOT_TTL_MS,
   type VkResponse,
   type VkTransport,
-} from '@/clients/vk/http.js';
+} from '@/clients/vk-ads/http.js';
 import { AuthError, ChannelError, RateLimitError } from '@/lib/errors.js';
 
 const okSchema = z.object({ ok: z.boolean() });

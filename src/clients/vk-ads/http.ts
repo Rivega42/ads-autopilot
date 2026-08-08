@@ -3,15 +3,15 @@ import PQueue from 'p-queue';
 import type { z } from 'zod';
 
 import type { ChannelContext } from '@/channels/types.js';
-import { getVkAccessToken, VK_CHANNEL } from '@/clients/vk/auth.js';
-import { parseVkError } from '@/clients/vk/schemas.js';
+import { getVkAccessToken, VK_CHANNEL } from '@/clients/vk-ads/auth.js';
+import { parseVkError } from '@/clients/vk-ads/schemas.js';
 import { VK_ADS_BASE_URL } from '@/constants.js';
 import type { AppError} from '@/lib/errors.js';
 import { AuthError, ChannelError, RateLimitError, isRetryable } from '@/lib/errors.js';
 import { sleep, withRetry } from '@/lib/retry.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('vk:http');
+const log = logger.child({ scope: 'vk:http' });
 
 /**
  * ВАЖНО, вопреки TZ §2.2: «5 req/sec» — это лимит старого api.vk.com/method/ads.*.

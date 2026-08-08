@@ -1,4 +1,4 @@
-import type { Channel } from '@prisma/client';
+import type { Provider } from '@prisma/client';
 
 import type {
   BidChange,
@@ -14,7 +14,7 @@ import type {
   StatRow,
   WriteResult,
 } from '@/channels/types.js';
-import { VK_CHANNEL } from '@/clients/vk/auth.js';
+import { VK_CHANNEL } from '@/clients/vk-ads/auth.js';
 import {
   chunk,
   listAdGroups,
@@ -30,19 +30,19 @@ import {
   VK_STATUS_ACTIVE,
   VK_STATUS_BLOCKED,
   type VkMassUpdateOutcome,
-} from '@/clients/vk/entities.js';
-import { createVkHttpClient, type VkHttpClient, type VkHttpDeps } from '@/clients/vk/http.js';
+} from '@/clients/vk-ads/entities.js';
+import { createVkHttpClient, type VkHttpClient, type VkHttpDeps } from '@/clients/vk-ads/http.js';
 import {
   vkListSchema,
   vkAdPlanSchema,
   vkBannerSchema,
   type VkBanner,
-} from '@/clients/vk/schemas.js';
-import { fetchVkStats, statLevelToPath } from '@/clients/vk/stats.js';
+} from '@/clients/vk-ads/schemas.js';
+import { fetchVkStats, statLevelToPath } from '@/clients/vk-ads/stats.js';
 import { ChannelError, describeError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('vk:adapter');
+const log = logger.child({ scope: 'vk:adapter' });
 
 /**
  * Фильтры связи «родитель → дети».
@@ -86,7 +86,7 @@ function dry(plan: Record<string, unknown>): WriteResult {
 }
 
 export class VkAdsAdapter implements ChannelAdapter {
-  readonly channel: Channel = VK_CHANNEL;
+  readonly channel: Provider = VK_CHANNEL;
 
   private readonly httpFactory: (ctx: ChannelContext) => VkHttpClient;
   private readonly clients = new Map<string, VkHttpClient>();

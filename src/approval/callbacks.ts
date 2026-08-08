@@ -1,4 +1,4 @@
-import { ApprovalStatus, type PendingApproval } from '@prisma/client';
+import { ApprovalDecision, type PendingApproval } from '@prisma/client';
 import type { Context } from 'grammy';
 
 import { applyApproval, editCard } from '@/approval/apply.js';
@@ -8,9 +8,9 @@ import { getMessenger } from '@/approval/telegram.js';
 import { approvalActionSchema } from '@/approval/types.js';
 import { prisma } from '@/db/prisma.js';
 import { describeError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('approval:callback');
+const log = logger.child({ scope: 'approval:callback' });
 
 export type CallbackOutcomeKind =
   | 'applied'
@@ -34,7 +34,7 @@ export interface CallbackOutcome {
 export interface CallbackRequest {
   /** Содержимое `callback_data` нажатой кнопки. */
   data: string;
-  /** Кто нажал: `@username` либо telegram id — уходит в `ChangeLog.approvedBy`. */
+  /** Кто нажал: `@username` либо telegram id — уходит в `PendingApproval.respondedBy`. */
   actor: string;
   /**
    * Чат, в котором нажали кнопку. Обязателен: Telegram сохраняет инлайн-клавиатуру
@@ -55,9 +55,9 @@ const FORBIDDEN_ANSWER =
  *
  * Ключевое место всего эпика — защита от двойного нажатия. Бот может работать
  * в нескольких процессах (и Telegram сам ретраит апдейты), поэтому «прочитать
- * статус → проверить → записать» гарантированно даст двойное применение под
- * гонкой. Вместо этого статус захватывается условным UPDATE ... WHERE
- * status = PENDING: атомарность обеспечивает Postgres, выигрывает ровно один
+ * решение → проверить → записать» гарантированно даст двойное применение под
+ * гонкой. Вместо этого строка захватывается условным UPDATE ... WHERE
+ * decision = PENDING: атомарность обеспечивает Postgres, выигрывает ровно один
  * вызов, остальные получают affected = 0 и вежливый отказ.
  *
  * Перед этим — проверка чата. Гонки здесь нет: `chatId` заявки неизменен, поэтому
@@ -118,9 +118,12 @@ export async function processApprovalCallback(req: CallbackRequest): Promise<Cal
   return { kind: 'already_handled', answer: 'Заявка уже обработана.', alert: false };
 }
 
-/** Нажатие засчитывается, только если пришло из того же чата, куда ушла карточка. */
-function chatAllowed(approvalChatId: string, from: string | undefined): boolean {
-  if (from === undefined) return false;
+/**
+ * Нажатие засчитывается, только если пришло из того же чата, куда ушла карточка.
+ * У заявки без записанного чата сверять не с чем — такую кнопку не принимаем.
+ */
+function chatAllowed(approvalChatId: string | null, from: string | undefined): boolean {
+  if (from === undefined || approvalChatId === null) return false;
   return from.trim() === approvalChatId.trim();
 }
 
@@ -134,10 +137,10 @@ async function claim(
   actor: string,
   now: Date,
 ): Promise<PendingApproval | null> {
-  const status = verdict === 'approve' ? ApprovalStatus.APPROVED : ApprovalStatus.REJECTED;
+  const decision = verdict === 'approve' ? ApprovalDecision.APPROVED : ApprovalDecision.REJECTED;
   const res = await prisma.pendingApproval.updateMany({
-    where: { id: approvalId, status: ApprovalStatus.PENDING, expiresAt: { gt: now } },
-    data: { status, respondedAt: now, respondedBy: actor },
+    where: { id: approvalId, decision: ApprovalDecision.PENDING, expiresAt: { gt: now } },
+    data: { decision, decidedAt: now, respondedBy: actor },
   });
   if (res.count === 0) return null;
   return prisma.pendingApproval.findUnique({ where: { id: approvalId } });
@@ -150,11 +153,11 @@ async function explainLostClaim(approvalId: string, now: Date): Promise<Callback
     return { kind: 'not_found', answer: 'Заявка не найдена — возможно, она удалена.', alert: true };
   }
 
-  if (approval.status === ApprovalStatus.PENDING && approval.expiresAt <= now) {
+  if (approval.decision === ApprovalDecision.PENDING && approval.expiresAt <= now) {
     // Срок истёк: помечаем сами, тем же условным UPDATE, и закрываем карточку.
     const res = await prisma.pendingApproval.updateMany({
-      where: { id: approvalId, status: ApprovalStatus.PENDING },
-      data: { status: ApprovalStatus.EXPIRED, respondedAt: now },
+      where: { id: approvalId, decision: ApprovalDecision.PENDING },
+      data: { decision: ApprovalDecision.EXPIRED, decidedAt: now },
     });
     if (res.count > 0) await editCard(approval, { kind: 'expired' });
     return {
@@ -167,7 +170,7 @@ async function explainLostClaim(approvalId: string, now: Date): Promise<Callback
   const by = approval.respondedBy ? ` (${approval.respondedBy})` : '';
   return {
     kind: 'already_handled',
-    answer: `Заявка уже обработана${by}: ${statusRu(approval.status)}.`,
+    answer: `Заявка уже обработана${by}: ${decisionRu(approval.decision)}.`,
     alert: false,
   };
 }
@@ -180,22 +183,24 @@ function details(approval: PendingApproval): CallbackOutcome {
   return { kind: 'details', answer: body, alert: true };
 }
 
-function statusRu(status: ApprovalStatus): string {
-  switch (status) {
-    case ApprovalStatus.PENDING:
+function decisionRu(decision: ApprovalDecision): string {
+  switch (decision) {
+    case ApprovalDecision.PENDING:
       return 'ожидает решения';
-    case ApprovalStatus.APPROVED:
+    case ApprovalDecision.APPROVED:
       return 'одобрена';
-    case ApprovalStatus.REJECTED:
+    case ApprovalDecision.REJECTED:
       return 'отклонена';
-    case ApprovalStatus.EXPIRED:
+    case ApprovalDecision.EXPIRED:
       return 'истекла';
-    case ApprovalStatus.APPLIED:
+    case ApprovalDecision.APPLYING:
+      return 'применяется';
+    case ApprovalDecision.APPLIED:
       return 'применена';
-    case ApprovalStatus.FAILED:
+    case ApprovalDecision.FAILED:
       return 'применить не удалось';
     default: {
-      const exhaustive: never = status;
+      const exhaustive: never = decision;
       return exhaustive;
     }
   }

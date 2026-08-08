@@ -1,22 +1,22 @@
 import axios from 'axios';
 import { z } from 'zod';
 
-import { YANDEX_CHANNEL } from '@/clients/yandex/errors.js';
-import { oauthTokenSchema, type OauthTokenResponse } from '@/clients/yandex/schemas.js';
+import { YANDEX_CHANNEL } from '@/clients/yandex-direct/errors.js';
+import { oauthTokenSchema, type OauthTokenResponse } from '@/clients/yandex-direct/schemas.js';
 import { env } from '@/env.js';
-import { decryptJson, encryptJson } from '@/lib/crypto.js';
 import { AppError, AuthError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
+import type { CredentialRepository } from '@/repos/CredentialRepository.js';
 
-const log = scoped('yandex.auth');
+const log = logger.child({ scope: 'yandex.auth' });
 
 export const YANDEX_OAUTH_BASE = 'https://oauth.yandex.ru';
 export const YANDEX_OAUTH_AUTHORIZE_URL = `${YANDEX_OAUTH_BASE}/authorize`;
 export const YANDEX_OAUTH_TOKEN_URL = `${YANDEX_OAUTH_BASE}/token`;
 
 /**
- * Секреты кабинета Директа. Лежат в `ChannelCredential.secretsEnc` зашифрованными
- * (AES-256-GCM, см. lib/crypto). В памяти живут только внутри одного вызова адаптера.
+ * Секреты кабинета Директа. Лежат в `Credential.encryptedPayload` зашифрованными
+ * (AES-256-GCM, см. crypto/aead). В памяти живут только внутри одного вызова адаптера.
  */
 export const yandexCredentialsSchema = z.object({
   accessToken: z.string().min(1),
@@ -178,43 +178,37 @@ export function isTokenNearExpiry(creds: YandexCredentials, now = Date.now()): b
   return expiry - now <= REFRESH_LEAD_MS;
 }
 
-// ── Хранение в ChannelCredential ─────────────────────────────────────────────
+// ── Хранение в Credential ────────────────────────────────────────────────────
 
 /**
  * Минимальный контракт хранилища. Инжектируется, чтобы юнит-тесты не поднимали
- * Postgres, а прод получал настоящий Prisma-клиент лениво (см. defaultCredentialStore).
+ * Postgres, а прод получал настоящий Prisma-клиент лениво (см. prismaCredentialStore).
  */
 export interface CredentialStore {
   load(clientId: string): Promise<YandexCredentials | null>;
   save(clientId: string, creds: YandexCredentials): Promise<void>;
 }
 
+/**
+ * Импорт репозитория динамический: он тянет за собой prisma, который создаёт
+ * клиент прямо на импорте — юнит-тестам он не нужен и негде взять.
+ */
+async function credentialRepository(): Promise<CredentialRepository> {
+  const { CredentialRepository: Repo } = await import('@/repos/CredentialRepository.js');
+  return new Repo();
+}
+
 export const prismaCredentialStore: CredentialStore = {
   async load(clientId) {
-    const { prisma } = await import('@/db/prisma.js');
-    const row = await prisma.channelCredential.findUnique({
-      where: { clientId_channel: { clientId, channel: YANDEX_CHANNEL } },
-    });
-    if (!row) return null;
-    return parseCredentials(decryptJson<unknown>(row.secretsEnc));
+    const repo = await credentialRepository();
+    const payload = await repo.getPayload(clientId, YANDEX_CHANNEL);
+    if (payload === null) return null;
+    return parseCredentials(payload);
   },
 
   async save(clientId, creds) {
-    const { prisma } = await import('@/db/prisma.js');
-    const secretsEnc = encryptJson(creds);
-    // externalLogin дублирует clientLogin открытым текстом: он не секрет,
-    // а искать кабинет по нему в админке нужно постоянно.
-    const data = {
-      secretsEnc,
-      externalLogin: creds.clientLogin ?? null,
-      expiresAt: creds.expiresAt ? new Date(creds.expiresAt) : null,
-      lastOkAt: new Date(),
-    };
-    await prisma.channelCredential.upsert({
-      where: { clientId_channel: { clientId, channel: YANDEX_CHANNEL } },
-      update: data,
-      create: { clientId, channel: YANDEX_CHANNEL, ...data },
-    });
+    const repo = await credentialRepository();
+    await repo.save(clientId, YANDEX_CHANNEL, creds);
   },
 };
 

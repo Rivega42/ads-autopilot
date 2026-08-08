@@ -3,16 +3,21 @@ import type { PendingApproval } from '@prisma/client';
 import { buildApprovalKeyboard, renderApprovalCard } from '@/approval/card.js';
 import { matchApprovalRule } from '@/approval/policy.js';
 import { getMessenger } from '@/approval/telegram.js';
-import { buildApprovalPayload, parseAction, type ApprovalAction } from '@/approval/types.js';
+import {
+  approvalKindOf,
+  buildApprovalPayload,
+  parseAction,
+  type ApprovalAction,
+} from '@/approval/types.js';
 import { prisma } from '@/db/prisma.js';
-import { env } from '@/env.js';
+import { APPROVAL_TTL_MINUTES, env } from '@/env.js';
 import { AppError, describeError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('approval:create');
+const log = logger.child({ scope: 'approval:create' });
 
 export interface CreateApprovalOptions {
-  /** Куда слать. По умолчанию — `Client.approvalChatId`. */
+  /** Куда слать. По умолчанию — личный чат клиента (`Client.tgUserId`). */
   chatId?: string;
   /** Точка отсчёта TTL; параметр существует ради детерминированных тестов. */
   now?: Date;
@@ -32,8 +37,8 @@ export interface CreateApprovalOptions {
  * payload, потому что между карточкой и применением проходит до APPROVAL_TTL_MINUTES,
  * и флаги за это время могут измениться — а человек соглашался на текст карточки.
  */
-function effectiveDryRun(clientDryRun: boolean, opt: boolean | undefined): boolean {
-  return env.DRY_RUN || clientDryRun || opt === true;
+function effectiveDryRun(opt: boolean | undefined): boolean {
+  return env.DRY_RUN || opt === true;
 }
 
 /**
@@ -49,11 +54,11 @@ export async function createApproval(
 ): Promise<PendingApproval> {
   const action = parseAction(input);
   const now = opts.now ?? new Date();
-  const expiresAt = new Date(now.getTime() + env.APPROVAL_TTL_MINUTES * 60_000);
+  const expiresAt = new Date(now.getTime() + APPROVAL_TTL_MINUTES * 60_000);
 
   const client = await prisma.client.findUnique({
     where: { id: action.clientId },
-    select: { name: true, approvalChatId: true, dryRun: true },
+    select: { name: true, tgUserId: true },
   });
   if (!client) {
     throw new AppError(`Client ${action.clientId} not found`, {
@@ -62,8 +67,8 @@ export async function createApproval(
     });
   }
 
-  const chatId = opts.chatId ?? client.approvalChatId;
-  const dryRun = effectiveDryRun(client.dryRun, opts.dryRun);
+  const chatId = opts.chatId ?? String(client.tgUserId);
+  const dryRun = effectiveDryRun(opts.dryRun);
   const summary = renderApprovalCard({
     action,
     clientName: client.name,
@@ -74,7 +79,7 @@ export async function createApproval(
   const approval = await prisma.pendingApproval.create({
     data: {
       clientId: action.clientId,
-      action: action.kind,
+      kind: approvalKindOf(action),
       // Вместе с действием сохраняем режим: применять будем ровно то, что обещала карточка.
       payload: buildApprovalPayload(action, { dryRun }),
       summary,
@@ -99,26 +104,26 @@ export async function createApproval(
 
   // Дальше карточка с рабочими кнопками уже висит в чате. Отсюда нельзя ни бросить
   // исключение (вызывающий отправит вторую карточку на то же изменение), ни потерять
-  // messageId (без него итог не допишется в карточку).
-  const messageId = String(sent.messageId);
+  // tgMessageId (без него итог не допишется в карточку).
+  const tgMessageId = BigInt(sent.messageId);
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       return await prisma.pendingApproval.update({
         where: { id: approval.id },
-        data: { messageId, error: null },
+        data: { tgMessageId, error: null },
       });
     } catch (err) {
       log.error(
-        { approvalId: approval.id, messageId, attempt, err: describeError(err) },
-        'cannot persist approval messageId',
+        { approvalId: approval.id, tgMessageId: sent.messageId, attempt, err: describeError(err) },
+        'cannot persist approval tgMessageId',
       );
     }
   }
 
-  // БД не приняла messageId: заявка жива и нажимается, правка карточки по итогу
-  // не сработает. Возвращаем строку с messageId в памяти, чтобы вызывающий не
+  // БД не приняла tgMessageId: заявка жива и нажимается, правка карточки по итогу
+  // не сработает. Возвращаем строку с tgMessageId в памяти, чтобы вызывающий не
   // считал создание неудачным и не задублировал карточку.
-  return { ...approval, messageId };
+  return { ...approval, tgMessageId };
 }
 
 /**

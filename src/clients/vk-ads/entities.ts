@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
-import { VK_CHANNEL } from '@/clients/vk/auth.js';
-import type { VkHttpClient } from '@/clients/vk/http.js';
+import { VK_CHANNEL } from '@/clients/vk-ads/auth.js';
+import type { VkHttpClient } from '@/clients/vk-ads/http.js';
 import {
   parseVkError,
   vkAdGroupSchema,
@@ -12,11 +12,11 @@ import {
   type VkAdGroup,
   type VkAdPlan,
   type VkBanner,
-} from '@/clients/vk/schemas.js';
+} from '@/clients/vk-ads/schemas.js';
 import { ChannelError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('vk:entities');
+const log = logger.child({ scope: 'vk:entities' });
 
 /**
  * Жёсткий потолок площадки: не более 200 объектов в одном запросе — и в

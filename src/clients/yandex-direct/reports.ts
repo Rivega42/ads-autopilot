@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
 
-import { shouldRetryYandex, YANDEX_CHANNEL } from '@/clients/yandex/errors.js';
-import type { RawCallResult, YandexHttpClient } from '@/clients/yandex/http.js';
+import { shouldRetryYandex, YANDEX_CHANNEL } from '@/clients/yandex-direct/errors.js';
+import type { RawCallResult, YandexHttpClient } from '@/clients/yandex-direct/http.js';
 import { ChannelError } from '@/lib/errors.js';
 import { sleep } from '@/lib/retry.js';
 import { withRetry } from '@/lib/retry.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('yandex.reports');
+const log = logger.child({ scope: 'yandex.reports' });
 
 /** Типы отчётов, которые нужны сервису. Полный список сервиса Reports шире. */
 export type YandexReportType =
@@ -219,7 +219,7 @@ export async function fetchReport(
     );
   };
 
-  return http.reportQueue.add(poll, { throwOnTimeout: true });
+  return http.reportQueue.add(poll);
 }
 
 // ── Разбор TSV ───────────────────────────────────────────────────────────────

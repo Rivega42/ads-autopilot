@@ -1,4 +1,4 @@
-import type { Channel } from '@prisma/client';
+import type { Provider } from '@prisma/client';
 
 import type {
   BidChange,
@@ -15,28 +15,28 @@ import type {
   StatRow,
   WriteResult,
 } from '@/channels/types.js';
-import { parseCredentials, type YandexCredentials } from '@/clients/yandex/auth.js';
+import { parseCredentials, type YandexCredentials } from '@/clients/yandex-direct/auth.js';
 import {
   getAdGroups,
   getAds,
   getCampaigns,
   getKeywords,
   getSelfClient,
-} from '@/clients/yandex/entities.js';
-import { YANDEX_CHANNEL } from '@/clients/yandex/errors.js';
+} from '@/clients/yandex-direct/entities.js';
+import { YANDEX_CHANNEL } from '@/clients/yandex-direct/errors.js';
 import {
   YandexHttpClient,
   type HttpTransport,
   type UnitsLedgerWriter,
-} from '@/clients/yandex/http.js';
+} from '@/clients/yandex-direct/http.js';
 import {
   fetchReport,
   reportNumber,
   type FetchReportOptions,
   type ReportSpec,
   type YandexReportType,
-} from '@/clients/yandex/reports.js';
-import { fromMicros, type YandexAd, type YandexCampaign } from '@/clients/yandex/schemas.js';
+} from '@/clients/yandex-direct/reports.js';
+import { fromMicros, type YandexAd, type YandexCampaign } from '@/clients/yandex-direct/schemas.js';
 import {
   addCampaignNegativeKeywords,
   resume,
@@ -45,11 +45,11 @@ import {
   updateAds,
   updateCampaigns,
   type ActionSummary,
-} from '@/clients/yandex/writes.js';
+} from '@/clients/yandex-direct/writes.js';
 import { ChannelError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('yandex.adapter');
+const log = logger.child({ scope: 'yandex.adapter' });
 
 export interface YandexAdapterOptions {
   /** Подменяемый транспорт — тесты и sandbox-прогоны. */
@@ -130,7 +130,7 @@ function planned(plan: Record<string, unknown>): WriteResult<never> {
 }
 
 export class YandexDirectAdapter implements ChannelAdapter {
-  readonly channel: Channel = YANDEX_CHANNEL;
+  readonly channel: Provider = YANDEX_CHANNEL;
 
   constructor(private readonly opts: YandexAdapterOptions = {}) {}
 

@@ -1,17 +1,16 @@
-import type { Channel } from '@prisma/client';
+import type { Provider } from '@prisma/client';
 import axios from 'axios';
 
 import type { ChannelContext } from '@/channels/types.js';
-import { parseVkError, vkTokenSchema } from '@/clients/vk/schemas.js';
+import { parseVkError, vkTokenSchema } from '@/clients/vk-ads/schemas.js';
 import { VK_ADS_BASE_URL } from '@/constants.js';
 import { env } from '@/env.js';
-import { encryptJson } from '@/lib/crypto.js';
 import { AuthError, ChannelError, describeError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('vk:auth');
+const log = logger.child({ scope: 'vk:auth' });
 
-export const VK_CHANNEL: Channel = 'VK_ADS';
+export const VK_CHANNEL: Provider = 'VK_ADS';
 
 /** По документации TTL access-токена ровно сутки; используем как fallback, если `expires_in` не пришёл. */
 export const VK_TOKEN_TTL_SEC = 86_400;
@@ -42,7 +41,7 @@ export const VK_MIN_REMINT_INTERVAL_MS = 10_000;
 const TOKEN_URL = `${VK_ADS_BASE_URL}oauth2/token.json`;
 const TOKEN_DELETE_URL = `${VK_ADS_BASE_URL}oauth2/token/delete.json`;
 
-/** Секреты кабинета VK внутри `ChannelCredential.secretsEnc`. */
+/** Секреты кабинета VK внутри `Credential.encryptedPayload`. */
 export interface VkCredentials {
   clientId: string;
   clientSecret: string;
@@ -105,20 +104,13 @@ async function defaultPost(url: string, body: URLSearchParams): Promise<VkAuthTr
 }
 
 /**
- * Пишем обновлённые секреты обратно в ChannelCredential.
- * Импорт prisma динамический: модуль prisma создаёт клиент на импорте, а
- * юнит-тестам клиент БД не нужен и негде взять.
+ * Пишем обновлённые секреты обратно в Credential.
+ * Импорт репозитория динамический: он тянет prisma, который создаёт клиент прямо
+ * на импорте, а юнит-тестам клиент БД не нужен и негде взять.
  */
 async function defaultSave(clientId: string, creds: VkCredentials): Promise<void> {
-  const { prisma } = await import('@/db/prisma.js');
-  await prisma.channelCredential.update({
-    where: { clientId_channel: { clientId, channel: VK_CHANNEL } },
-    data: {
-      secretsEnc: encryptJson(creds),
-      expiresAt: creds.expiresAt ? new Date(creds.expiresAt) : null,
-      lastOkAt: new Date(),
-    },
-  });
+  const { CredentialRepository } = await import('@/repos/CredentialRepository.js');
+  await new CredentialRepository().save(clientId, VK_CHANNEL, creds);
 }
 
 export const defaultVkAuthDeps: VkAuthDeps = {

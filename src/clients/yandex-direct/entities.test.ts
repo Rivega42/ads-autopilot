@@ -8,13 +8,13 @@ import {
   getKeywords,
   getSelfClient,
   MAX_PAGE_LIMIT,
-} from '@/clients/yandex/entities.js';
+} from '@/clients/yandex-direct/entities.js';
 import {
   resetYandexRuntimeState,
   YandexHttpClient,
   type HttpRequest,
   type HttpResponse,
-} from '@/clients/yandex/http.js';
+} from '@/clients/yandex-direct/http.js';
 
 interface FakeTransport {
   (req: HttpRequest): Promise<HttpResponse>;

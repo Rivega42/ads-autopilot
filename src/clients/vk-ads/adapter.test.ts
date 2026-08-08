@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ChannelContext } from '@/channels/types.js';
-import { VkAdsAdapter, buildRecreatePayload } from '@/clients/vk/adapter.js';
-import { VK_PATHS } from '@/clients/vk/entities.js';
-import { RateLimitGovernor, VkHttpClient, type VkTransport } from '@/clients/vk/http.js';
-import type { VkBanner } from '@/clients/vk/schemas.js';
+import { VkAdsAdapter, buildRecreatePayload } from '@/clients/vk-ads/adapter.js';
+import { VK_PATHS } from '@/clients/vk-ads/entities.js';
+import { RateLimitGovernor, VkHttpClient, type VkTransport } from '@/clients/vk-ads/http.js';
+import type { VkBanner } from '@/clients/vk-ads/schemas.js';
 import { ChannelError } from '@/lib/errors.js';
 
 interface Recorded {

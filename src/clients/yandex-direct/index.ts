@@ -9,7 +9,7 @@ export {
   YandexDirectAdapter,
   yandexDirectAdapter,
   type YandexAdapterOptions,
-} from '@/clients/yandex/adapter.js';
+} from '@/clients/yandex-direct/adapter.js';
 export {
   buildAuthHeaders,
   buildAuthorizeUrl,
@@ -22,7 +22,7 @@ export {
   yandexCredentialsSchema,
   type CredentialStore,
   type YandexCredentials,
-} from '@/clients/yandex/auth.js';
+} from '@/clients/yandex-direct/auth.js';
 export {
   classifyErrorCode,
   mapHttpStatus,
@@ -31,7 +31,7 @@ export {
   YandexErrorCode,
   YANDEX_CHANNEL,
   type YandexErrorBehaviour,
-} from '@/clients/yandex/errors.js';
+} from '@/clients/yandex-direct/errors.js';
 export {
   createAxiosTransport,
   getKnownUnits,
@@ -45,7 +45,7 @@ export {
   type HttpTransport,
   type UnitsLedgerWriter,
   type UnitsSnapshot,
-} from '@/clients/yandex/http.js';
+} from '@/clients/yandex-direct/http.js';
 export {
   getAdGroups,
   getAds,
@@ -53,7 +53,7 @@ export {
   getKeywords,
   getSelfClient,
   MAX_PAGE_LIMIT,
-} from '@/clients/yandex/entities.js';
+} from '@/clients/yandex-direct/entities.js';
 export {
   fetchReport,
   parseReportTsv,
@@ -62,7 +62,7 @@ export {
   type ParsedReport,
   type ReportSpec,
   type YandexReportType,
-} from '@/clients/yandex/reports.js';
+} from '@/clients/yandex-direct/reports.js';
 export {
   addCampaignNegativeKeywords,
   resume,
@@ -75,5 +75,5 @@ export {
   type AdTextUpdate,
   type CampaignUpdate,
   type KeywordBidUpdate,
-} from '@/clients/yandex/writes.js';
-export { fromMicros, toMicros } from '@/clients/yandex/schemas.js';
+} from '@/clients/yandex-direct/writes.js';
+export { fromMicros, toMicros } from '@/clients/yandex-direct/schemas.js';

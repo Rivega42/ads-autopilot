@@ -4,9 +4,9 @@ import { z } from 'zod';
 import { METRIKA_BASE_URL } from '@/constants.js';
 import { AppError, AuthError, RateLimitError } from '@/lib/errors.js';
 import { withRetry } from '@/lib/retry.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('metrika');
+const log = logger.child({ scope: 'metrika' });
 
 /**
  * Клиент Reporting API Яндекс Метрики.

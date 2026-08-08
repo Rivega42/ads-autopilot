@@ -1,6 +1,6 @@
 import type { ZodType } from 'zod';
 
-import type { YandexHttpClient } from '@/clients/yandex/http.js';
+import type { YandexHttpClient } from '@/clients/yandex-direct/http.js';
 import {
   adGroupsGetSchema,
   adsGetSchema,
@@ -11,10 +11,10 @@ import {
   type YandexAdGroup,
   type YandexCampaign,
   type YandexKeyword,
-} from '@/clients/yandex/schemas.js';
-import { scoped } from '@/logger.js';
+} from '@/clients/yandex-direct/schemas.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('yandex.entities');
+const log = logger.child({ scope: 'yandex.entities' });
 
 /** Штатный максимум объектов в одном ответе метода get. */
 export const MAX_PAGE_LIMIT = 10_000;

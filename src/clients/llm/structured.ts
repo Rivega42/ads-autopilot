@@ -3,9 +3,9 @@ import type { z } from 'zod';
 import { LlmSchemaError } from './errors.js';
 import type { LlmMessage, LlmRequest, LlmResponse, LlmUsage } from './types.js';
 
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('llm:structured');
+const log = logger.child({ scope: 'llm:structured' });
 
 /**
  * Типизированный ответ модели.

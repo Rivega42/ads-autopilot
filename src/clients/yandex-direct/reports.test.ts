@@ -5,7 +5,7 @@ import {
   YandexHttpClient,
   type HttpRequest,
   type HttpResponse,
-} from '@/clients/yandex/http.js';
+} from '@/clients/yandex-direct/http.js';
 import {
   buildReportDefinition,
   buildReportName,
@@ -15,7 +15,7 @@ import {
   reportNumber,
   splitTsvLine,
   type ReportSpec,
-} from '@/clients/yandex/reports.js';
+} from '@/clients/yandex-direct/reports.js';
 
 interface Step {
   status?: number;

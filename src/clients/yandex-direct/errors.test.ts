@@ -9,7 +9,7 @@ import {
   RETRY_SOON_DELAY_MS,
   shouldRetryYandex,
   YandexErrorCode,
-} from '@/clients/yandex/errors.js';
+} from '@/clients/yandex-direct/errors.js';
 import { AuthError, ChannelError, OutOfUnitsError, RateLimitError } from '@/lib/errors.js';
 
 describe('classifyErrorCode', () => {

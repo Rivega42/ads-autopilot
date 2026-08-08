@@ -1,4 +1,4 @@
-import { ApprovalStatus, type PendingApproval } from '@prisma/client';
+import { ApprovalDecision, ChangeActor, type PendingApproval } from '@prisma/client';
 
 import { formatAmount, renderOutcome, type CardOutcome } from '@/approval/card.js';
 import { changeLogAction, changeSnapshot, executeAction } from '@/approval/execute.js';
@@ -13,19 +13,9 @@ import { buildContext, getAdapter } from '@/channels/registry.js';
 import type { ChannelContext } from '@/channels/types.js';
 import { prisma } from '@/db/prisma.js';
 import { describeError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('approval:apply');
-
-/**
- * Маркер «применение началось» в колонке `error`.
- *
- * Отдельного статуса APPLYING в схеме нет, а входной шлюз обязан быть таким же
- * условным UPDATE, как захват в callbacks.ts: `applyApproval` экспортируется наружу,
- * и второй вызов (ретрай-крон, CLI, админка) не должен второй раз потратить деньги.
- * Строка при этом остаётся APPROVED — по ней же работает сверка зависших заявок.
- */
-export const APPLY_LEASE_PREFIX = 'apply:in-progress ';
+const log = logger.child({ scope: 'approval:apply' });
 
 /** Насколько живое значение может разойтись с зафиксированным в карточке. */
 const PRECONDITION_TOLERANCE_RATIO = 0.01;
@@ -111,11 +101,14 @@ export async function applyApproval(approvalId: string, approvedBy: string): Pro
   try {
     await prisma.pendingApproval.update({
       where: { id: row.id },
-      data: { status: ApprovalStatus.APPLIED, error: notes.length > 0 ? notes.join('; ') : null },
+      data: {
+        decision: ApprovalDecision.APPLIED,
+        error: notes.length > 0 ? notes.join('; ') : null,
+      },
     });
   } catch (err) {
-    // Статус не сохранился — но операция выполнена. Строка останется APPROVED с
-    // маркером аренды, её поднимет сверка (expire.ts), а человеку скажем правду.
+    // Статус не сохранился — но операция выполнена. Строка останется APPLYING,
+    // её поднимет сверка зависших (expire.ts), а человеку скажем правду.
     notes.push(`статус заявки в БД не обновлён: ${describeError(err)}`);
     log.error({ approvalId: row.id, err: describeError(err) }, 'cannot persist APPLIED');
   }
@@ -146,32 +139,25 @@ export async function applyApproval(approvalId: string, approvedBy: string): Pro
  *
  * Между чтением и записью есть await, поэтому два параллельных вызова по одной
  * заявке иначе оба увидели бы APPROVED и оба сходили бы в кабинет. Условие
- * проверяет Postgres, выигрывает ровно один вызов.
+ * проверяет Postgres, выигрывает ровно один вызов; проигравший видит APPLYING.
  */
 async function leaseForApply(
   approvalId: string,
 ): Promise<{ row: PendingApproval } | { skipped: string }> {
-  const lease = `${APPLY_LEASE_PREFIX}${new Date().toISOString()}`;
   const res = await prisma.pendingApproval.updateMany({
-    where: {
-      id: approvalId,
-      status: ApprovalStatus.APPROVED,
-      // Явная ветка `error: null` — сравнение NULL с LIKE даёт NULL, то есть строку
-      // без ошибки условие `not startsWith` не пропустило бы.
-      OR: [{ error: null }, { error: { not: { startsWith: APPLY_LEASE_PREFIX } } }],
-    },
-    data: { error: lease },
+    where: { id: approvalId, decision: ApprovalDecision.APPROVED },
+    data: { decision: ApprovalDecision.APPLYING },
   });
 
   const row = await prisma.pendingApproval.findUnique({ where: { id: approvalId } });
   if (res.count > 0) {
-    // Строку читаем после захвата: chatId/messageId/summary нужны для правки карточки.
+    // Строку читаем после захвата: chatId/tgMessageId/summary нужны для правки карточки.
     return row ? { row } : { skipped: 'approval not found' };
   }
 
   if (!row) return { skipped: 'approval not found' };
-  if (row.status === ApprovalStatus.APPROVED) return { skipped: 'apply already in progress' };
-  return { skipped: `status is ${row.status}` };
+  if (row.decision === ApprovalDecision.APPLYING) return { skipped: 'apply already in progress' };
+  return { skipped: `decision is ${row.decision}` };
 }
 
 /**
@@ -187,7 +173,7 @@ async function fail(
   try {
     await prisma.pendingApproval.update({
       where: { id: approval.id },
-      data: { status: ApprovalStatus.FAILED, error },
+      data: { decision: ApprovalDecision.FAILED, error },
     });
   } catch (dbErr) {
     log.error({ approvalId: approval.id, err: describeError(dbErr) }, 'cannot persist FAILED');
@@ -267,18 +253,27 @@ async function writeChangeLog(
     await prisma.changeLog.create({
       data: {
         campaignId,
-        channel: action.channel,
+        entityType: snap.entityType,
+        entityId: snap.entityId,
         action: changeLogAction(action),
-        targetType: snap.targetType,
-        targetId: snap.targetId,
-        before: toJson(snap.before),
+        prevValue: toJson(snap.before),
         // `change` — целевое состояние, рядом с ним метаданные исполнения:
         // snapshot бывает и массивом (ставки), разворачивать его в объект нельзя.
         // `dryRun` берём из режима, а не из `applied`: адаптер отвечает applied=false
         // и когда менять было нечего, а это совсем другая история.
-        after: toJson({ change: snap.after, dryRun, applied, plan }),
+        // `provider` и `approvedBy` тоже здесь: своих колонок под них у ChangeLog нет,
+        // а без них по журналу не восстановить, куда и с чьего согласия ушло изменение.
+        newValue: toJson({
+          change: snap.after,
+          dryRun,
+          applied,
+          plan,
+          provider: action.channel,
+          approvedBy,
+        }),
         reason: action.reason,
-        approvedBy,
+        // Изменение выпустил человек кнопкой в карточке, а не ночной прогон.
+        actor: ChangeActor.USER,
       },
     });
     return null;
@@ -290,11 +285,11 @@ async function writeChangeLog(
 }
 
 async function findCampaignId(
-  channel: ApprovalAction['channel'],
+  provider: ApprovalAction['channel'],
   externalId: string,
 ): Promise<string | null> {
   const campaign = await prisma.campaign.findUnique({
-    where: { channel_externalId: { channel, externalId } },
+    where: { provider_externalId: { provider, externalId } },
     select: { id: true },
   });
   return campaign?.id ?? null;
@@ -302,12 +297,12 @@ async function findCampaignId(
 
 /** Правка карточки — best-effort: статус в БД уже проставлен и он главный. */
 export async function editCard(approval: PendingApproval, outcome: CardOutcome): Promise<void> {
-  if (!approval.messageId) return;
+  if (approval.tgMessageId === null || approval.chatId === null) return;
   try {
     await getMessenger().editMessageText(
       approval.chatId,
-      Number(approval.messageId),
-      renderOutcome(approval.summary, outcome),
+      Number(approval.tgMessageId),
+      renderOutcome(approval.summary ?? '', outcome),
     );
   } catch (err) {
     log.warn({ approvalId: approval.id, err: describeError(err) }, 'cannot edit approval card');

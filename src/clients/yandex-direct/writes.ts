@@ -1,15 +1,15 @@
-import { chunk, MAX_PAGE_LIMIT } from '@/clients/yandex/entities.js';
-import { classifyErrorCode } from '@/clients/yandex/errors.js';
-import type { YandexHttpClient } from '@/clients/yandex/http.js';
+import { chunk, MAX_PAGE_LIMIT } from '@/clients/yandex-direct/entities.js';
+import { classifyErrorCode } from '@/clients/yandex-direct/errors.js';
+import type { YandexHttpClient } from '@/clients/yandex-direct/http.js';
 import {
   actionResultSchema,
   toMicros,
   updateResultsSchema,
   type ActionResult,
-} from '@/clients/yandex/schemas.js';
-import { scoped } from '@/logger.js';
+} from '@/clients/yandex-direct/schemas.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('yandex.writes');
+const log = logger.child({ scope: 'yandex.writes' });
 
 /** Лимит одного запроса KeywordBids.set по ключевым фразам. */
 export const MAX_BIDS_PER_REQUEST = 10_000;

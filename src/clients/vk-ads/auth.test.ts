@@ -15,7 +15,7 @@ import {
   VK_TOKEN_TTL_SEC,
   type VkAuthDeps,
   type VkCredentials,
-} from '@/clients/vk/auth.js';
+} from '@/clients/vk-ads/auth.js';
 import { AuthError, ChannelError } from '@/lib/errors.js';
 
 interface PostCall {

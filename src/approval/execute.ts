@@ -85,12 +85,17 @@ export async function executeAction(
   }
 }
 
-/** Что записать в ChangeLog: до/после и адрес изменения. */
+/**
+ * Что записать в ChangeLog: до/после и адрес изменения.
+ *
+ * `entityId` не бывает пустым: у создаваемой кампании внешнего id ещё нет, и её
+ * адресуют именем — колонка обязательная, а пустая строка в индексе бесполезна.
+ */
 export function changeSnapshot(action: ApprovalAction): {
   before: unknown;
   after: unknown;
-  targetType: string;
-  targetId: string | null;
+  entityType: string;
+  entityId: string;
   campaignExternalId: string | null;
 } {
   switch (action.kind) {
@@ -102,8 +107,8 @@ export function changeSnapshot(action: ApprovalAction): {
           dailyBudget: action.dailyBudget,
           strategy: action.strategy,
         },
-        targetType: 'campaign',
-        targetId: null,
+        entityType: 'campaign',
+        entityId: action.campaignName,
         campaignExternalId: null,
       };
 
@@ -111,8 +116,8 @@ export function changeSnapshot(action: ApprovalAction): {
       return {
         before: { dailyBudget: action.before },
         after: { dailyBudget: action.after },
-        targetType: 'campaign',
-        targetId: action.campaignExternalId,
+        entityType: 'campaign',
+        entityId: action.campaignExternalId,
         campaignExternalId: action.campaignExternalId,
       };
 
@@ -120,8 +125,8 @@ export function changeSnapshot(action: ApprovalAction): {
       return {
         before: { strategy: action.before },
         after: { strategy: action.after },
-        targetType: 'campaign',
-        targetId: action.campaignExternalId,
+        entityType: 'campaign',
+        entityId: action.campaignExternalId,
         campaignExternalId: action.campaignExternalId,
       };
 
@@ -129,8 +134,8 @@ export function changeSnapshot(action: ApprovalAction): {
       return {
         before: { status: 'ACTIVE', externalIds: action.externalIds },
         after: { status: 'PAUSED', externalIds: action.externalIds },
-        targetType: action.level,
-        targetId: action.externalIds[0] ?? null,
+        entityType: action.level,
+        entityId: action.externalIds[0] ?? action.level,
         campaignExternalId: null,
       };
 
@@ -138,8 +143,8 @@ export function changeSnapshot(action: ApprovalAction): {
       return {
         before: { status: 'PAUSED', externalIds: action.externalIds },
         after: { status: 'ACTIVE', externalIds: action.externalIds },
-        targetType: action.level,
-        targetId: action.externalIds[0] ?? null,
+        entityType: action.level,
+        entityId: action.externalIds[0] ?? action.level,
         campaignExternalId: null,
       };
 
@@ -150,8 +155,8 @@ export function changeSnapshot(action: ApprovalAction): {
           bid: c.bidBefore ?? null,
         })),
         after: action.changes.map((c) => ({ keywordExternalId: c.keywordExternalId, bid: c.bid })),
-        targetType: 'keyword',
-        targetId: action.changes[0]?.keywordExternalId ?? null,
+        entityType: 'keyword',
+        entityId: action.changes[0]?.keywordExternalId ?? 'keyword',
         campaignExternalId: null,
       };
 
@@ -159,8 +164,8 @@ export function changeSnapshot(action: ApprovalAction): {
       return {
         before: { negatives: [] },
         after: { negatives: action.phrases },
-        targetType: 'campaign',
-        targetId: action.campaignExternalId,
+        entityType: 'campaign',
+        entityId: action.campaignExternalId,
         campaignExternalId: action.campaignExternalId,
       };
 
@@ -168,8 +173,8 @@ export function changeSnapshot(action: ApprovalAction): {
       return {
         before: null,
         after: { creativeIds: action.creativeIds, llmGenerated: action.llmGenerated },
-        targetType: 'adgroup',
-        targetId: action.adGroupExternalId,
+        entityType: 'adgroup',
+        entityId: action.adGroupExternalId,
         campaignExternalId: null,
       };
 

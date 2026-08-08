@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto';
 
 import type { LlmRequest, LlmResponse } from './types.js';
 
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('llm:cache');
+const log = logger.child({ scope: 'llm:cache' });
 
 /**
  * Кеш одинаковых промптов.

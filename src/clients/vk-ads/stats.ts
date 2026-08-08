@@ -1,11 +1,11 @@
 import type { DateRange, StatLevel, StatRow } from '@/channels/types.js';
-import { chunk, VK_BATCH_LIMIT, VK_PATHS, type VkEntityPath } from '@/clients/vk/entities.js';
-import type { VkHttpClient } from '@/clients/vk/http.js';
-import { toNumber, vkStatsResponseSchema } from '@/clients/vk/schemas.js';
+import { chunk, VK_BATCH_LIMIT, VK_PATHS, type VkEntityPath } from '@/clients/vk-ads/entities.js';
+import type { VkHttpClient } from '@/clients/vk-ads/http.js';
+import { toNumber, vkStatsResponseSchema } from '@/clients/vk-ads/schemas.js';
 import { ymdMsk } from '@/lib/dates.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
-const log = scoped('vk:stats');
+const log = logger.child({ scope: 'vk:stats' });
 
 export type VkGranularity = 'day' | 'summary';
 

@@ -9,8 +9,9 @@ import {
   yandexCredentialsSchema,
   type CredentialStore,
   type YandexCredentials,
-} from '@/clients/yandex/auth.js';
-import { decryptJson, encryptJson } from '@/lib/crypto.js';
+} from '@/clients/yandex-direct/auth.js';
+import { seal, unseal } from '@/crypto/aead.js';
+import { getEncryptionKey } from '@/crypto/key.js';
 import { AuthError } from '@/lib/errors.js';
 
 describe('buildAuthHeaders', () => {
@@ -57,7 +58,8 @@ describe('parseCredentials', () => {
       clientLogin: 'sub-account',
       useOperatorUnits: true,
     };
-    const restored = parseCredentials(decryptJson<unknown>(encryptJson(creds)));
+    const key = getEncryptionKey();
+    const restored = parseCredentials(JSON.parse(unseal(seal(JSON.stringify(creds), key), key)));
     expect(restored).toEqual(creds);
     expect(yandexCredentialsSchema.safeParse(restored).success).toBe(true);
   });

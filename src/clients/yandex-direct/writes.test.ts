@@ -5,7 +5,7 @@ import {
   YandexHttpClient,
   type HttpRequest,
   type HttpResponse,
-} from '@/clients/yandex/http.js';
+} from '@/clients/yandex-direct/http.js';
 import {
   addCampaignNegativeKeywords,
   buildCampaignPayload,
@@ -16,7 +16,7 @@ import {
   suspend,
   updateAds,
   updateCampaigns,
-} from '@/clients/yandex/writes.js';
+} from '@/clients/yandex-direct/writes.js';
 
 interface FakeTransport {
   (req: HttpRequest): Promise<HttpResponse>;

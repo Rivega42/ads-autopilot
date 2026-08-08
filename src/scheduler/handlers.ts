@@ -1,9 +1,9 @@
 import type { Job, Processor } from 'bullmq';
 
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 import { QUEUE_NAMES, type QueueName } from '@/scheduler/queues.js';
 
-const log = scoped('scheduler');
+const log = logger.child({ scope: 'scheduler' });
 
 /**
  * Заглушка на время сборки: заменяется реализацией соответствующего эпика.

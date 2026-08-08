@@ -1,14 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { VK_PATHS } from '@/clients/vk/entities.js';
-import { RateLimitGovernor, VkHttpClient, type VkTransport } from '@/clients/vk/http.js';
+import { VK_PATHS } from '@/clients/vk-ads/entities.js';
+import { RateLimitGovernor, VkHttpClient, type VkTransport } from '@/clients/vk-ads/http.js';
 import {
   clampStatsRange,
   fetchVkStats,
   mapStatsResponse,
   statLevelToPath,
   VK_STATS_MAX_DAYS,
-} from '@/clients/vk/stats.js';
+} from '@/clients/vk-ads/stats.js';
 
 function clientOf(reply: (params: Record<string, unknown>) => unknown): {
   client: VkHttpClient;
