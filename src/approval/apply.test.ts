@@ -1,4 +1,4 @@
-import { ApprovalStatus } from '@prisma/client';
+import { ApprovalDecision, ApprovalKind, ChangeActor } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApprovalAction } from '@/approval/types.js';
@@ -7,30 +7,19 @@ import type { ChannelContext, RemoteCampaign, WriteResult } from '@/channels/typ
 interface Row {
   id: string;
   clientId: string;
-  action: string;
+  kind: ApprovalKind;
   payload: unknown;
   summary: string;
   chatId: string;
-  messageId: string | null;
-  status: ApprovalStatus;
+  tgMessageId: bigint | null;
+  decision: ApprovalDecision;
   expiresAt: Date;
   error: string | null;
 }
 
-/** Условия по колонке `error`, которыми пользуется аренда применения. */
-type ErrorCond = { error: null } | { error: { not: { startsWith: string } } };
-
 interface UpdateManyArgs {
-  where: { id: string; status?: ApprovalStatus; OR?: ErrorCond[] };
+  where: { id: string; decision?: ApprovalDecision };
   data: Partial<Row>;
-}
-
-function matchesError(cond: ErrorCond, value: string | null): boolean {
-  if ('not' in (cond.error ?? {})) {
-    const prefix = (cond as { error: { not: { startsWith: string } } }).error.not.startsWith;
-    return value !== null && !value.startsWith(prefix);
-  }
-  return value === null;
 }
 
 /**
@@ -57,8 +46,7 @@ const h = vi.hoisted(() => {
         updateMany: vi.fn(async ({ where, data }: UpdateManyArgs) => {
           const row = state.row;
           if (!row || row.id !== where.id) return { count: 0 };
-          if (where.status !== undefined && row.status !== where.status) return { count: 0 };
-          if (where.OR && !where.OR.some((c) => matchesError(c, row.error))) return { count: 0 };
+          if (where.decision !== undefined && row.decision !== where.decision) return { count: 0 };
           Object.assign(row, data);
           return { count: 1 };
         }),
@@ -115,7 +103,7 @@ vi.mock('@/channels/registry.js', () => ({
   }),
 }));
 
-const { applyApproval, APPLY_LEASE_PREFIX } = await import('@/approval/apply.js');
+const { applyApproval } = await import('@/approval/apply.js');
 const { setMessenger } = await import('@/approval/telegram.js');
 
 const action: ApprovalAction = {
@@ -133,12 +121,12 @@ function seed(patch: Partial<Row> = {}): void {
   h.state.row = {
     id: 'ap1',
     clientId: 'cl1',
-    action: action.kind,
+    kind: ApprovalKind.BUDGET_CHANGE,
     payload: action,
     summary: '🔔 Апрув требуется: Ромашка',
     chatId: '-100500',
-    messageId: '42',
-    status: ApprovalStatus.APPROVED,
+    tgMessageId: 42n,
+    decision: ApprovalDecision.APPROVED,
     expiresAt: new Date('2026-08-08T12:00:00Z'),
     error: null,
     ...patch,
@@ -190,16 +178,17 @@ describe('applyApproval', () => {
     const log = h.state.changeLogs[0];
     expect(log).toMatchObject({
       campaignId: 'camp-internal-1',
-      channel: 'YANDEX_DIRECT',
       action: 'budget_change',
-      targetType: 'campaign',
-      targetId: '777',
-      approvedBy: '@roman',
+      entityType: 'campaign',
+      entityId: '777',
+      actor: ChangeActor.USER,
       reason: action.reason,
-      before: { dailyBudget: 5000 },
+      prevValue: { dailyBudget: 5000 },
     });
+    // Своих колонок под площадку и автора решения у ChangeLog нет — но потерять их нельзя.
+    expect(log).toMatchObject({ newValue: { provider: 'YANDEX_DIRECT', approvedBy: '@roman' } });
 
-    expect(h.state.row?.status).toBe(ApprovalStatus.APPLIED);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.APPLIED);
     expect(h.state.row?.error).toBeNull();
     // Карточку правим, чтобы кнопки больше не нажимались.
     expect(h.editMessageText).toHaveBeenCalledTimes(1);
@@ -213,7 +202,7 @@ describe('applyApproval', () => {
     const out = await applyApproval('ap1', '@roman');
 
     expect(out).toEqual({ status: 'FAILED', error: 'Error: units exhausted' });
-    expect(h.state.row?.status).toBe(ApprovalStatus.FAILED);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.FAILED);
     expect(h.state.row?.error).toContain('units exhausted');
     expect(h.state.changeLogs).toHaveLength(0);
     expect(cardText()).toContain('применить не удалось');
@@ -227,13 +216,13 @@ describe('applyApproval', () => {
         before: { type: 'MANUAL' },
         after: { type: 'AVERAGE_CPA' },
       },
-      action: 'strategy_change',
+      kind: ApprovalKind.STRATEGY_CHANGE,
     });
 
     const out = await applyApproval('ap1', '@roman');
 
     expect(out.status).toBe('FAILED');
-    expect(h.state.row?.status).toBe(ApprovalStatus.FAILED);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.FAILED);
   });
 
   it('битый payload не применяется', async () => {
@@ -254,14 +243,14 @@ describe('applyApproval', () => {
     const out = await applyApproval('ap1', '@roman');
 
     expect(out).toEqual({ status: 'APPLIED', dryRun: true });
-    expect(h.state.changeLogs[0]).toMatchObject({ after: { dryRun: true, applied: false } });
+    expect(h.state.changeLogs[0]).toMatchObject({ newValue: { dryRun: true, applied: false } });
     expect(cardText()).toContain('Dry-run');
   });
 
   it('заявку не в статусе APPROVED пропускает', async () => {
-    seed({ status: ApprovalStatus.PENDING });
+    seed({ decision: ApprovalDecision.PENDING });
     const out = await applyApproval('ap1', '@roman');
-    expect(out).toEqual({ status: 'SKIPPED', reason: 'status is PENDING' });
+    expect(out).toEqual({ status: 'SKIPPED', reason: 'decision is PENDING' });
     expect(h.setBudgets).not.toHaveBeenCalled();
   });
 
@@ -305,10 +294,10 @@ describe('applyApproval', () => {
     expect(h.setBudgets).toHaveBeenCalledTimes(1);
     expect(out.status).toBe('APPLIED');
     expect(out).toMatchObject({ warning: expect.stringContaining('статус заявки в БД') });
-    expect(h.state.row?.status).not.toBe(ApprovalStatus.FAILED);
-    // Строка осталась APPROVED с маркером аренды — её поднимет сверка зависших.
-    expect(h.state.row?.status).toBe(ApprovalStatus.APPROVED);
-    expect(h.state.row?.error?.startsWith(APPLY_LEASE_PREFIX)).toBe(true);
+    expect(h.state.row?.decision).not.toBe(ApprovalDecision.FAILED);
+    // Строка осталась APPLYING — её поднимет сверка зависших, а `error` свободна под текст.
+    expect(h.state.row?.decision).toBe(ApprovalDecision.APPLYING);
+    expect(h.state.row?.error).toBeNull();
     expect(cardText()).not.toContain('применить не удалось');
     expect(cardText()).toContain('Одобрено (@roman)');
   });
@@ -321,7 +310,7 @@ describe('applyApproval', () => {
 
     expect(out.status).toBe('APPLIED');
     expect(out).toMatchObject({ warning: expect.stringContaining('журнал изменений') });
-    expect(h.state.row?.status).toBe(ApprovalStatus.APPLIED);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.APPLIED);
     // Не молчаливая строка в логе: расхождение видно и в БД, и в карточке.
     expect(h.state.row?.error).toContain('журнал изменений');
     expect(cardText()).toContain('журнал изменений');
@@ -359,7 +348,7 @@ describe('applyApproval', () => {
     const out = await applyApproval('ap1', '@roman');
 
     expect(out).toMatchObject({ status: 'APPLIED', dryRun: false, noop: true });
-    expect(h.state.changeLogs[0]).toMatchObject({ after: { dryRun: false, applied: false } });
+    expect(h.state.changeLogs[0]).toMatchObject({ newValue: { dryRun: false, applied: false } });
     expect(cardText()).not.toContain('Dry-run');
     expect(cardText()).toContain('менять нечего');
   });
@@ -383,7 +372,7 @@ describe('applyApproval', () => {
 
     expect(out.status).toBe('FAILED');
     expect(h.setBudgets).not.toHaveBeenCalled();
-    expect(h.state.row?.status).toBe(ApprovalStatus.FAILED);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.FAILED);
     expect(h.state.row?.error).toContain('изменился после запроса апрува');
     expect(cardText()).toContain('20 000');
   });
