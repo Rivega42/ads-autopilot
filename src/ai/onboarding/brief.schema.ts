@@ -147,8 +147,10 @@ export const BRIEF_FIELD_LABELS: Readonly<Record<BriefField, string>> = {
  * Денежные поля. Для них интервью требует цитату из ответа клиента: выдуманный CPA
  * завтра станет реальной ставкой, а выдуманное УТП — всего лишь неудачным текстом.
  */
-export const MONEY_BRIEF_FIELDS = ['targetCpaRub', 'dailyBudgetRub'] as const satisfies
-  readonly BriefField[];
+export const MONEY_BRIEF_FIELDS = [
+  'targetCpaRub',
+  'dailyBudgetRub',
+] as const satisfies readonly BriefField[];
 
 export type MoneyBriefField = (typeof MONEY_BRIEF_FIELDS)[number];
 
@@ -174,8 +176,7 @@ export function missingBriefFields(draft: ClientBriefDraft): BriefField[] {
 }
 
 export type BriefParseResult =
-  | { ok: true; brief: ClientBriefData }
-  | { ok: false; issues: string[] };
+  { ok: true; brief: ClientBriefData } | { ok: false; issues: string[] };
 
 export function parseCompleteBrief(draft: unknown): BriefParseResult {
   const result = clientBriefSchema.safeParse(draft);

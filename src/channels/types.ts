@@ -85,6 +85,11 @@ export interface StatRow {
 export interface SearchQueryRow {
   date: string;
   campaignExternalId: string;
+  /**
+   * SearchQueryStat ключуется по группе: минус-слово вешается на неё.
+   * Без этого поля многогрупповая кампания не даёт ни одного минус-слова.
+   */
+  adGroupExternalId?: string;
   query: string;
   impressions: number;
   clicks: number;

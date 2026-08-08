@@ -23,7 +23,13 @@ export function lastNDaysMsk(n: number, now: Date = new Date()): { from: string;
   };
 }
 
-/** `yyyy-MM-dd` по МСК → UTC-полночь этой даты, как хранит Postgres `@db.Date`. */
+/**
+ * `yyyy-MM-dd` по МСК → момент начала этих суток в МСК, выраженный в UTC.
+ * Это 21:00 предыдущего дня, а НЕ полночь UTC.
+ *
+ * Для колонок `@db.Date` не годится: Postgres отбросит время и сохранит
+ * предыдущую дату. Там нужна UTC-полночь — см. `ingestion/window.ymdToDateColumn`.
+ */
 export function mskDateToUtc(ymd: string): Date {
   return fromZonedTime(`${ymd}T00:00:00`, MSK);
 }

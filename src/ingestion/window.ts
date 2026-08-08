@@ -37,14 +37,3 @@ export function trailingWindowMsk(days: number, now: Date = new Date()): DateRan
 export function ymdToDateColumn(ymd: string): Date {
   return new Date(`${ymd}T00:00:00.000Z`);
 }
-
-/** Все даты окна включительно — нужен, чтобы выбрать существующие строки одним запросом. */
-export function datesInRange(range: DateRange): string[] {
-  const out: string[] = [];
-  const last = ymdToDateColumn(range.to).getTime();
-  for (let cursor = ymdToDateColumn(range.from); cursor.getTime() <= last;) {
-    out.push(cursor.toISOString().slice(0, 10));
-    cursor = new Date(cursor.getTime() + 24 * 3600 * 1000);
-  }
-  return out;
-}

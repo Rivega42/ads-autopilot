@@ -247,6 +247,9 @@ CREATE INDEX "IdempotencyKey_expiresAt_idx" ON "IdempotencyKey"("expiresAt");
 -- CreateIndex
 CREATE INDEX "UnitsLedger_clientId_createdAt_idx" ON "UnitsLedger"("clientId", "createdAt");
 
+-- CreateIndex
+CREATE UNIQUE INDEX "Keyword_adGroupId_externalId_key" ON "Keyword"("adGroupId", "externalId");
+
 -- AddForeignKey
 ALTER TABLE "Ad" ADD CONSTRAINT "Ad_creativeId_fkey" FOREIGN KEY ("creativeId") REFERENCES "Creative"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 

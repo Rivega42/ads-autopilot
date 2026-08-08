@@ -242,6 +242,7 @@ model Keyword {
 
   adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
 
+  @@unique([adGroupId, externalId])
   @@index([adGroupId, status])
 }
 

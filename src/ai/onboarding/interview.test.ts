@@ -148,7 +148,9 @@ describe('handleAnswer', () => {
   it('не принимает пустой ответ', async () => {
     const { run } = runner([{}]);
     await startInterview(CLIENT, { db: store.db, run });
-    await expect(handleAnswer(CLIENT, '   ', { db: store.db, run })).rejects.toThrow(/Empty answer/);
+    await expect(handleAnswer(CLIENT, '   ', { db: store.db, run })).rejects.toThrow(
+      /Empty answer/,
+    );
   });
 
   it('складывает узнанное в ClientBrief.data и продолжает спрашивать', async () => {

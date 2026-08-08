@@ -39,9 +39,4 @@ export {
   type RunIngestionOptions,
   type SearchQueryRunSummary,
 } from '@/ingestion/run.js';
-export {
-  datesInRange,
-  trailingWindowMsk,
-  ymdToDateColumn,
-  STATS_WINDOW_DAYS,
-} from '@/ingestion/window.js';
+export { trailingWindowMsk, ymdToDateColumn, STATS_WINDOW_DAYS } from '@/ingestion/window.js';

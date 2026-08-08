@@ -74,9 +74,11 @@ export function createMemoryBriefStore(seed: readonly MemoryBriefRow[] = []): Me
 
     create: (args: CreateArgs): Promise<MemoryBriefRow> => {
       if (rows.has(args.data.clientId)) {
-        return Promise.reject(Object.assign(new Error('Unique constraint failed'), {
-          code: 'P2002',
-        }));
+        return Promise.reject(
+          Object.assign(new Error('Unique constraint failed'), {
+            code: 'P2002',
+          }),
+        );
       }
       const row: MemoryBriefRow = {
         id: `brief_${rows.size + 1}`,

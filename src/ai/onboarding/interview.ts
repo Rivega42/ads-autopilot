@@ -304,7 +304,9 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
   const completedAt = complete ? ctx.now() : null;
 
   await persist(ctx.db, ctx.row, {
-    data: toJsonValue(draft),
+    // Готовый бриф пишем в том виде, в каком его вернула схема: дальше его читают
+    // стратег и креативы, и им должно достаться ровно провалидированное значение.
+    data: toJsonValue(parsed?.ok === true ? parsed.brief : draft),
     transcript: toJsonValue(transcript),
     status: complete ? BriefStatus.COMPLETE : BriefStatus.IN_PROGRESS,
     completedAt,
@@ -361,7 +363,14 @@ async function persist(db: BriefStore, row: BriefRow, patch: BriefPatch): Promis
 async function findRow(db: BriefStore, clientId: string): Promise<BriefRow | null> {
   return db.clientBrief.findUnique({
     where: { clientId },
-    select: { id: true, clientId: true, status: true, data: true, transcript: true, updatedAt: true },
+    select: {
+      id: true,
+      clientId: true,
+      status: true,
+      data: true,
+      transcript: true,
+      updatedAt: true,
+    },
   });
 }
 

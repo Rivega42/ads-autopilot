@@ -250,7 +250,18 @@ export class YandexDirectAdapter implements ChannelAdapter {
   async getSearchQueries(ctx: ChannelContext, range: DateRange): Promise<SearchQueryRow[]> {
     const spec: ReportSpec = {
       reportType: 'SEARCH_QUERY_PERFORMANCE_REPORT',
-      fieldNames: ['Date', 'CampaignId', 'Query', 'Impressions', 'Clicks', 'Cost', 'Conversions'],
+      // AdGroupId обязателен: SearchQueryStat ключуется по группе, и без него
+      // многогрупповая кампания не даёт ни одного минус-слова.
+      fieldNames: [
+        'Date',
+        'CampaignId',
+        'AdGroupId',
+        'Query',
+        'Impressions',
+        'Clicks',
+        'Cost',
+        'Conversions',
+      ],
       dateFrom: range.from,
       dateTo: range.to,
     };
@@ -259,6 +270,7 @@ export class YandexDirectAdapter implements ChannelAdapter {
     return report.rows.map((row) => ({
       date: row['Date'] ?? range.from,
       campaignExternalId: row['CampaignId'] ?? '',
+      ...(row['AdGroupId'] ? { adGroupExternalId: row['AdGroupId'] } : {}),
       query: row['Query'] ?? '',
       impressions: reportNumber(row['Impressions']),
       clicks: reportNumber(row['Clicks']),

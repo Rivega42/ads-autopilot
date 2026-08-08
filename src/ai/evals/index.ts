@@ -5,7 +5,11 @@
  * покрывается `pnpm typecheck`, а фикстуры остаются данными, которые можно
  * перезаписать прогоном по живой модели.
  */
-export { createMemoryBriefStore, type MemoryBriefRow, type MemoryBriefStore } from './memory-store.js';
+export {
+  createMemoryBriefStore,
+  type MemoryBriefRow,
+  type MemoryBriefStore,
+} from './memory-store.js';
 export { runEvalCase, type ReplayOptions } from './replay.js';
 export {
   aggregateScore,

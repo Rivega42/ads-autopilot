@@ -21,7 +21,11 @@ export interface ScriptedTurn {
 }
 
 export interface EvalExpectation {
-  outcome: 'complete' | 'needs_human';
+  /**
+   * `question` — интервью правомерно осталось открытым: клиент не дал того, чего
+   * нельзя выдумывать, и агент обязан продолжать спрашивать, а не заполнять поле.
+   */
+  outcome: 'complete' | 'needs_human' | 'question';
   /** Значения, которые обязаны оказаться в итоговом брифе ровно такими. */
   brief?: Partial<ClientBriefData>;
   /**
