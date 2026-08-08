@@ -7,5 +7,289 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum ClientStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum Provider {
+  YANDEX_DIRECT
+  VK_ADS
+  TIKTOK_ADS
+  LINKEDIN_ADS
+  META_ADS
+  GOOGLE_ADS
+  TELEGRAM_ADS
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+  ENDED
+}
+
+enum HandoverMode {
+  OBSERVER
+  ASSIST
+  FULL
+}
+
+enum AdGroupStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum AdFormat {
+  TEXT
+  IMAGE
+  VIDEO
+  CAROUSEL
+  STORIES
+}
+
+enum ModerationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REWRITING
+}
+
+enum MatchType {
+  EXACT
+  PHRASE
+  BROAD
+  NEGATIVE
+}
+
+enum KeywordStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum StatEntityType {
+  CAMPAIGN
+  ADGROUP
+  AD
+  KEYWORD
+}
+
+enum ChangeActor {
+  SYSTEM
+  USER
+  AI
+}
+
+enum ApprovalKind {
+  BUDGET_CHANGE
+  NEW_CAMPAIGN
+  MASS_PAUSE
+  STRATEGY_CHANGE
+  IMPORT_HANDOVER
+}
+
+enum ApprovalDecision {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+// ============================================================================
+// Core entities
+// ============================================================================
+
+model Client {
+  id          String       @id @default(cuid())
+  tgUserId    BigInt       @unique
+  tgUsername  String?
+  name        String
+  status      ClientStatus @default(ACTIVE)
+  industry    String?
+  timezone    String       @default("Europe/Moscow")
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  credentials      Credential[]
+  campaigns        Campaign[]
+  pendingApprovals PendingApproval[]
+
+  @@index([status])
+}
+
+model Credential {
+  id               String    @id @default(cuid())
+  clientId         String
+  provider         Provider
+  encryptedPayload Bytes
+  iv               Bytes
+  tag              Bytes
+  rotatedAt        DateTime  @default(now())
+  expiresAt        DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, provider])
+  @@index([expiresAt])
+}
+
+model Campaign {
+  id             String         @id @default(cuid())
+  clientId       String
+  externalId     String
+  provider       Provider
+  name           String
+  status         CampaignStatus @default(DRAFT)
+  dailyBudget    Decimal        @db.Decimal(12, 2)
+  strategy       String?
+  targetCpa      Decimal?       @db.Decimal(12, 2)
+  handoverMode   HandoverMode   @default(FULL)
+  importedAt     DateTime?
+  importSource   String?
+  baselineData   Json?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  client     Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  adGroups   AdGroup[]
+  changeLogs ChangeLog[]
+
+  @@unique([provider, externalId])
+  @@index([clientId, status])
+}
+
+model AdGroup {
+  id         String        @id @default(cuid())
+  campaignId String
+  externalId String
+  name       String
+  status     AdGroupStatus @default(ACTIVE)
+  targetings Json?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  campaign Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  ads      Ad[]
+  keywords Keyword[]
+
+  @@unique([campaignId, externalId])
+  @@index([status])
+}
+
+model Ad {
+  id                String           @id @default(cuid())
+  adGroupId         String
+  externalId        String
+  format            AdFormat
+  title             String
+  body              String
+  imageUrl          String?
+  videoUrl          String?
+  cta               String?
+  moderationStatus  ModerationStatus @default(PENDING)
+  moderationReason  String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([adGroupId, externalId])
+  @@index([moderationStatus])
+}
+
+model Keyword {
+  id         String        @id @default(cuid())
+  adGroupId  String
+  externalId String?
+  phrase     String
+  bid        Decimal?      @db.Decimal(12, 2)
+  matchType  MatchType     @default(PHRASE)
+  status     KeywordStatus @default(ACTIVE)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+
+  @@index([adGroupId, status])
+}
+
+model CampaignStat {
+  id          BigInt         @id @default(autoincrement())
+  entityType  StatEntityType
+  entityId    String
+  date        DateTime       @db.Date
+  impressions Int            @default(0)
+  clicks      Int            @default(0)
+  spend       Decimal        @default(0) @db.Decimal(14, 4)
+  conversions Int            @default(0)
+  ctr         Decimal?       @db.Decimal(6, 4)
+  cpc         Decimal?       @db.Decimal(12, 4)
+  cpa         Decimal?       @db.Decimal(12, 4)
+  createdAt   DateTime       @default(now())
+
+  @@unique([entityType, entityId, date])
+  @@index([entityId, date])
+  @@index([date])
+}
+
+model ChangeLog {
+  id           String      @id @default(cuid())
+  campaignId   String?
+  entityType   String
+  entityId     String
+  action       String
+  prevValue    Json?
+  newValue     Json?
+  reason       String?
+  actor        ChangeActor
+  appliedAt    DateTime    @default(now())
+  rolledBackAt DateTime?
+
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+
+  @@index([campaignId, appliedAt])
+  @@index([entityType, entityId])
+}
+
+model PendingApproval {
+  id           String           @id @default(cuid())
+  clientId     String
+  kind         ApprovalKind
+  payload      Json
+  tgMessageId  BigInt?
+  expiresAt    DateTime
+  decision     ApprovalDecision @default(PENDING)
+  decidedAt    DateTime?
+  createdAt    DateTime         @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, decision])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id        BigInt   @id @default(autoincrement())
+  actor     String
+  action    String
+  resource  String
+  ip        String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([actor, createdAt])
+  @@index([resource, createdAt])
 }
