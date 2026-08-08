@@ -127,10 +127,14 @@ export class MetrikaClient {
       const full = data.data.length >= METRIKA_PAGE_LIMIT;
       if (!full || (total !== undefined && received >= total)) break;
 
-      if (page >= METRIKA_MAX_PAGES) {
+      // Обрыв на середине хуже отказа: недостающие кампании-дни уедут в отчёт
+      // и в оптимизатор как нули. Про заведомо неподъёмный срез узнаём сразу по
+      // `total_rows`, не выкачивая полсотни страниц впустую.
+      const budget = METRIKA_PAGE_LIMIT * METRIKA_MAX_PAGES;
+      if (page >= METRIKA_MAX_PAGES || (total !== undefined && total > budget)) {
         throw new AppError('Metrika response does not fit into the page budget', {
           code: 'METRIKA_TOO_MANY_ROWS',
-          context: { counterId: this.counterId, received, total, pages: page },
+          context: { counterId: this.counterId, received, total, pages: page, budget },
         });
       }
     }
