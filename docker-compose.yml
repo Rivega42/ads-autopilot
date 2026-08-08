@@ -32,6 +32,27 @@ services:
       timeout: 3s
       retries: 10
 
+  prisma-studio:
+    image: node:22-alpine
+    container_name: ads-autopilot-prisma-studio
+    profiles: ['tools']
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ads}:${POSTGRES_PASSWORD:-ads_dev}@postgres:5432/${POSTGRES_DB:-ads_autopilot}
+    ports:
+      - '5555:5555'
+    volumes:
+      - .:/app
+    command:
+      [
+        'sh',
+        '-c',
+        'corepack enable && pnpm install --frozen-lockfile && pnpm exec prisma studio --hostname 0.0.0.0 --port 5555',
+      ]
+
 volumes:
   pg_data:
   redis_data:
