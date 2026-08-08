@@ -139,6 +139,117 @@ export const vkContentSchema = z
   })
   .passthrough();
 
+// ── Ремаркетинг ─────────────────────────────────────────────────────────────
+
+/**
+ * Список контактов (`remarketing/users_lists`).
+ *
+ * @needs-live-token: имя счётчика записей не подтверждено — в справке он зовётся
+ * то `users_count`, то `count`; читаем оба и отдаём первый непустой. Проверить
+ * на живом кабинете, какой приходит на самом деле, и убрать лишний.
+ */
+export const vkUsersListSchema = z
+  .object({
+    id: vkId,
+    name: z.string().default(''),
+    type: z.string().nullish(),
+    status: z.string().nullish(),
+    users_count: z.coerce.number().int().nonnegative().nullish(),
+    count: z.coerce.number().int().nonnegative().nullish(),
+    created: z.string().nullish(),
+  })
+  .passthrough();
+
+export type VkUsersList = z.infer<typeof vkUsersListSchema>;
+
+/**
+ * Сегмент аудитории (`remarketing/segments`).
+ *
+ * `relations` — полиморфные ссылки на источники (списки контактов, цели пикселя,
+ * LAL); разбирать их целиком смысла нет, нам важен только состав по id.
+ */
+export const vkSegmentSchema = z
+  .object({
+    id: vkId,
+    name: z.string().default(''),
+    status: z.string().nullish(),
+    users_count: z.coerce.number().int().nonnegative().nullish(),
+    relations: z.array(z.record(z.unknown())).nullish(),
+    created: z.string().nullish(),
+  })
+  .passthrough();
+
+export type VkSegment = z.infer<typeof vkSegmentSchema>;
+
+/** VK Пиксель (`remarketing/counters`). */
+export const vkCounterSchema = z
+  .object({
+    id: vkId,
+    name: z.string().default(''),
+    type: z.string().nullish(),
+    status: z.string().nullish(),
+    /** Домен, к которому привязан пиксель, — им пиксель сопоставляется с клиентом. */
+    domain: z.string().nullish(),
+  })
+  .passthrough();
+
+export type VkCounter = z.infer<typeof vkCounterSchema>;
+
+/**
+ * Цель пикселя (`remarketing/goals`) — источник конверсий по ТЗ § 2.4.
+ *
+ * @needs-live-token: имя поля со ссылкой на пиксель (`counter_id`) взято по
+ * аналогии с myTarget; в ответе ads.vk.ru оно может называться иначе.
+ */
+export const vkGoalSchema = z
+  .object({
+    id: vkId,
+    name: z.string().default(''),
+    counter_id: vkId.nullish(),
+    type: z.string().nullish(),
+    status: z.string().nullish(),
+  })
+  .passthrough();
+
+export type VkGoal = z.infer<typeof vkGoalSchema>;
+
+/** LAL-аудитория (`remarketing/lookalike_audiences`). */
+export const vkLookalikeSchema = z
+  .object({
+    id: vkId,
+    name: z.string().default(''),
+    status: z.string().nullish(),
+    /** Пока VK считает похожую аудиторию, статус остаётся «в процессе». */
+    processing_status: z.string().nullish(),
+    source_segment_id: vkId.nullish(),
+  })
+  .passthrough();
+
+export type VkLookalike = z.infer<typeof vkLookalikeSchema>;
+
+/** Ответ на создание объекта: нам нужен только id, остальное свободной формы. */
+export const vkCreatedSchema = z
+  .object({
+    id: vkId.optional(),
+  })
+  .passthrough();
+
+/**
+ * Ответ на добавление контактов в список.
+ *
+ * @needs-live-token: форма не подтверждена. Поэтому не отвергаем тело, а
+ * вытаскиваем счётчик принятых записей, если он есть; нераспознанный ответ при
+ * HTTP 200 считаем полным успехом — так же, как `mass_action` в entities.ts.
+ */
+export const vkContactUploadAckSchema = z.unknown().transform((data) => {
+  if (!data || typeof data !== 'object') return { accepted: undefined };
+  const obj = data as Record<string, unknown>;
+  const raw = obj['accepted'] ?? obj['added'] ?? obj['count'];
+  if (raw === undefined || raw === null) return { accepted: undefined };
+  const parsed = toNumber(raw, -1);
+  return { accepted: parsed >= 0 ? parsed : undefined };
+});
+
 // ── Статистика ──────────────────────────────────────────────────────────────
 
 /**

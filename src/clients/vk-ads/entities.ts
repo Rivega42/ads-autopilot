@@ -44,6 +44,14 @@ export const VK_PATHS = {
 
 export type VkEntityPath = (typeof VK_PATHS)[keyof typeof VK_PATHS];
 
+/**
+ * Коллекции, которые читаются и создаются теми же helper'ами, что и сущности
+ * кампаний: к трём путям выше добавляются аудитории (`remarketing/*`, см.
+ * remarketing.ts). Отдельный тип, а не `string`, чтобы опечатка в пути по-прежнему
+ * ловилась компилятором.
+ */
+export type VkListPath = VkEntityPath | `remarketing/${string}`;
+
 /** Статусы VK: активная сущность и «выключенная». Удаление — отдельный статус. */
 export const VK_STATUS_ACTIVE = 'active';
 export const VK_STATUS_BLOCKED = 'blocked';
@@ -85,7 +93,7 @@ export interface VkListOptions {
 
 async function fetchPage<T extends z.ZodTypeAny>(
   http: VkHttpClient,
-  path: VkEntityPath,
+  path: VkListPath,
   itemSchema: T,
   params: Record<string, unknown>,
 ): Promise<{ items: Array<z.infer<T>>; count: number }> {
@@ -105,7 +113,7 @@ async function fetchPage<T extends z.ZodTypeAny>(
  */
 export async function listEntities<T extends z.ZodTypeAny>(
   http: VkHttpClient,
-  path: VkEntityPath,
+  path: VkListPath,
   itemSchema: T,
   opts: VkListOptions = {},
 ): Promise<Array<z.infer<T>>> {
@@ -168,7 +176,7 @@ const writeAckSchema = z.unknown();
 
 export function createEntity(
   http: VkHttpClient,
-  path: VkEntityPath,
+  path: VkListPath,
   payload: Record<string, unknown>,
 ): Promise<unknown> {
   return http.request({
@@ -183,7 +191,7 @@ export function createEntity(
 /** Точечное обновление. VK принимает частичный объект тем же POST на /{id}.json. */
 export function updateEntity(
   http: VkHttpClient,
-  path: VkEntityPath,
+  path: VkListPath,
   id: string,
   payload: Record<string, unknown>,
 ): Promise<unknown> {
@@ -196,7 +204,7 @@ export function updateEntity(
   });
 }
 
-export function deleteEntity(http: VkHttpClient, path: VkEntityPath, id: string): Promise<unknown> {
+export function deleteEntity(http: VkHttpClient, path: VkListPath, id: string): Promise<unknown> {
   return http.request({
     method: 'DELETE',
     url: `${path}/${encodeURIComponent(id)}.json`,
@@ -425,13 +433,6 @@ export async function uploadStaticContent(
 }
 
 // ── Не реализовано в этом заходе ────────────────────────────────────────────
-
-/**
- * TODO(EPIC-02.5) Ремаркетинг: `remarketing/segments`, `remarketing/users_lists`
- * (контакты грузятся SHA-256-хешами), `remarketing/counters` (VK Пиксель),
- * `remarketing/goals`, `remarketing/lookalike_audiences`. Нужен отдельный
- * контракт в ChannelAdapter — текущий про аудитории ничего не знает.
- */
 
 /**
  * ОРД: реализовывать нечего. Для прямого рекламодателя VK Реклама маркирует
