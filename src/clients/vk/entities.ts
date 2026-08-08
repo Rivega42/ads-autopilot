@@ -4,6 +4,7 @@ import { scoped } from '@/lib/logger.js';
 import { VK_CHANNEL } from '@/clients/vk/auth.js';
 import type { VkHttpClient } from '@/clients/vk/http.js';
 import {
+  parseVkError,
   vkAdGroupSchema,
   vkAdPlanSchema,
   vkBannerSchema,
@@ -204,6 +205,104 @@ export function deleteEntity(http: VkHttpClient, path: VkEntityPath, id: string)
 }
 
 /**
+ * id объекта VK для тела запроса.
+ *
+ * `Number('abc')` даёт NaN, а `JSON.stringify` превращает NaN в `null` — запрос
+ * уходит с `"id": null` и считается применённым, хотя не изменил ничего. Id
+ * больше 2^53 молча теряет точность и адресует чужой объект. И то и другое —
+ * повод упасть до сети, а не «применить» неизвестно что.
+ */
+export function toVkNumericId(id: string): number {
+  const parsed = Number(id);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new ChannelError(VK_CHANNEL, `VK entity id is not a usable number: ${id}`, {
+      code: 'VK_INVALID_ID',
+      retryable: false,
+      context: { id },
+    });
+  }
+  return parsed;
+}
+
+/**
+ * Минимальная сумма, которую вообще имеет смысл писать: одна копейка.
+ * Ноль и отрицательное — не «маленькая ставка», а другой смысл: у VK/myTarget
+ * пустой дневной лимит означает «без ограничения», то есть снятый предохранитель.
+ */
+export const VK_MIN_MONEY = 0.01;
+
+/**
+ * Деньги для тела запроса: проверка и квантование до копеек.
+ *
+ * Зачем проверка: `JSON.stringify({budget_limit_day: NaN})` даёт `null`, а null
+ * в дневном лимите VK читает как «лимита нет». То есть оптимизатор, поделивший
+ * на ноль конверсий, снял бы кампании суточный потолок — и получил бы в ответ
+ * «успешно применено».
+ *
+ * Зачем квантование: в карточке кабинета сумма показывается с двумя знаками,
+ * а `1049.376 * 1` даёт `1049.3760000000002` — расхождение с тем, что увидит
+ * клиент, и лишний диф при сверке.
+ */
+export function toVkMoney(value: number, field: string, context: Record<string, unknown> = {}): number {
+  if (!Number.isFinite(value) || value < VK_MIN_MONEY) {
+    throw new ChannelError(VK_CHANNEL, `VK money value for ${field} is not writable: ${value}`, {
+      code: 'VK_INVALID_MONEY',
+      retryable: false,
+      context: { field, value: String(value), min: VK_MIN_MONEY, ...context },
+    });
+  }
+  return Math.round(value * 100) / 100;
+}
+
+/** Отчёт о массовой записи: сколько объектов реально приняла площадка. */
+export interface VkMassUpdateOutcome {
+  requested: number;
+  updated: number;
+  /** Объекты, по которым VK вернул ошибку внутри успешного (200) ответа. */
+  failed: Array<{ id: string; message: string }>;
+}
+
+/**
+ * Разбирает ответ mass_action и находит объекты, отклонённые поштучно.
+ *
+ * @needs-live-token: форма ответа не подтверждена. Поэтому разбираем оборонительно:
+ * распознаём массив/`items`, ищем в элементах маркеры ошибки и сопоставляем их с
+ * id батча. Нераспознанное тело при HTTP 200 считаем полным успехом — иначе любая
+ * непредвиденная форма ломала бы штатную запись.
+ */
+export function readMassActionFailures(
+  ack: unknown,
+  batch: readonly VkEntityPatch[],
+): Array<{ id: string; message: string }> {
+  const rows = pickAckRows(ack);
+  if (!rows) return [];
+
+  const failed: Array<{ id: string; message: string }> = [];
+  rows.forEach((row, index) => {
+    if (!row || typeof row !== 'object') return;
+    const obj = row as Record<string, unknown>;
+    const error = obj['error'] ?? obj['errors'];
+    const successFlag = obj['success'];
+    const rejected =
+      (error !== undefined && error !== null) || successFlag === false || successFlag === 0;
+    if (!rejected) return;
+    const id = obj['id'] !== undefined ? String(obj['id']) : (batch[index]?.id ?? String(index));
+    const info = parseVkError(error !== undefined ? { error } : obj);
+    failed.push({ id, message: info.message ?? 'rejected by VK' });
+  });
+  return failed;
+}
+
+function pickAckRows(ack: unknown): unknown[] | null {
+  if (Array.isArray(ack)) return ack;
+  if (ack && typeof ack === 'object') {
+    const items = (ack as Record<string, unknown>)['items'];
+    if (Array.isArray(items)) return items;
+  }
+  return null;
+}
+
+/**
  * Массовое обновление: один запрос на каждые 200 объектов.
  *
  * @needs-live-token: путь `mass_action.json` и форма тела (плоский массив
@@ -215,20 +314,62 @@ export async function massUpdateEntities(
   http: VkHttpClient,
   path: VkEntityPath,
   patches: readonly VkEntityPatch[],
-): Promise<number> {
-  if (patches.length === 0) return 0;
-  let applied = 0;
-  for (const batch of chunk(patches, VK_BATCH_LIMIT)) {
-    await http.request({
-      method: 'POST',
-      url: `${path}/mass_action.json`,
-      schema: writeAckSchema,
-      data: batch.map((p) => ({ ...p, id: Number(p.id) })),
-      label: `mass update ${path}`,
-    });
-    applied += batch.length;
+): Promise<VkMassUpdateOutcome> {
+  const outcome: VkMassUpdateOutcome = { requested: patches.length, updated: 0, failed: [] };
+  if (patches.length === 0) return outcome;
+
+  const batches = chunk(patches, VK_BATCH_LIMIT);
+  for (const [index, batch] of batches.entries()) {
+    // id проверяем заранее и по всему батчу: частично применённый батч хуже,
+    // чем не начатый вовсе.
+    const data = batch.map((p) => ({ ...p, id: toVkNumericId(p.id) }));
+    let ack: unknown;
+    try {
+      ack = await http.request({
+        method: 'POST',
+        url: `${path}/mass_action.json`,
+        schema: writeAckSchema,
+        data,
+        label: `mass update ${path}`,
+      });
+    } catch (err) {
+      // Цикл по батчам не атомарен. Если что-то уже записалось, «упало целиком» —
+      // ложь: вызывающий спишет со счетов 200 уже применённых изменений.
+      if (outcome.updated === 0 && outcome.failed.length === 0) throw err;
+      throw new ChannelError(
+        VK_CHANNEL,
+        `VK mass update partially applied: ${outcome.updated}/${patches.length}`,
+        {
+          code: 'VK_MASS_UPDATE_PARTIAL',
+          retryable: false,
+          context: {
+            path,
+            requested: patches.length,
+            updated: outcome.updated,
+            failed: outcome.failed,
+            failedBatch: index,
+            pendingIds: batches
+              .slice(index)
+              .flat()
+              .map((p) => p.id),
+          },
+          cause: err,
+        },
+      );
+    }
+
+    const failures = readMassActionFailures(ack, batch);
+    outcome.failed.push(...failures);
+    outcome.updated += batch.length - failures.length;
   }
-  return applied;
+
+  if (outcome.failed.length > 0) {
+    log.warn(
+      { path, requested: outcome.requested, updated: outcome.updated, failed: outcome.failed },
+      'vk mass update rejected some objects',
+    );
+  }
+  return outcome;
 }
 
 /** Перевод пачки объектов в другой статус — база для pause/resume адаптера. */
@@ -237,7 +378,7 @@ export function setEntitiesStatus(
   path: VkEntityPath,
   ids: readonly string[],
   status: string,
-): Promise<number> {
+): Promise<VkMassUpdateOutcome> {
   return massUpdateEntities(
     http,
     path,
