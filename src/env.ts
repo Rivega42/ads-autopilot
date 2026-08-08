@@ -6,6 +6,11 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
   APP_VERSION: z.string().default('0.0.1'),
   DATABASE_URL: z.string().url(),
+  CREDENTIALS_ENCRYPTION_KEY: z
+    .string()
+    .min(44)
+    .default('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='),
+  TELEGRAM_ADMIN_IDS: z.string().default(''),
 });
 
 export type Env = z.infer<typeof envSchema>;

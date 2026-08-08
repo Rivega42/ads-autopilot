@@ -55,7 +55,7 @@ async function main() {
 
   const clientCount = await prisma.client.count();
   const campaignCount = await prisma.campaign.count();
-  console.log(`seed done: ${clientCount} clients, ${campaignCount} campaigns`);
+  process.stdout.write(`seed done: ${clientCount} clients, ${campaignCount} campaigns\n`);
 }
 
 main()

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import type { Campaign, HandoverMode, PrismaClient, Provider } from '@prisma/client';
 
 import { prisma as defaultPrisma } from '../db/prisma.js';
@@ -14,7 +15,7 @@ export interface UpsertCampaignInput {
   handoverMode?: HandoverMode;
   importedAt?: Date | null;
   importSource?: string | null;
-  baselineData?: unknown;
+  baselineData?: Prisma.InputJsonValue | null;
 }
 
 export class CampaignRepository {
@@ -24,7 +25,7 @@ export class CampaignRepository {
     const { provider, externalId, ...rest } = input;
     return this.db.campaign.upsert({
       where: { provider_externalId: { provider, externalId } },
-      create: { provider, externalId, ...rest },
+      create: { provider, externalId, ...rest, baselineData: rest.baselineData ?? Prisma.JsonNull },
       update: {
         name: rest.name,
         status: rest.status,
@@ -32,7 +33,8 @@ export class CampaignRepository {
         strategy: rest.strategy ?? undefined,
         targetCpa: rest.targetCpa ?? undefined,
         handoverMode: rest.handoverMode,
-        baselineData: rest.baselineData === undefined ? undefined : (rest.baselineData as never),
+        baselineData:
+          rest.baselineData !== undefined ? (rest.baselineData ?? Prisma.JsonNull) : undefined,
       },
     });
   }
