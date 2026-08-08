@@ -32,7 +32,8 @@
     "dev:bot": "tsx watch src/apps/bot.ts",
     "start:worker": "node dist/apps/worker.js",
     "start:bot": "node dist/apps/bot.js",
-    "test:evals": "vitest run tests/ai-evals"
+    "test:evals": "vitest run tests/ai-evals",
+    "cli": "tsx src/apps/cli.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
@@ -47,6 +48,7 @@
     "bullmq": "^6.0.9",
     "date-fns": "^4.4.0",
     "date-fns-tz": "^3.2.0",
+    "dotenv": "^17.4.2",
     "fastify": "^5.0.0",
     "grammy": "^1.45.1",
     "ioredis": "^6.0.0",
@@ -67,7 +69,6 @@
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vitest/coverage-v8": "^2.0.0",
-    "dotenv": "^17.4.2",
     "eslint": "^9.0.0",
     "eslint-plugin-import": "^2.30.0",
     "globals": "^17.9.0",

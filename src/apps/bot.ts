@@ -5,6 +5,7 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import { CALLBACK_PREFIX } from '@/approval/callback-data.js';
 import { handleApprovalCallback } from '@/approval/callbacks.js';
 import { createApiMessenger, setMessenger } from '@/approval/telegram.js';
+import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import { describeError } from '@/lib/errors.js';
@@ -59,6 +60,8 @@ export function buildBot(token: string): Bot {
 }
 
 async function main(): Promise<void> {
+  bootstrapChannels();
+
   const token = env.TELEGRAM_BOT_TOKEN;
   if (!token) {
     // Без токена бот не «работает вхолостую», а не запускается: молчащий бот

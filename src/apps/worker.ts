@@ -1,5 +1,6 @@
 import { Worker, type Processor } from 'bullmq';
 
+import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { MSK } from '@/constants.js';
 import { prisma } from '@/db/prisma.js';
 import { createRedis } from '@/db/redis.js';
@@ -50,6 +51,8 @@ async function scheduleRepeatables(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  bootstrapChannels();
+
   for (const name of Object.values(QUEUE_NAMES)) {
     startWorker(name, handlers[name]);
   }
