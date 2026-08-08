@@ -12,11 +12,37 @@ interface Row {
   messageId: string | null;
   status: ApprovalStatus;
   expiresAt: Date;
+  respondedAt: Date | null;
+  respondedBy: string | null;
+  error: string | null;
 }
 
-interface UpdateManyArgs {
-  where: { id: string; status?: ApprovalStatus };
-  data: Partial<Row>;
+/** Условия по колонке `error`: их используют и аренда применения, и сверка зависших. */
+type ErrorCond = { error: null } | { error: { not: { startsWith: string } } };
+
+interface Where {
+  id?: string;
+  status?: ApprovalStatus;
+  expiresAt?: { lte: Date };
+  respondedAt?: { lte: Date };
+  OR?: ErrorCond[];
+}
+
+function matchesError(cond: ErrorCond, value: string | null): boolean {
+  if (cond.error !== null && 'not' in cond.error) {
+    return value !== null && !value.startsWith(cond.error.not.startsWith);
+  }
+  return value === null;
+}
+
+function matches(row: Row, where: Where): boolean {
+  if (where.id !== undefined && row.id !== where.id) return false;
+  if (where.status !== undefined && row.status !== where.status) return false;
+  if (where.expiresAt && !(row.expiresAt <= where.expiresAt.lte)) return false;
+  if (where.respondedAt && !(row.respondedAt !== null && row.respondedAt <= where.respondedAt.lte))
+    return false;
+  if (where.OR && !where.OR.some((c) => matchesError(c, row.error))) return false;
+  return true;
 }
 
 const h = vi.hoisted(() => {
@@ -25,16 +51,12 @@ const h = vi.hoisted(() => {
     state,
     prisma: {
       pendingApproval: {
-        findMany: vi.fn(
-          async ({ where }: { where: { status: ApprovalStatus; expiresAt: { lte: Date } } }) =>
-            state.rows
-              .filter((r) => r.status === where.status && r.expiresAt <= where.expiresAt.lte)
-              .map((r) => ({ ...r })),
+        findMany: vi.fn(async ({ where }: { where: Where }) =>
+          state.rows.filter((r) => matches(r, where)).map((r) => ({ ...r })),
         ),
-        updateMany: vi.fn(async ({ where, data }: UpdateManyArgs) => {
+        updateMany: vi.fn(async ({ where, data }: { where: Where; data: Partial<Row> }) => {
           const row = state.rows.find((r) => r.id === where.id);
-          if (!row) return { count: 0 };
-          if (where.status !== undefined && row.status !== where.status) return { count: 0 };
+          if (!row || !matches(row, where)) return { count: 0 };
           Object.assign(row, data);
           return { count: 1 };
         }),
@@ -49,7 +71,8 @@ const h = vi.hoisted(() => {
 
 vi.mock('@/db/prisma.js', () => ({ prisma: h.prisma }));
 
-const { expireApprovals } = await import('@/approval/expire.js');
+const { expireApprovals, reconcileStuckApprovals, STUCK_APPROVAL_MINUTES } =
+  await import('@/approval/expire.js');
 const { setMessenger } = await import('@/approval/telegram.js');
 
 const NOW = new Date('2026-08-08T12:00:00Z');
@@ -76,8 +99,22 @@ function row(patch: Partial<Row>): Row {
     messageId: '42',
     status: ApprovalStatus.PENDING,
     expiresAt: new Date(NOW.getTime() - 60_000),
+    respondedAt: null,
+    respondedBy: null,
+    error: null,
     ...patch,
   };
+}
+
+/** Заявка, застрявшая в APPROVED: человек ответил, а применение оборвалось. */
+function stuckRow(patch: Partial<Row> = {}): Row {
+  return row({
+    status: ApprovalStatus.APPROVED,
+    expiresAt: new Date(NOW.getTime() + 60 * 60_000),
+    respondedAt: new Date(NOW.getTime() - (STUCK_APPROVAL_MINUTES + 5) * 60_000),
+    respondedBy: '@roman',
+    ...patch,
+  });
 }
 
 beforeEach(() => {
@@ -96,7 +133,7 @@ describe('expireApprovals', () => {
 
     const res = await expireApprovals(NOW);
 
-    expect(res).toEqual({ expired: 2, raced: 0 });
+    expect(res).toEqual({ expired: 2, raced: 0, stuck: 0 });
     expect(h.state.rows.every((r) => r.status === ApprovalStatus.EXPIRED)).toBe(true);
     expect(h.editMessageText).toHaveBeenCalledTimes(2);
     expect(h.editMessageText.mock.calls[0]?.[2]).toContain('Срок ответа истёк');
@@ -118,10 +155,11 @@ describe('expireApprovals', () => {
     // Модель гонки: строка отобрана как PENDING, но к моменту UPDATE уже APPROVED.
     h.prisma.pendingApproval.findMany.mockResolvedValueOnce([{ ...row({ id: 'ap1' }) }]);
     h.state.rows[0]!.status = ApprovalStatus.APPROVED;
+    h.state.rows[0]!.respondedAt = NOW;
 
     const res = await expireApprovals(NOW);
 
-    expect(res).toEqual({ expired: 0, raced: 1 });
+    expect(res).toEqual({ expired: 0, raced: 1, stuck: 0 });
     expect(h.state.rows[0]?.status).toBe(ApprovalStatus.APPROVED);
     expect(h.sendMessage).not.toHaveBeenCalled();
   });
@@ -134,5 +172,48 @@ describe('expireApprovals', () => {
 
     expect(res.expired).toBe(1);
     expect(h.state.rows[0]?.status).toBe(ApprovalStatus.EXPIRED);
+  });
+});
+
+// ── #9: заявка, застрявшая между захватом и применением ──────────────────────
+describe('reconcileStuckApprovals', () => {
+  it('показывает человеку заявку, зависшую в APPROVED, и ничего не применяет', async () => {
+    h.state.rows = [stuckRow()];
+
+    const stuck = await reconcileStuckApprovals(NOW);
+
+    expect(stuck).toBe(1);
+    // Автоприменения нет: неизвестно, успел ли пройти запрос в кабинет.
+    expect(h.state.rows[0]?.status).toBe(ApprovalStatus.APPROVED);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+    const text = h.sendMessage.mock.calls[0]?.[1] ?? '';
+    expect(text).toContain('результат применения неизвестен');
+    expect(text).toContain('@roman');
+  });
+
+  it('не шумит повторно на каждом прогоне крона', async () => {
+    h.state.rows = [stuckRow()];
+
+    await reconcileStuckApprovals(NOW);
+    const again = await reconcileStuckApprovals(new Date(NOW.getTime() + 60 * 60_000));
+
+    expect(again).toBe(0);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('свежий APPROVED не трогает — применение ещё идёт', async () => {
+    h.state.rows = [stuckRow({ respondedAt: new Date(NOW.getTime() - 60_000) })];
+
+    expect(await reconcileStuckApprovals(NOW)).toBe(0);
+    expect(h.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('крон экспирации сам зовёт сверку — другого крона у модуля нет', async () => {
+    h.state.rows = [stuckRow()];
+
+    const res = await expireApprovals(NOW);
+
+    expect(res.stuck).toBe(1);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChannelContext } from '@/channels/types.js';
+import { ChannelError } from '@/lib/errors.js';
 import { RateLimitGovernor, VkHttpClient, type VkTransport } from '@/clients/vk/http.js';
 import { VK_PATHS } from '@/clients/vk/entities.js';
 import { VkAdsAdapter, buildRecreatePayload } from '@/clients/vk/adapter.js';
@@ -12,7 +13,23 @@ interface Recorded {
   data?: unknown;
 }
 
-function harness(reply: (call: Recorded) => unknown = () => ({ success: 1 })): {
+/** Пауз в тестах нет: спейсинг проверяется в http.test.ts. */
+function fastGovernor(): RateLimitGovernor {
+  return new RateLimitGovernor(
+    () => Date.now(),
+    async () => undefined,
+  );
+}
+
+/**
+ * Стенд адаптера. Подменяется только транспорт: клиент адаптер создаёт сам,
+ * своей настоящей фабрикой, — иначе тест прячет то, сколько клиентов (а значит
+ * очередей и снимков лимитов) он на самом деле поднимает.
+ */
+function harness(
+  reply: (call: Recorded) => unknown = () => ({ success: 1 }),
+  statusOf: (call: Recorded, index: number) => number = () => 200,
+): {
   adapter: VkAdsAdapter;
   calls: Recorded[];
 } {
@@ -25,23 +42,87 @@ function harness(reply: (call: Recorded) => unknown = () => ({ success: 1 })): {
       data: config.data,
     };
     calls.push(call);
-    return { status: 200, data: reply(call), headers: {} };
+    return { status: statusOf(call, calls.length - 1), data: reply(call), headers: {} };
   };
-  const client = new VkHttpClient({
-    transport,
-    getAccessToken: async () => 'token',
-    attempts: 1,
-    governor: new RateLimitGovernor(
-      () => Date.now(),
-      async () => undefined,
-    ),
+  const adapter = new VkAdsAdapter({
+    http: {
+      transport,
+      getAccessToken: async () => 'token',
+      attempts: 1,
+      governor: fastGovernor(),
+    },
   });
-  return { adapter: new VkAdsAdapter({ httpFactory: () => client }), calls };
+  return { adapter, calls };
 }
 
 function ctx(dryRun: boolean): ChannelContext {
   return { clientId: 'client-1', credentials: { clientId: 'a', clientSecret: 'b' }, dryRun };
 }
+
+describe('VkAdsAdapter http client lifetime', () => {
+  /** Фабрика, которая, как настоящая, каждый раз создаёт новый клиент — но считает вызовы. */
+  function countingHarness(): {
+    adapter: VkAdsAdapter;
+    created: VkHttpClient[];
+  } {
+    const created: VkHttpClient[] = [];
+    const transport: VkTransport = async () => ({
+      status: 200,
+      data: { count: 0, items: [] },
+      headers: {},
+    });
+    const adapter = new VkAdsAdapter({
+      httpFactory: () => {
+        const client = new VkHttpClient({
+          transport,
+          getAccessToken: async () => 'token',
+          attempts: 1,
+          governor: fastGovernor(),
+        });
+        created.push(client);
+        return client;
+      },
+    });
+    return { adapter, created };
+  }
+
+  it('reuses one client per cabinet, so throttle state is not thrown away', async () => {
+    const { adapter, created } = countingHarness();
+    const c = ctx(false);
+
+    // Ровно тот вызов из синка, который поднимал три несинхронизированных потока.
+    await Promise.all([
+      adapter.listCampaigns(c),
+      adapter.listAdGroups(c, []),
+      adapter.listAds(c, []),
+    ]);
+    await adapter.getStats(c, 'campaign', { from: '2026-08-01', to: '2026-08-01' });
+
+    expect(created).toHaveLength(1);
+  });
+
+  it('does not share a client between cabinets', async () => {
+    const { adapter, created } = countingHarness();
+    await adapter.listCampaigns(ctx(false));
+    await adapter.listCampaigns({
+      clientId: 'client-2',
+      credentials: { clientId: 'a', clientSecret: 'b' },
+      dryRun: false,
+    });
+    expect(created).toHaveLength(2);
+  });
+
+  it('builds a new client when the cabinet credentials change', async () => {
+    const { adapter, created } = countingHarness();
+    await adapter.listCampaigns(ctx(false));
+    await adapter.listCampaigns({
+      clientId: 'client-1',
+      credentials: { clientId: 'another-app', clientSecret: 'b' },
+      dryRun: false,
+    });
+    expect(created).toHaveLength(2);
+  });
+});
 
 describe('VkAdsAdapter reads', () => {
   it('maps ad plans onto RemoteCampaign', async () => {
@@ -247,6 +328,112 @@ describe('VkAdsAdapter writes for real', () => {
     expect(res.result).toEqual({
       createdBannerExternalId: '10',
       deletedBannerExternalId: '9',
+    });
+  });
+
+  it('keeps the old banner alive when the created one has no confirmed id', async () => {
+    const { adapter, calls } = harness((call) =>
+      call.method === 'GET'
+        ? { count: 1, items: [{ id: 9, ad_group_id: 4, status: 'rejected' }] }
+        : // Схема ответа поехала: id замены неизвестен.
+          { result: 'ok' },
+    );
+
+    await expect(
+      adapter.updateAdText(ctx(false), '9', { title: 'новый', text: 'новый текст' }),
+    ).rejects.toMatchObject({ code: 'VK_BANNER_CREATE_NO_ID' });
+
+    // Удаления быть не должно: иначе группа осталась бы без объявления вообще.
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST']);
+  });
+
+  it('pauses the old banner and names the replacement when the delete fails', async () => {
+    const { adapter, calls } = harness(
+      (call) => {
+        if (call.method === 'GET') {
+          return { count: 1, items: [{ id: 9, ad_group_id: 4, status: 'rejected' }] };
+        }
+        if (call.method === 'DELETE') return { error: { message: 'gone wrong' } };
+        return { id: 10, ad_group_id: 4 };
+      },
+      (call) => (call.method === 'DELETE' ? 500 : 200),
+    );
+
+    const err = await adapter
+      .updateAdText(ctx(false), '9', { title: 'новый', text: 'новый текст' })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ChannelError);
+    expect((err as ChannelError).code).toBe('VK_BANNER_REPLACE_ORPHAN');
+    // Повтор вслепую создал бы третий баннер, поэтому в ошибке видно, что уже создано.
+    expect((err as ChannelError).context).toMatchObject({
+      adExternalId: '9',
+      createdBannerExternalId: '10',
+      oldBannerPaused: true,
+    });
+    // Старый баннер не удалился, но и деньги больше не тратит.
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      `GET ${VK_PATHS.banners}.json`,
+      `POST ${VK_PATHS.banners}.json`,
+      `DELETE ${VK_PATHS.banners}/9.json`,
+      `POST ${VK_PATHS.banners}/mass_action.json`,
+    ]);
+    expect(calls[3]?.data).toEqual([{ id: 9, status: 'blocked' }]);
+  });
+
+  it('never writes a non-finite budget, because null means "no daily cap" in VK', async () => {
+    const { adapter, calls } = harness();
+
+    await expect(
+      adapter.setBudgets(ctx(false), [{ campaignExternalId: '22', dailyBudget: Number.NaN }]),
+    ).rejects.toMatchObject({ code: 'VK_INVALID_MONEY' });
+    await expect(
+      adapter.setBudgets(ctx(false), [{ campaignExternalId: '22', dailyBudget: 0 }]),
+    ).rejects.toMatchObject({ code: 'VK_INVALID_MONEY' });
+
+    // Ни один такой «апдейт» не должен доехать до площадки.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('quantises money to kopecks before writing', async () => {
+    const { adapter, calls } = harness();
+    await adapter.setBudgets(ctx(false), [{ campaignExternalId: '22', dailyBudget: 1049.376 }]);
+    expect(calls[0]?.data).toEqual([{ id: 22, budget_limit_day: 1049.38 }]);
+  });
+
+  it('rejects the whole change set when one id is unusable', async () => {
+    const { adapter, calls } = harness();
+    await expect(
+      adapter.setBids(ctx(false), [
+        { keywordExternalId: '11', bid: 42 },
+        { keywordExternalId: 'group-12', bid: 43 },
+      ]),
+    ).rejects.toMatchObject({ code: 'VK_INVALID_ID' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reports per-item rejections instead of claiming everything was applied', async () => {
+    const { adapter } = harness(() => ({
+      items: [
+        { id: 33, success: true },
+        { id: 34, error: { message: 'banner is archived' } },
+      ],
+    }));
+
+    const res = await adapter.pauseEntities(ctx(false), 'ad', ['33', '34']);
+
+    expect(res.applied).toBe(true);
+    expect(res.result).toEqual({
+      requested: 2,
+      updated: 1,
+      failed: [{ id: '34', message: 'banner is archived' }],
+    });
+  });
+
+  it('does not report success when VK rejected every object', async () => {
+    const { adapter } = harness(() => ({ items: [{ id: 33, error: { message: 'nope' } }] }));
+    await expect(adapter.pauseEntities(ctx(false), 'ad', ['33'])).rejects.toMatchObject({
+      code: 'VK_MASS_UPDATE_REJECTED',
     });
   });
 

@@ -1,6 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InlineKeyboardMarkup } from 'grammy/types';
-import { env } from '@/config/index.js';
 import type { ApprovalAction } from '@/approval/types.js';
 
 interface CreatedRow {
@@ -15,12 +14,24 @@ interface CreatedRow {
 }
 
 const h = vi.hoisted(() => {
-  const state: { created: CreatedRow | null } = { created: null };
+  // Глобальный флаг выключаем до загрузки конфига: иначе dry-run включён всегда и
+  // проверить противоположное направление расхождения нечем.
+  process.env.DRY_RUN = 'false';
+
+  const state: { created: CreatedRow | null; clientDryRun: boolean; updateError: string | null } = {
+    created: null,
+    clientDryRun: false,
+    updateError: null,
+  };
   return {
     state,
     prisma: {
       client: {
-        findUnique: vi.fn(async () => ({ name: 'ООО «Ромашка»', approvalChatId: '-100500' })),
+        findUnique: vi.fn(async () => ({
+          name: 'ООО «Ромашка»',
+          approvalChatId: '-100500',
+          dryRun: state.clientDryRun,
+        })),
       },
       pendingApproval: {
         create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
@@ -33,6 +44,7 @@ const h = vi.hoisted(() => {
           return { ...state.created };
         }),
         update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          if (state.updateError) throw new Error(state.updateError);
           if (state.created) Object.assign(state.created, data);
           return { ...(state.created as CreatedRow) };
         }),
@@ -43,6 +55,7 @@ const h = vi.hoisted(() => {
 
 vi.mock('@/db/prisma.js', () => ({ prisma: h.prisma }));
 
+const { env } = await import('@/config/index.js');
 const { createApproval, requestApprovalIfNeeded } = await import('@/approval/create.js');
 const { setMessenger } = await import('@/approval/telegram.js');
 
@@ -63,9 +76,13 @@ const action: ApprovalAction = {
   after: 3000,
 };
 
+const DRY_RUN_BANNER = '⚠️ Режим dry-run';
+
 beforeEach(() => {
   vi.clearAllMocks();
   h.state.created = null;
+  h.state.clientDryRun = false;
+  h.state.updateError = null;
   sendMessage.mockResolvedValue({ messageId: 4242 });
   setMessenger({
     sendMessage,
@@ -104,7 +121,7 @@ describe('createApproval', () => {
 
   it('payload кладётся целиком — apply не пересчитывает решение', async () => {
     await createApproval(action, { now: NOW });
-    expect(h.state.created?.payload).toEqual(action);
+    expect(h.state.created?.payload).toMatchObject({ ...action });
     expect(h.state.created?.action).toBe('budget_change');
   });
 
@@ -126,5 +143,41 @@ describe('createApproval', () => {
   it('requestApprovalIfNeeded создаёт заявку, когда правило сработало', async () => {
     await expect(requestApprovalIfNeeded(action, { now: NOW })).resolves.not.toBeNull();
     expect(h.prisma.pendingApproval.create).toHaveBeenCalledTimes(1);
+  });
+
+  // ── #11: карточка обещает ровно тот режим, который будет применён ──────────
+  it('карточка предупреждает о dry-run, когда он включён у клиента', async () => {
+    h.state.clientDryRun = true;
+
+    await createApproval(action, { now: NOW });
+
+    expect(sendMessage.mock.calls[0]?.[1]).toContain(DRY_RUN_BANNER);
+    expect(h.state.created?.payload).toMatchObject({ meta: { dryRun: true } });
+  });
+
+  it('без dry-run карточка о нём молчит, и это же значение уходит в payload', async () => {
+    await createApproval(action, { now: NOW });
+
+    expect(sendMessage.mock.calls[0]?.[1]).not.toContain(DRY_RUN_BANNER);
+    expect(h.state.created?.payload).toMatchObject({ meta: { dryRun: false } });
+  });
+
+  it('опция dryRun только усиливает защиту', async () => {
+    await createApproval(action, { now: NOW, dryRun: true });
+
+    expect(sendMessage.mock.calls[0]?.[1]).toContain(DRY_RUN_BANNER);
+    expect(h.state.created?.payload).toMatchObject({ meta: { dryRun: true } });
+  });
+
+  // ── #19: карточка уже в чате — её нельзя потерять ─────────────────────────
+  it('не роняет создание, если messageId не записался после отправки', async () => {
+    h.state.updateError = 'connection pool timeout';
+
+    const approval = await createApproval(action, { now: NOW });
+
+    // Иначе вызывающий считает создание неудачным и шлёт вторую карточку на то же изменение.
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(approval.id).toBe('ap1');
+    expect(approval.messageId).toBe('4242');
   });
 });

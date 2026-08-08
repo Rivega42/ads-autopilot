@@ -63,13 +63,15 @@ const TEXTBLOCK_TITLE = 'title_25';
 const TEXTBLOCK_TITLE2 = 'title_2';
 const TEXTBLOCK_TEXT = 'text_90';
 
-/**
- * Точка внедрения фейкового транспорта в тестах; в проде всегда пусто.
- * Подменяется именно транспорт, а не фабрика клиента: кеширование клиента по
- * кабинету — часть поведения адаптера, и тест не должен его подменять.
- */
+/** Точки внедрения для тестов; в проде обе пусты. */
 export interface VkAdapterOptions {
+  /** Подмена транспорта/токена: сама фабрика клиента при этом остаётся настоящей. */
   http?: Partial<VkHttpDeps>;
+  /**
+   * Полная подмена фабрики — нужна там, где тест считает, сколько клиентов
+   * создал адаптер. Кеш по кабинету применяется и к ней.
+   */
+  httpFactory?: (ctx: ChannelContext) => VkHttpClient;
 }
 
 /**
@@ -85,11 +87,12 @@ function dry(plan: Record<string, unknown>): WriteResult {
 export class VkAdsAdapter implements ChannelAdapter {
   readonly channel: Channel = VK_CHANNEL;
 
-  private readonly overrides: Partial<VkHttpDeps>;
+  private readonly httpFactory: (ctx: ChannelContext) => VkHttpClient;
   private readonly clients = new Map<string, VkHttpClient>();
 
   constructor(opts: VkAdapterOptions = {}) {
-    this.overrides = opts.http ?? {};
+    const overrides = opts.http ?? {};
+    this.httpFactory = opts.httpFactory ?? ((ctx) => createVkHttpClient(ctx, overrides));
   }
 
   /**
@@ -102,9 +105,9 @@ export class VkAdsAdapter implements ChannelAdapter {
     const cached = this.clients.get(key);
     if (cached) return cached;
 
-    const client = createVkHttpClient(ctx, this.overrides);
-    // Ключ включает реквизиты: после переподключения кабинета клиент с прежним
-    // ctx ходил бы со старыми client_id/секретом.
+    const client = this.httpFactory(ctx);
+    // Адаптер живёт всё время процесса, поэтому кеш ограничен: вытесняем самый
+    // давний кабинет. Потеря его снимка лимитов стоит одного холодного старта.
     if (this.clients.size >= CLIENT_CACHE_LIMIT) {
       const oldest = this.clients.keys().next();
       if (!oldest.done) this.clients.delete(oldest.value);

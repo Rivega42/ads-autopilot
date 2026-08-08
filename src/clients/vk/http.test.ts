@@ -6,8 +6,11 @@ import {
   mapVkHttpError,
   parseRateLimitHeaders,
   RateLimitGovernor,
+  shouldRetryInProcess,
   VkHttpClient,
   VK_COLD_START_RPS,
+  VK_MAX_BACKOFF_MS,
+  VK_SNAPSHOT_TTL_MS,
   type VkResponse,
   type VkTransport,
 } from '@/clients/vk/http.js';
@@ -93,7 +96,7 @@ describe('computeThrottleDelayMs', () => {
 
     expect(
       computeThrottleDelayMs({
-        snapshot: { hourlyRemaining: 0, rpsRemaining: 5, observedAt: 0 },
+        snapshot: { hourlyRemaining: 0, rpsRemaining: 5, observedAt: now },
         lastRequestAt: null,
         now,
       }),
@@ -102,11 +105,36 @@ describe('computeThrottleDelayMs', () => {
     // Дневное окно жёстче часового и проверяется первым.
     expect(
       computeThrottleDelayMs({
-        snapshot: { dailyRemaining: 0, hourlyRemaining: 0, observedAt: 0 },
+        snapshot: { dailyRemaining: 0, hourlyRemaining: 0, observedAt: now },
         lastRequestAt: null,
         now,
       }),
     ).toBe(day - (5 * hour + 90_000));
+  });
+
+  it('ignores exhausted counters from a snapshot older than its shelf life', () => {
+    const now = 10 * 60 * 60 * 1000;
+    const stale = { dailyRemaining: 0, rpsLimit: 10, observedAt: now - VK_SNAPSHOT_TTL_MS - 1 };
+    // Счётчик «остатка» описывает окно на момент ответа; час спустя он ничего не значит,
+    // иначе один ответ навсегда парализовал бы клиент в процессе.
+    expect(computeThrottleDelayMs({ snapshot: stale, lastRequestAt: null, now })).toBe(0);
+    expect(computeThrottleDelayMs({ snapshot: stale, lastRequestAt: now - 10, now })).toBe(90);
+
+    const fresh = { ...stale, observedAt: now - VK_SNAPSHOT_TTL_MS + 1 };
+    expect(computeThrottleDelayMs({ snapshot: fresh, lastRequestAt: null, now })).toBeGreaterThan(
+      VK_MAX_BACKOFF_MS,
+    );
+  });
+});
+
+describe('shouldRetryInProcess', () => {
+  it('refuses to sleep in-process longer than the backoff cap', () => {
+    expect(shouldRetryInProcess(new RateLimitError('VK_ADS', 5_000))).toBe(true);
+    expect(shouldRetryInProcess(new RateLimitError('VK_ADS', VK_MAX_BACKOFF_MS + 1))).toBe(false);
+    expect(shouldRetryInProcess(new ChannelError('VK_ADS', 'boom', { retryable: true }))).toBe(
+      true,
+    );
+    expect(shouldRetryInProcess(new AuthError('VK_ADS'))).toBe(false);
   });
 });
 
@@ -129,6 +157,71 @@ describe('RateLimitGovernor', () => {
 
     // Первый запрос идёт сразу, каждый следующий — через 100 мс (10 rps).
     expect(slept).toEqual([100, 100]);
+  });
+
+  it('throws RateLimitError instead of sleeping out an exhausted daily window', async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const clock = 3 * day + 90_000;
+    const slept: number[] = [];
+    const gov = new RateLimitGovernor(
+      () => clock,
+      async (ms) => {
+        slept.push(ms);
+      },
+    );
+    gov.observe({ 'x-ratelimit-daily-remaining': '0' });
+
+    const err = await gov.acquire().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RateLimitError);
+    // Задача должна уехать в отложенные, а не занимать слот воркера почти сутки.
+    expect((err as RateLimitError).retryAfterMs).toBe(day - 90_000);
+    expect(slept).toEqual([]);
+  });
+
+  it('keeps serving the queue after a deferred acquire', async () => {
+    const day = 24 * 60 * 60 * 1000;
+    let clock = 3 * day + 90_000;
+    const gov = new RateLimitGovernor(
+      () => clock,
+      async () => undefined,
+    );
+    gov.observe({ 'x-ratelimit-daily-remaining': '0' });
+    await expect(gov.acquire()).rejects.toBeInstanceOf(RateLimitError);
+
+    // Сутки сменились — снимок протух, цепочка не встала.
+    clock += 2 * VK_SNAPSHOT_TTL_MS;
+    await expect(gov.acquire()).resolves.toBeUndefined();
+  });
+
+  it('aborts a pending throttle wait instead of holding a timer open', async () => {
+    let clock = 0;
+    const controller = new AbortController();
+    // Ожидание настоящее: проверяем, что сигнал доходит до sleep().
+    const gov = new RateLimitGovernor(() => clock);
+    gov.observe({ 'x-ratelimit-rps-limit': '1' });
+    await gov.acquire(controller.signal);
+
+    clock += 1;
+    const startedAt = Date.now();
+    const pending = gov.acquire(controller.signal);
+    // Даём паузе действительно начаться, иначе проверили бы только ранний выход.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    controller.abort();
+
+    await expect(pending).rejects.toThrow(/Aborted/);
+    // Секундный таймер снят, а не дождан: именно он не давал бы завершиться воркеру.
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
+  it('refuses a slot outright when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const gov = new RateLimitGovernor(
+      () => 0,
+      async () => undefined,
+    );
+    await expect(gov.acquire(controller.signal)).rejects.toMatchObject({ code: 'VK_ABORTED' });
   });
 });
 
@@ -235,6 +328,53 @@ describe('VkHttpClient', () => {
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ChannelError);
     expect((err as ChannelError).retryable).toBe(false);
+  });
+
+  it('surfaces an exhausted daily window as RateLimitError without hanging the worker', async () => {
+    const day = 24 * 60 * 60 * 1000;
+    const clock = 3 * day + 90_000;
+    const { transport, calls } = transportOf([{ status: 200, data: { ok: true } }]);
+    const governor = new RateLimitGovernor(
+      () => clock,
+      async () => {
+        throw new Error('governor must not sleep out a whole day');
+      },
+    );
+    governor.observe({ 'x-ratelimit-daily-remaining': '0' });
+
+    const client = new VkHttpClient({
+      transport,
+      getAccessToken: async () => 'token',
+      attempts: 4,
+      governor,
+    });
+
+    const err = await client
+      .request({ method: 'GET', url: 'x.json', schema: okSchema })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(RateLimitError);
+    expect((err as RateLimitError).retryAfterMs).toBe(day - 90_000);
+    // И не ретраится внутри процесса: withRetry уснул бы ровно на эту подсказку.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('replays a 429 on a write, because mass_action writes are absolute assignments', async () => {
+    const { transport, calls } = transportOf([
+      { status: 429, data: {}, headers: { 'retry-after': '0' } },
+      { status: 200, data: { ok: true } },
+    ]);
+    const client = new VkHttpClient({
+      transport,
+      getAccessToken: async () => 'token',
+      attempts: 2,
+      governor: fastGovernor(),
+    });
+
+    await expect(
+      client.request({ method: 'POST', url: 'ad_plans/mass_action.json', schema: okSchema }),
+    ).resolves.toEqual({ ok: true });
+    expect(calls).toHaveLength(2);
   });
 
   it('records rate-limit headers from successful responses', async () => {

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalStatus } from '@prisma/client';
+import type { Context } from 'grammy';
 import { encodeCallbackData } from '@/approval/callback-data.js';
 import type { ApprovalAction } from '@/approval/types.js';
 
@@ -19,7 +20,7 @@ interface Row {
 }
 
 type ApplyOutcomeLike =
-  | { status: 'APPLIED'; dryRun: boolean }
+  | { status: 'APPLIED'; dryRun: boolean; noop?: boolean; warning?: string }
   | { status: 'FAILED'; error: string }
   | { status: 'SKIPPED'; reason: string };
 
@@ -59,6 +60,9 @@ const h = vi.hoisted(() => {
       dryRun: false,
     })),
     editCard: vi.fn(async () => undefined),
+    answerCallbackQuery: vi.fn(
+      async (_id: string, _text: string, _alert?: boolean): Promise<void> => undefined,
+    ),
   };
 });
 
@@ -68,9 +72,12 @@ vi.mock('@/approval/apply.js', () => ({
   editCard: h.editCard,
 }));
 
-const { processApprovalCallback } = await import('@/approval/callbacks.js');
+const { processApprovalCallback, handleApprovalCallback, ANSWER_DEADLINE_MS } =
+  await import('@/approval/callbacks.js');
+const { setMessenger } = await import('@/approval/telegram.js');
 
 const NOW = new Date('2026-08-08T10:00:00Z');
+const CHAT = '-100500';
 
 const action: ApprovalAction = {
   kind: 'budget_change',
@@ -90,7 +97,7 @@ function seed(patch: Partial<Row> = {}): Row {
     action: action.kind,
     payload: action,
     summary: 'карточка',
-    chatId: '-100500',
+    chatId: CHAT,
     messageId: '42',
     status: ApprovalStatus.PENDING,
     expiresAt: new Date(NOW.getTime() + 60 * 60_000),
@@ -103,20 +110,39 @@ function seed(patch: Partial<Row> = {}): Row {
   return row;
 }
 
+/** Нажатие из «правильного» чата, если не сказано иное. */
+function press(patch: { data?: string; actor?: string; chatId?: string | undefined } = {}) {
+  return processApprovalCallback({
+    data: patch.data ?? encodeCallbackData('approve', 'ap1'),
+    actor: patch.actor ?? '@roman',
+    chatId: 'chatId' in patch ? patch.chatId : CHAT,
+    now: NOW,
+  });
+}
+
+/** Минимальный grammY-контекст: нужны только callbackQuery и чат. */
+function ctxFor(chatId: number | undefined, data: string): Context {
+  return {
+    callbackQuery: { id: 'q1', data, from: { id: 7, is_bot: false, username: 'roman' } },
+    chat: chatId === undefined ? undefined : { id: chatId, type: 'group' },
+  } as unknown as Context;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   h.applyApproval.mockResolvedValue({ status: 'APPLIED', dryRun: false });
   h.state.row = null;
+  setMessenger({
+    sendMessage: async () => ({ messageId: 1 }),
+    editMessageText: async () => undefined,
+    answerCallbackQuery: h.answerCallbackQuery,
+  });
 });
 
 describe('processApprovalCallback', () => {
   it('одобрение применяет изменение и помечает строку APPROVED', async () => {
     seed();
-    const out = await processApprovalCallback({
-      data: encodeCallbackData('approve', 'ap1'),
-      actor: '@roman',
-      now: NOW,
-    });
+    const out = await press();
 
     expect(out.kind).toBe('applied');
     expect(h.applyApproval).toHaveBeenCalledTimes(1);
@@ -125,18 +151,13 @@ describe('processApprovalCallback', () => {
     expect(h.state.row?.respondedBy).toBe('@roman');
   });
 
-  it('двойное нажатие применяет изменение ровно один раз', async () => {
+  // Захват проверяем здесь; что apply не сходит в кабинет дважды — в apply.test.ts,
+  // где вызывается настоящий applyApproval со своим входным шлюзом.
+  it('двойное нажатие захватывает заявку ровно один раз', async () => {
     seed();
-    const press = () =>
-      processApprovalCallback({
-        data: encodeCallbackData('approve', 'ap1'),
-        actor: '@roman',
-        now: NOW,
-      });
 
     const [first, second] = await Promise.all([press(), press()]);
 
-    // Ровно один вызов адаптера — иначе бюджет уехал бы дважды.
     expect(h.applyApproval).toHaveBeenCalledTimes(1);
     const kinds = [first.kind, second.kind].sort();
     expect(kinds).toEqual(['already_handled', 'applied'].sort());
@@ -144,11 +165,7 @@ describe('processApprovalCallback', () => {
 
   it('третье нажатие по уже применённой заявке ничего не делает', async () => {
     seed({ status: ApprovalStatus.APPLIED, respondedBy: '@roman' });
-    const out = await processApprovalCallback({
-      data: encodeCallbackData('approve', 'ap1'),
-      actor: '@other',
-      now: NOW,
-    });
+    const out = await press({ actor: '@other' });
 
     expect(out.kind).toBe('already_handled');
     expect(out.answer).toContain('@roman');
@@ -158,11 +175,7 @@ describe('processApprovalCallback', () => {
   it('истёкшая заявка вежливо отказывает и не применяется', async () => {
     seed({ expiresAt: new Date(NOW.getTime() - 60_000) });
 
-    const out = await processApprovalCallback({
-      data: encodeCallbackData('approve', 'ap1'),
-      actor: '@roman',
-      now: NOW,
-    });
+    const out = await press();
 
     expect(out.kind).toBe('expired');
     expect(out.answer).toMatch(/срок/i);
@@ -174,11 +187,7 @@ describe('processApprovalCallback', () => {
 
   it('отклонение закрывает карточку и не зовёт адаптер', async () => {
     seed();
-    const out = await processApprovalCallback({
-      data: encodeCallbackData('reject', 'ap1'),
-      actor: '@roman',
-      now: NOW,
-    });
+    const out = await press({ data: encodeCallbackData('reject', 'ap1') });
 
     expect(out.kind).toBe('rejected');
     expect(h.state.row?.status).toBe(ApprovalStatus.REJECTED);
@@ -191,11 +200,7 @@ describe('processApprovalCallback', () => {
 
   it('«Детали» ничего не меняет и показывает начинку', async () => {
     seed();
-    const out = await processApprovalCallback({
-      data: encodeCallbackData('details', 'ap1'),
-      actor: '@roman',
-      now: NOW,
-    });
+    const out = await press({ data: encodeCallbackData('details', 'ap1') });
 
     expect(out.kind).toBe('details');
     expect(out.alert).toBe(true);
@@ -204,16 +209,12 @@ describe('processApprovalCallback', () => {
   });
 
   it('исчезнувшая заявка не роняет обработчик', async () => {
-    const out = await processApprovalCallback({
-      data: encodeCallbackData('approve', 'ap-gone'),
-      actor: '@roman',
-      now: NOW,
-    });
+    const out = await press({ data: encodeCallbackData('approve', 'ap-gone') });
     expect(out.kind).toBe('not_found');
   });
 
   it('чужая кнопка игнорируется', async () => {
-    const out = await processApprovalCallback({ data: 'menu:open', actor: '@roman', now: NOW });
+    const out = await press({ data: 'menu:open' });
     expect(out.kind).toBe('ignored');
     expect(h.prisma.pendingApproval.updateMany).not.toHaveBeenCalled();
   });
@@ -225,13 +226,124 @@ describe('processApprovalCallback', () => {
       error: 'ChannelError: units exhausted',
     });
 
-    const out = await processApprovalCallback({
-      data: encodeCallbackData('approve', 'ap1'),
-      actor: '@roman',
-      now: NOW,
-    });
+    const out = await press();
 
     expect(out.kind).toBe('apply_failed');
     expect(out.answer).toContain('units exhausted');
+  });
+
+  it('предупреждение о неполной фиксации доходит до человека', async () => {
+    seed();
+    h.applyApproval.mockResolvedValue({
+      status: 'APPLIED',
+      dryRun: false,
+      warning: 'запись в журнал изменений не удалась: timeout',
+    });
+
+    const out = await press();
+
+    expect(out.kind).toBe('applied');
+    expect(out.answer).toContain('журнал изменений');
+    expect(out.alert).toBe(true);
+  });
+
+  // ── #10: право нажимать кнопку ─────────────────────────────────────────────
+  it('нажатие из чужого чата (пересланная карточка) отклоняется', async () => {
+    seed();
+
+    const out = await press({ chatId: '-1009999', actor: '@stranger' });
+
+    expect(out.kind).toBe('forbidden');
+    expect(out.alert).toBe(true);
+    expect(h.applyApproval).not.toHaveBeenCalled();
+    expect(h.prisma.pendingApproval.updateMany).not.toHaveBeenCalled();
+    expect(h.state.row?.status).toBe(ApprovalStatus.PENDING);
+  });
+
+  it('«Детали» из чужого чата не показывает начинку заявки', async () => {
+    seed();
+
+    const out = await press({
+      data: encodeCallbackData('details', 'ap1'),
+      chatId: '-1009999',
+      actor: '@stranger',
+    });
+
+    expect(out.kind).toBe('forbidden');
+    expect(out.answer).not.toContain('777');
+  });
+
+  it('нажатие без известного чата не проходит', async () => {
+    seed();
+
+    const out = await press({ chatId: undefined });
+
+    expect(out.kind).toBe('forbidden');
+    expect(h.applyApproval).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleApprovalCallback', () => {
+  /** Обработчик не принимает `now`, поэтому срок жизни считаем от настоящего времени. */
+  function seedLive(patch: Partial<Row> = {}): Row {
+    return seed({ expiresAt: new Date(Date.now() + 60 * 60_000), ...patch });
+  }
+
+  it('берёт чат из апдейта: пересланная карточка не одобряет чужой расход', async () => {
+    seedLive();
+
+    await handleApprovalCallback(ctxFor(-1009999, encodeCallbackData('approve', 'ap1')));
+
+    expect(h.applyApproval).not.toHaveBeenCalled();
+    expect(h.state.row?.status).toBe(ApprovalStatus.PENDING);
+    expect(h.answerCallbackQuery).toHaveBeenCalledTimes(1);
+    expect(h.answerCallbackQuery.mock.calls[0]?.[1]).toContain('другому чату');
+  });
+
+  it('одобрение из своего чата проходит', async () => {
+    seedLive();
+
+    await handleApprovalCallback(ctxFor(-100500, encodeCallbackData('approve', 'ap1')));
+
+    expect(h.applyApproval).toHaveBeenCalledWith('ap1', '@roman');
+    expect(h.answerCallbackQuery).toHaveBeenCalledTimes(1);
+  });
+
+  // ── #15: долгое применение не должно оставлять человека с часиками ─────────
+  it('квитирует нажатие, не дожидаясь конца долгого применения', async () => {
+    vi.useFakeTimers();
+    try {
+      seedLive();
+      h.applyApproval.mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => resolve({ status: 'APPLIED', dryRun: false }), 120_000),
+          ),
+      );
+
+      const task = handleApprovalCallback(ctxFor(-100500, encodeCallbackData('approve', 'ap1')));
+
+      await vi.advanceTimersByTimeAsync(ANSWER_DEADLINE_MS + 100);
+      // Ответ ушёл, пока апрув ещё применяется: id callback-запроса живёт недолго.
+      expect(h.answerCallbackQuery).toHaveBeenCalledTimes(1);
+      expect(h.answerCallbackQuery.mock.calls[0]?.[1]).toContain('Принято');
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      await task;
+
+      // Второй раз на тот же запрос не отвечаем — Telegram такое не принимает.
+      expect(h.answerCallbackQuery).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('быстрый исход показывает настоящий текст, а не заглушку', async () => {
+    seedLive();
+
+    await handleApprovalCallback(ctxFor(-100500, encodeCallbackData('reject', 'ap1')));
+
+    expect(h.answerCallbackQuery).toHaveBeenCalledTimes(1);
+    expect(h.answerCallbackQuery.mock.calls[0]?.[1]).toContain('Отклонено');
   });
 });

@@ -98,7 +98,13 @@ export async function applyApproval(approvalId: string, approvedBy: string): Pro
   // ── дальше изменение уже в кабинете: только фиксация факта ──────────────────
   const noop = !result.applied && !dryRun;
 
-  const changeLogError = await writeChangeLog(action, approvedBy, dryRun, result.applied, result.plan);
+  const changeLogError = await writeChangeLog(
+    action,
+    approvedBy,
+    dryRun,
+    result.applied,
+    result.plan,
+  );
   if (changeLogError) notes.push(`запись в журнал изменений не удалась: ${changeLogError}`);
 
   try {

@@ -1,13 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelContext } from '@/channels/types.js';
-import { AuthError } from '@/lib/errors.js';
+import { AuthError, ChannelError } from '@/lib/errors.js';
 import {
   clearVkTokenCache,
   getVkAccessToken,
   grantTypeFor,
   isTokenFresh,
+  isTokenLimitResponse,
   mintVkToken,
   readVkCredentials,
+  refreshMarginForTtlMs,
+  VK_MIN_REMINT_INTERVAL_MS,
   VK_REFRESH_MARGIN_MS,
   VK_TOKEN_TTL_SEC,
   type VkAuthDeps,
@@ -90,6 +93,36 @@ describe('isTokenFresh', () => {
   });
 });
 
+describe('refreshMarginForTtlMs', () => {
+  it('never eats more than half of a short token life', () => {
+    // Суточный токен обновляем за 4 часа — как и раньше.
+    expect(refreshMarginForTtlMs(VK_TOKEN_TTL_SEC * 1000)).toBe(VK_REFRESH_MARGIN_MS);
+    // 100-секундный токен с 4-часовым запасом был бы протухшим в момент выдачи.
+    expect(refreshMarginForTtlMs(100_000)).toBe(50_000);
+    expect(refreshMarginForTtlMs(0)).toBe(0);
+  });
+});
+
+describe('isTokenLimitResponse', () => {
+  it('recognises only VK’s own token-ceiling wording', () => {
+    expect(
+      isTokenLimitResponse(403, {
+        error: { code: 'limit', message: 'Max count of tokens reached' },
+      }),
+    ).toBe(true);
+    expect(isTokenLimitResponse(403, { error: { message: 'tokens limit' } })).toBe(true);
+  });
+
+  it('does not read a rate limit, an empty body or a plain 403 as the ceiling', () => {
+    // Сносить все токены пользователя из-за такого 403 — убить и воркера, и бота.
+    expect(isTokenLimitResponse(403, { error: { message: 'Rate limit exceeded' } })).toBe(false);
+    expect(isTokenLimitResponse(403, '')).toBe(false);
+    expect(isTokenLimitResponse(403, undefined)).toBe(false);
+    expect(isTokenLimitResponse(403, { error: { message: 'Access denied' } })).toBe(false);
+    expect(isTokenLimitResponse(200, { error: { message: 'tokens limit' } })).toBe(false);
+  });
+});
+
 describe('mintVkToken', () => {
   it('deletes the known previous token before asking for a new one', async () => {
     const { deps, posts } = depsOf([
@@ -125,6 +158,37 @@ describe('mintVkToken', () => {
     // Слот освобождаем по всему пользователю: чей именно токен занял 5-й слот, мы не знаем.
     expect(posts[1]?.body['access_token']).toBeUndefined();
     expect(minted.accessToken).toBe('after-cleanup');
+    // Короткий TTL доезжает до вызывающего: по нему считается запас на обновление.
+    expect(minted.ttlMs).toBe(100_000);
+    expect(minted.expiresAtMs).toBe(1_700_000_000_000 + 100_000);
+  });
+
+  it('does not free slots on a 403 that is merely a rate limit', async () => {
+    const { deps, posts } = depsOf([
+      { status: 403, data: { error: { message: 'Rate limit exceeded' } } },
+    ]);
+
+    await expect(mintVkToken(baseCreds, deps)).rejects.toBeInstanceOf(AuthError);
+    // Ровно один запрос: никакого token/delete.json по всему пользователю.
+    expect(posts.map((p) => p.url.split('/api/v2/')[1])).toEqual(['oauth2/token.json']);
+  });
+
+  it('does not free slots on an empty 403 from a WAF', async () => {
+    const { deps, posts } = depsOf([{ status: 403, data: '' }]);
+
+    await expect(mintVkToken(baseCreds, deps)).rejects.toBeInstanceOf(AuthError);
+    expect(posts).toHaveLength(1);
+  });
+
+  it('treats a 503 from the token endpoint as retryable, not as an auth failure', async () => {
+    const { deps } = depsOf([{ status: 503, data: { error: { message: 'upstream down' } } }]);
+
+    const err = await mintVkToken(baseCreds, deps).catch((e: unknown) => e);
+    // AuthError не ретраится: кабинет остался бы без токена до ручного вмешательства.
+    expect(err).toBeInstanceOf(ChannelError);
+    expect(err).not.toBeInstanceOf(AuthError);
+    expect((err as ChannelError).retryable).toBe(true);
+    expect((err as ChannelError).code).toBe('VK_TOKEN_ENDPOINT_UNAVAILABLE');
   });
 
   it('does not loop forever when the ceiling survives the cleanup', async () => {
@@ -194,17 +258,73 @@ describe('getVkAccessToken', () => {
     expect(posts.filter((p) => p.url.endsWith('oauth2/token.json'))).toHaveLength(1);
   });
 
-  it('forceRefresh bypasses the cache', async () => {
-    const { deps, posts } = depsOf([
-      { status: 200, data: { access_token: 'first', expires_in: VK_TOKEN_TTL_SEC } },
-    ]);
+  it('forceRefresh bypasses the cache once the remint guard has expired', async () => {
+    let clock = 1_700_000_000_000;
+    const { deps, posts } = depsOf(
+      [{ status: 200, data: { access_token: 'first', expires_in: VK_TOKEN_TTL_SEC } }],
+      () => clock,
+    );
     const ctx = ctxOf({ clientId: 'cid', clientSecret: 'secret' });
 
     await getVkAccessToken(ctx, {}, deps);
+    clock += VK_MIN_REMINT_INTERVAL_MS + 1;
     await getVkAccessToken(ctx, { forceRefresh: true }, deps);
 
     const tokenRequests = posts.filter((p) => p.url.endsWith('oauth2/token.json'));
     expect(tokenRequests).toHaveLength(2);
+  });
+
+  it('does not remint a token that was issued a moment ago', async () => {
+    let clock = 1_700_000_000_000;
+    const { deps, posts } = depsOf(
+      [{ status: 200, data: { access_token: 'T1', expires_in: VK_TOKEN_TTL_SEC } }],
+      () => clock,
+    );
+    const ctx = ctxOf({ clientId: 'cid', clientSecret: 'secret', accessToken: 'T0' });
+
+    // R1 словил 401 и обновил токен.
+    await expect(getVkAccessToken(ctx, { forceRefresh: true }, deps)).resolves.toBe('T1');
+    // R2 ушёл в сеть ещё с T0, получил свой 401 секундой позже и тоже просит refresh.
+    clock += 1_000;
+    await expect(getVkAccessToken(ctx, { forceRefresh: true }, deps)).resolves.toBe('T1');
+
+    // Второй минт снёс бы T1 (mint начинается с token/delete) и уронил бы ретрай R1.
+    expect(posts.filter((p) => p.url.endsWith('oauth2/token.json'))).toHaveLength(1);
+    expect(posts.filter((p) => p.url.endsWith('oauth2/token/delete.json'))).toHaveLength(1);
+  });
+
+  it('does not turn a short expires_in into a mint-and-delete loop', async () => {
+    let clock = 1_700_000_000_000;
+    // TTL меньше окна обновления в 4 часа: с фиксированным запасом такой токен
+    // «протухает» в момент выдачи, и каждый запрос минтит новый.
+    const { deps, posts } = depsOf(
+      [{ status: 200, data: { access_token: 'short', expires_in: 3600 } }],
+      () => clock,
+    );
+    const ctx = ctxOf({ clientId: 'cid', clientSecret: 'secret' });
+
+    for (let i = 0; i < 20; i++) {
+      await expect(getVkAccessToken(ctx, {}, deps)).resolves.toBe('short');
+      clock += 1_000;
+    }
+
+    expect(posts.filter((p) => p.url.endsWith('oauth2/token.json'))).toHaveLength(1);
+    expect(posts.filter((p) => p.url.endsWith('oauth2/token/delete.json'))).toHaveLength(0);
+  });
+
+  it('re-mints once the half-life of a short token is spent', async () => {
+    let clock = 1_700_000_000_000;
+    const { deps, posts } = depsOf(
+      [{ status: 200, data: { access_token: 'short', expires_in: 3600 } }],
+      () => clock,
+    );
+    const ctx = ctxOf({ clientId: 'cid', clientSecret: 'secret' });
+
+    await getVkAccessToken(ctx, {}, deps);
+    clock += 1_800_001;
+    await getVkAccessToken(ctx, {}, deps);
+
+    expect(posts.filter((p) => p.url.endsWith('oauth2/token.json'))).toHaveLength(2);
   });
 
   it('survives a failing credential store — the token is already usable', async () => {

@@ -243,7 +243,11 @@ export const VK_MIN_MONEY = 0.01;
  * а `1049.376 * 1` даёт `1049.3760000000002` — расхождение с тем, что увидит
  * клиент, и лишний диф при сверке.
  */
-export function toVkMoney(value: number, field: string, context: Record<string, unknown> = {}): number {
+export function toVkMoney(
+  value: number,
+  field: string,
+  context: Record<string, unknown> = {},
+): number {
   if (!Number.isFinite(value) || value < VK_MIN_MONEY) {
     throw new ChannelError(VK_CHANNEL, `VK money value for ${field} is not writable: ${value}`, {
       code: 'VK_INVALID_MONEY',
