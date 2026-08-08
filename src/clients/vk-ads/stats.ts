@@ -72,7 +72,7 @@ export function mapStatsResponse(
         entityExternalId: item.id,
         impressions: metric(row, 'shows'),
         clicks: metric(row, 'clicks'),
-        cost: metric(row, 'spent'),
+        spend: metric(row, 'spent'),
         conversions: metric(row, 'goals'),
       });
     }

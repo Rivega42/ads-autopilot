@@ -6,7 +6,7 @@ import type { ChannelContext } from '@/channels/types.js';
 import { getVkAccessToken, VK_CHANNEL } from '@/clients/vk-ads/auth.js';
 import { parseVkError } from '@/clients/vk-ads/schemas.js';
 import { VK_ADS_BASE_URL } from '@/constants.js';
-import type { AppError} from '@/lib/errors.js';
+import type { AppError } from '@/lib/errors.js';
 import { AuthError, ChannelError, RateLimitError, isRetryable } from '@/lib/errors.js';
 import { sleep, withRetry } from '@/lib/retry.js';
 import { logger } from '@/logger.js';

@@ -20,7 +20,7 @@
   - **P0** · 25м
 
 - [ ] **T22.03** — `.dockerignore`
-  - **DoD:** node_modules, .git, dist, coverage, *.log, .env*, .vscode
+  - **DoD:** node_modules, .git, dist, coverage, _.log, .env_, .vscode
   - **Files:** `.dockerignore`
   - **P0** · 10м
 

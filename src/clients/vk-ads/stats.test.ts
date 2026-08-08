@@ -80,7 +80,7 @@ describe('mapStatsResponse', () => {
         entityExternalId: '101',
         impressions: 1000,
         clicks: 40,
-        cost: 523.45,
+        spend: 523.45,
         conversions: 3,
       },
       {
@@ -88,7 +88,7 @@ describe('mapStatsResponse', () => {
         entityExternalId: '101',
         impressions: 2000,
         clicks: 0,
-        cost: 0,
+        spend: 0,
         conversions: 0,
       },
     ]);
@@ -104,7 +104,7 @@ describe('mapStatsResponse', () => {
       entityExternalId: '9',
       impressions: 5,
       clicks: 1,
-      cost: 2.5,
+      spend: 2.5,
       conversions: 1,
     });
   });

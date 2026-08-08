@@ -222,7 +222,7 @@ describe('VkAdsAdapter reads', () => {
         entityExternalId: '1',
         impressions: 10,
         clicks: 2,
-        cost: 5,
+        spend: 5,
         conversions: 1,
       },
     ]);

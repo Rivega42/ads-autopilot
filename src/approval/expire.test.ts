@@ -1,4 +1,4 @@
-import { ApprovalStatus } from '@prisma/client';
+import { ApprovalDecision, ApprovalKind } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApprovalAction } from '@/approval/types.js';
@@ -6,14 +6,14 @@ import type { ApprovalAction } from '@/approval/types.js';
 interface Row {
   id: string;
   clientId: string;
-  action: string;
+  kind: ApprovalKind;
   payload: unknown;
   summary: string;
   chatId: string;
-  messageId: string | null;
-  status: ApprovalStatus;
+  tgMessageId: bigint | null;
+  decision: ApprovalDecision;
   expiresAt: Date;
-  respondedAt: Date | null;
+  decidedAt: Date | null;
   respondedBy: string | null;
   error: string | null;
 }
@@ -23,9 +23,9 @@ type ErrorCond = { error: null } | { error: { not: { startsWith: string } } };
 
 interface Where {
   id?: string;
-  status?: ApprovalStatus;
+  decision?: ApprovalDecision | { in: ApprovalDecision[] };
   expiresAt?: { lte: Date };
-  respondedAt?: { lte: Date };
+  decidedAt?: { lte: Date };
   OR?: ErrorCond[];
 }
 
@@ -36,11 +36,15 @@ function matchesError(cond: ErrorCond, value: string | null): boolean {
   return value === null;
 }
 
+function matchesDecision(cond: NonNullable<Where['decision']>, value: ApprovalDecision): boolean {
+  return typeof cond === 'string' ? cond === value : cond.in.includes(value);
+}
+
 function matches(row: Row, where: Where): boolean {
   if (where.id !== undefined && row.id !== where.id) return false;
-  if (where.status !== undefined && row.status !== where.status) return false;
+  if (where.decision !== undefined && !matchesDecision(where.decision, row.decision)) return false;
   if (where.expiresAt && !(row.expiresAt <= where.expiresAt.lte)) return false;
-  if (where.respondedAt && !(row.respondedAt !== null && row.respondedAt <= where.respondedAt.lte))
+  if (where.decidedAt && !(row.decidedAt !== null && row.decidedAt <= where.decidedAt.lte))
     return false;
   if (where.OR && !where.OR.some((c) => matchesError(c, row.error))) return false;
   return true;
@@ -93,26 +97,26 @@ function row(patch: Partial<Row>): Row {
   return {
     id: 'ap1',
     clientId: 'cl1',
-    action: action.kind,
+    kind: ApprovalKind.BUDGET_CHANGE,
     payload: action,
     summary: '🔔 Апрув требуется: Ромашка\nДействие: что-то',
     chatId: '-100500',
-    messageId: '42',
-    status: ApprovalStatus.PENDING,
+    tgMessageId: 42n,
+    decision: ApprovalDecision.PENDING,
     expiresAt: new Date(NOW.getTime() - 60_000),
-    respondedAt: null,
+    decidedAt: null,
     respondedBy: null,
     error: null,
     ...patch,
   };
 }
 
-/** Заявка, застрявшая в APPROVED: человек ответил, а применение оборвалось. */
+/** Заявка, застрявшая в APPLYING: шлюз применения захвачен, а процесс оборвался. */
 function stuckRow(patch: Partial<Row> = {}): Row {
   return row({
-    status: ApprovalStatus.APPROVED,
+    decision: ApprovalDecision.APPLYING,
     expiresAt: new Date(NOW.getTime() + 60 * 60_000),
-    respondedAt: new Date(NOW.getTime() - (STUCK_APPROVAL_MINUTES + 5) * 60_000),
+    decidedAt: new Date(NOW.getTime() - (STUCK_APPROVAL_MINUTES + 5) * 60_000),
     respondedBy: '@roman',
     ...patch,
   });
@@ -135,7 +139,7 @@ describe('expireApprovals', () => {
     const res = await expireApprovals(NOW);
 
     expect(res).toEqual({ expired: 2, raced: 0, stuck: 0 });
-    expect(h.state.rows.every((r) => r.status === ApprovalStatus.EXPIRED)).toBe(true);
+    expect(h.state.rows.every((r) => r.decision === ApprovalDecision.EXPIRED)).toBe(true);
     expect(h.editMessageText).toHaveBeenCalledTimes(2);
     expect(h.editMessageText.mock.calls[0]?.[2]).toContain('Срок ответа истёк');
     expect(h.sendMessage).toHaveBeenCalledTimes(2);
@@ -148,20 +152,20 @@ describe('expireApprovals', () => {
     h.state.rows = [row({ expiresAt: new Date(NOW.getTime() + 60_000) })];
     const res = await expireApprovals(NOW);
     expect(res.expired).toBe(0);
-    expect(h.state.rows[0]?.status).toBe(ApprovalStatus.PENDING);
+    expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.PENDING);
   });
 
   it('уступает человеку, успевшему нажать кнопку в ту же секунду', async () => {
     h.state.rows = [row({ id: 'ap1' })];
     // Модель гонки: строка отобрана как PENDING, но к моменту UPDATE уже APPROVED.
     h.prisma.pendingApproval.findMany.mockResolvedValueOnce([{ ...row({ id: 'ap1' }) }]);
-    h.state.rows[0]!.status = ApprovalStatus.APPROVED;
-    h.state.rows[0]!.respondedAt = NOW;
+    h.state.rows[0]!.decision = ApprovalDecision.APPROVED;
+    h.state.rows[0]!.decidedAt = NOW;
 
     const res = await expireApprovals(NOW);
 
     expect(res).toEqual({ expired: 0, raced: 1, stuck: 0 });
-    expect(h.state.rows[0]?.status).toBe(ApprovalStatus.APPROVED);
+    expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.APPROVED);
     expect(h.sendMessage).not.toHaveBeenCalled();
   });
 
@@ -172,24 +176,33 @@ describe('expireApprovals', () => {
     const res = await expireApprovals(NOW);
 
     expect(res.expired).toBe(1);
-    expect(h.state.rows[0]?.status).toBe(ApprovalStatus.EXPIRED);
+    expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.EXPIRED);
   });
 });
 
 // ── #9: заявка, застрявшая между захватом и применением ──────────────────────
 describe('reconcileStuckApprovals', () => {
-  it('показывает человеку заявку, зависшую в APPROVED, и ничего не применяет', async () => {
+  it('показывает человеку заявку, зависшую в APPLYING, и ничего не применяет', async () => {
     h.state.rows = [stuckRow()];
 
     const stuck = await reconcileStuckApprovals(NOW);
 
     expect(stuck).toBe(1);
     // Автоприменения нет: неизвестно, успел ли пройти запрос в кабинет.
-    expect(h.state.rows[0]?.status).toBe(ApprovalStatus.APPROVED);
+    expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.APPLYING);
     expect(h.sendMessage).toHaveBeenCalledTimes(1);
     const text = h.sendMessage.mock.calls[0]?.[1] ?? '';
     expect(text).toContain('результат применения неизвестен');
     expect(text).toContain('@roman');
+  });
+
+  it('одобренную, но так и не начатую заявку описывает иначе — деньги на месте', async () => {
+    h.state.rows = [stuckRow({ decision: ApprovalDecision.APPROVED })];
+
+    expect(await reconcileStuckApprovals(NOW)).toBe(1);
+    const text = h.sendMessage.mock.calls[0]?.[1] ?? '';
+    expect(text).toContain('применение так и не началось');
+    expect(text).not.toContain('результат применения неизвестен');
   });
 
   it('не шумит повторно на каждом прогоне крона', async () => {
@@ -202,8 +215,8 @@ describe('reconcileStuckApprovals', () => {
     expect(h.sendMessage).toHaveBeenCalledTimes(1);
   });
 
-  it('свежий APPROVED не трогает — применение ещё идёт', async () => {
-    h.state.rows = [stuckRow({ respondedAt: new Date(NOW.getTime() - 60_000) })];
+  it('свежий APPLYING не трогает — применение ещё идёт', async () => {
+    h.state.rows = [stuckRow({ decidedAt: new Date(NOW.getTime() - 60_000) })];
 
     expect(await reconcileStuckApprovals(NOW)).toBe(0);
     expect(h.sendMessage).not.toHaveBeenCalled();

@@ -25,7 +25,9 @@
     "db:studio": "prisma studio",
     "db:reset": "prisma migrate reset --force",
     "db:seed": "tsx prisma/seed.ts",
-    "prepare": "husky || true"
+    "prepare": "husky || true",
+    "test:unit": "vitest run --exclude \"**/src/repos/**\"",
+    "test:integration": "vitest run src/repos"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

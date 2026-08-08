@@ -17,19 +17,19 @@
 
 ### Что AI делает без вас
 
-| Задача | AI-компонент | Модель |
-|---|---|---|
-| Онбординг клиента | AI-Интервьюер | Claude Sonnet 4.6 |
-| План кампании | AI-Стратег | Claude Opus 4.7 |
-| Тексты объявлений | AI-Копирайтер | Claude Sonnet 4.6 |
-| Картинки/баннеры | AI-Дизайнер | Kandinsky 3.1 / YandexART / DALL-E 3 |
-| Видеоролики | AI-Видеограф | Kandinsky Video / Runway / Sora |
-| Модерация | AI-Модератор | Claude Sonnet 4.6 + rulebase |
-| Оптимизация ставок | AI-Оптимизатор | LightGBM + Claude Opus |
-| Аналитика и отчёты | AI-Аналитик | Claude Opus 4.7 |
-| Конкурентная разведка | AI-Разведчик | GPT-4o / Claude Opus + WebSearch |
-| Семантическое ядро | AI-Wordstat | Claude + embeddings (bge-m3) |
-| Квалификация лидов | AI-Follow-up | Claude Sonnet |
+| Задача                | AI-компонент   | Модель                               |
+| --------------------- | -------------- | ------------------------------------ |
+| Онбординг клиента     | AI-Интервьюер  | Claude Sonnet 4.6                    |
+| План кампании         | AI-Стратег     | Claude Opus 4.7                      |
+| Тексты объявлений     | AI-Копирайтер  | Claude Sonnet 4.6                    |
+| Картинки/баннеры      | AI-Дизайнер    | Kandinsky 3.1 / YandexART / DALL-E 3 |
+| Видеоролики           | AI-Видеограф   | Kandinsky Video / Runway / Sora      |
+| Модерация             | AI-Модератор   | Claude Sonnet 4.6 + rulebase         |
+| Оптимизация ставок    | AI-Оптимизатор | LightGBM + Claude Opus               |
+| Аналитика и отчёты    | AI-Аналитик    | Claude Opus 4.7                      |
+| Конкурентная разведка | AI-Разведчик   | GPT-4o / Claude Opus + WebSearch     |
+| Семантическое ядро    | AI-Wordstat    | Claude + embeddings (bge-m3)         |
+| Квалификация лидов    | AI-Follow-up   | Claude Sonnet                        |
 
 ### Роль человека
 
@@ -104,15 +104,15 @@ pnpm dev
 
 ## Каналы
 
-| Канал | Статус | Приоритет | Одобрение |
-|---|---|---|---|
-| Яндекс Директ | 🔥 core | P0 | 1-5 дней |
-| VK Реклама (ads.vk.ru) | 🔥 core | P0 | 1-3 дня |
-| TikTok Marketing | 🟡 planned | P1 | 1-2 недели |
-| LinkedIn Marketing | 🟡 planned | P2 | 4-16 недель |
-| Meta Ads (FB/IG) | 🔴 optional | P3 | 1-4 недели |
-| Google Ads | 🔴 optional | P3 | 1-3 недели |
-| Telegram Ads | 🟢 partner | P4 | сразу |
+| Канал                  | Статус      | Приоритет | Одобрение   |
+| ---------------------- | ----------- | --------- | ----------- |
+| Яндекс Директ          | 🔥 core     | P0        | 1-5 дней    |
+| VK Реклама (ads.vk.ru) | 🔥 core     | P0        | 1-3 дня     |
+| TikTok Marketing       | 🟡 planned  | P1        | 1-2 недели  |
+| LinkedIn Marketing     | 🟡 planned  | P2        | 4-16 недель |
+| Meta Ads (FB/IG)       | 🔴 optional | P3        | 1-4 недели  |
+| Google Ads             | 🔴 optional | P3        | 1-3 недели  |
+| Telegram Ads           | 🟢 partner  | P4        | сразу       |
 
 ---
 

@@ -7,7 +7,6 @@ import { env } from '@/env.js';
 import { AppError, AuthError } from '@/lib/errors.js';
 import { CredentialRepository } from '@/repos/CredentialRepository.js';
 
-
 const adapters = new Map<Provider, ChannelAdapter>();
 
 export function registerAdapter(adapter: ChannelAdapter): void {

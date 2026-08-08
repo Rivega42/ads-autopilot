@@ -241,7 +241,7 @@ export class YandexDirectAdapter implements ChannelAdapter {
       entityExternalId: row[mapping.dimension] ?? '',
       impressions: reportNumber(row['Impressions']),
       clicks: reportNumber(row['Clicks']),
-      cost: reportNumber(row['Cost']),
+      spend: reportNumber(row['Cost']),
       conversions: reportNumber(row['Conversions']),
       revenue: reportNumber(row['Revenue']),
     }));
@@ -262,7 +262,7 @@ export class YandexDirectAdapter implements ChannelAdapter {
       query: row['Query'] ?? '',
       impressions: reportNumber(row['Impressions']),
       clicks: reportNumber(row['Clicks']),
-      cost: reportNumber(row['Cost']),
+      spend: reportNumber(row['Cost']),
       conversions: reportNumber(row['Conversions']),
     }));
   }

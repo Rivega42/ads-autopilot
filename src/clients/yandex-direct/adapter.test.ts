@@ -241,7 +241,7 @@ describe('reads', () => {
         entityExternalId: '111',
         impressions: 1000,
         clicks: 50,
-        cost: 1250.75,
+        spend: 1250.75,
         conversions: 0,
         revenue: 0,
       },

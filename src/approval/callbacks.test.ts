@@ -1,4 +1,4 @@
-import { ApprovalStatus } from '@prisma/client';
+import { ApprovalDecision, ApprovalKind } from '@prisma/client';
 import type { Context } from 'grammy';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,14 +8,14 @@ import type { ApprovalAction } from '@/approval/types.js';
 interface Row {
   id: string;
   clientId: string;
-  action: string;
+  kind: ApprovalKind;
   payload: unknown;
   summary: string;
   chatId: string;
-  messageId: string | null;
-  status: ApprovalStatus;
+  tgMessageId: bigint | null;
+  decision: ApprovalDecision;
   expiresAt: Date;
-  respondedAt: Date | null;
+  decidedAt: Date | null;
   respondedBy: string | null;
   error: string | null;
 }
@@ -26,7 +26,7 @@ type ApplyOutcomeLike =
   | { status: 'SKIPPED'; reason: string };
 
 interface UpdateManyArgs {
-  where: { id: string; status?: ApprovalStatus; expiresAt?: { gt?: Date } };
+  where: { id: string; decision?: ApprovalDecision; expiresAt?: { gt?: Date } };
   data: Partial<Row>;
 }
 
@@ -49,7 +49,7 @@ const h = vi.hoisted(() => {
         updateMany: vi.fn(async ({ where, data }: UpdateManyArgs) => {
           const row = state.row;
           if (!row || row.id !== where.id) return { count: 0 };
-          if (where.status !== undefined && row.status !== where.status) return { count: 0 };
+          if (where.decision !== undefined && row.decision !== where.decision) return { count: 0 };
           if (where.expiresAt?.gt && !(row.expiresAt > where.expiresAt.gt)) return { count: 0 };
           Object.assign(row, data);
           return { count: 1 };
@@ -95,14 +95,14 @@ function seed(patch: Partial<Row> = {}): Row {
   const row: Row = {
     id: 'ap1',
     clientId: 'cl1',
-    action: action.kind,
+    kind: ApprovalKind.BUDGET_CHANGE,
     payload: action,
     summary: 'карточка',
     chatId: CHAT,
-    messageId: '42',
-    status: ApprovalStatus.PENDING,
+    tgMessageId: 42n,
+    decision: ApprovalDecision.PENDING,
     expiresAt: new Date(NOW.getTime() + 60 * 60_000),
-    respondedAt: null,
+    decidedAt: null,
     respondedBy: null,
     error: null,
     ...patch,
@@ -148,7 +148,7 @@ describe('processApprovalCallback', () => {
     expect(out.kind).toBe('applied');
     expect(h.applyApproval).toHaveBeenCalledTimes(1);
     expect(h.applyApproval).toHaveBeenCalledWith('ap1', '@roman');
-    expect(h.state.row?.status).toBe(ApprovalStatus.APPROVED);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.APPROVED);
     expect(h.state.row?.respondedBy).toBe('@roman');
   });
 
@@ -165,7 +165,7 @@ describe('processApprovalCallback', () => {
   });
 
   it('третье нажатие по уже применённой заявке ничего не делает', async () => {
-    seed({ status: ApprovalStatus.APPLIED, respondedBy: '@roman' });
+    seed({ decision: ApprovalDecision.APPLIED, respondedBy: '@roman' });
     const out = await press({ actor: '@other' });
 
     expect(out.kind).toBe('already_handled');
@@ -182,7 +182,7 @@ describe('processApprovalCallback', () => {
     expect(out.answer).toMatch(/срок/i);
     expect(h.applyApproval).not.toHaveBeenCalled();
     // Заявка закрывается на месте, чтобы кнопка не «оживала» до крона.
-    expect(h.state.row?.status).toBe(ApprovalStatus.EXPIRED);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.EXPIRED);
     expect(h.editCard).toHaveBeenCalledTimes(1);
   });
 
@@ -191,7 +191,7 @@ describe('processApprovalCallback', () => {
     const out = await press({ data: encodeCallbackData('reject', 'ap1') });
 
     expect(out.kind).toBe('rejected');
-    expect(h.state.row?.status).toBe(ApprovalStatus.REJECTED);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.REJECTED);
     expect(h.applyApproval).not.toHaveBeenCalled();
     expect(h.editCard).toHaveBeenCalledWith(expect.objectContaining({ id: 'ap1' }), {
       kind: 'rejected',
@@ -206,7 +206,7 @@ describe('processApprovalCallback', () => {
     expect(out.kind).toBe('details');
     expect(out.alert).toBe(true);
     expect(out.answer).toContain('777');
-    expect(h.state.row?.status).toBe(ApprovalStatus.PENDING);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.PENDING);
   });
 
   it('исчезнувшая заявка не роняет обработчик', async () => {
@@ -258,7 +258,7 @@ describe('processApprovalCallback', () => {
     expect(out.alert).toBe(true);
     expect(h.applyApproval).not.toHaveBeenCalled();
     expect(h.prisma.pendingApproval.updateMany).not.toHaveBeenCalled();
-    expect(h.state.row?.status).toBe(ApprovalStatus.PENDING);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.PENDING);
   });
 
   it('«Детали» из чужого чата не показывает начинку заявки', async () => {
@@ -296,7 +296,7 @@ describe('handleApprovalCallback', () => {
     await handleApprovalCallback(ctxFor(-1009999, encodeCallbackData('approve', 'ap1')));
 
     expect(h.applyApproval).not.toHaveBeenCalled();
-    expect(h.state.row?.status).toBe(ApprovalStatus.PENDING);
+    expect(h.state.row?.decision).toBe(ApprovalDecision.PENDING);
     expect(h.answerCallbackQuery).toHaveBeenCalledTimes(1);
     expect(h.answerCallbackQuery.mock.calls[0]?.[1]).toContain('другому чату');
   });

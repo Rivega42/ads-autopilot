@@ -93,6 +93,9 @@ enum ChangeActor {
 enum ApprovalKind {
   BUDGET_CHANGE
   BID_CHANGE
+  CREATIVE_UPLOAD
+  NEGATIVE_KEYWORDS
+  RESUME_ENTITIES
   NEW_CAMPAIGN
   MASS_PAUSE
   STRATEGY_CHANGE
@@ -271,6 +274,9 @@ model ChangeLog {
   newValue     Json?
   reason       String?
   actor        ChangeActor
+  /// Telegram username подтвердившего. actor говорит «человек», это — «какой».
+  approvedBy   String?
+  provider     Provider?
   appliedAt    DateTime    @default(now())
   rolledBackAt DateTime?
 

@@ -76,7 +76,8 @@ export interface StatRow {
   entityExternalId: string;
   impressions: number;
   clicks: number;
-  cost: number;
+  /** Совпадает с колонкой CampaignStat.spend — имена намеренно одинаковые. */
+  spend: number;
   conversions: number;
   revenue?: number;
 }
@@ -87,7 +88,8 @@ export interface SearchQueryRow {
   query: string;
   impressions: number;
   clicks: number;
-  cost: number;
+  /** Совпадает с колонкой CampaignStat.spend — имена намеренно одинаковые. */
+  spend: number;
   conversions: number;
 }
 
