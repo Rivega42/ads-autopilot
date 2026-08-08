@@ -24,6 +24,15 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # Обязательно до typecheck: код импортирует типы из @prisma/client,
+      # которых до генерации не существует. DATABASE_URL нужен потому, что
+      # prisma.config.ts бросает исключение при его отсутствии; подключения
+      # generate не делает, значение может быть любым валидным URL.
+      - run: pnpm db:generate
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
       - run: pnpm lint
       - run: pnpm typecheck
 
@@ -57,6 +66,11 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # migrate deploy применяет миграции, но клиент не генерирует.
+      - run: pnpm db:generate
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/ads_autopilot_test
 
       - run: pnpm prisma migrate deploy
         env:
