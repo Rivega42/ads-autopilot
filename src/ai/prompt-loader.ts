@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { AppError } from '@/lib/errors.js';
@@ -62,7 +63,7 @@ function candidateDirs(): string[] {
   return [
     fileURLToPath(new URL('./prompts/', import.meta.url)),
     fileURLToPath(new URL('../../src/ai/prompts/', import.meta.url)),
-    fileURLToPath(new URL(`file://${process.cwd()}/src/ai/prompts/`)),
+    resolve(process.cwd(), 'src/ai/prompts'),
   ];
 }
 
@@ -72,7 +73,7 @@ function readPromptFile(name: PromptName): string {
 
   const tried: string[] = [];
   for (const dir of candidateDirs()) {
-    const path = `${dir}${name}.md`;
+    const path = join(dir, `${name}.md`);
     tried.push(path);
     try {
       const text = readFileSync(path, 'utf8');

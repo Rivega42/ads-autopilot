@@ -31,6 +31,16 @@ export function ratioOrNull(
   return toDecimal(numerator / denominator, scale);
 }
 
+/**
+ * Сырой объект площадки → значение JSON-колонки.
+ *
+ * Прогон через JSON нужен не ради типа: в разобранном ответе попадаются
+ * `undefined` (опциональные поля zod), а Prisma на них падает уже в рантайме.
+ */
+export function toJsonObject(value: Record<string, unknown>): Prisma.InputJsonObject {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonObject;
+}
+
 function normalize(raw: string): string {
   return raw.trim().toUpperCase();
 }

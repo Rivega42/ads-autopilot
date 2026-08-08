@@ -18,6 +18,7 @@ import {
   toAdGroupStatus,
   toCampaignStatus,
   toDecimal,
+  toJsonObject,
   toKeywordStatus,
   toModerationStatus,
 } from '@/ingestion/mapping.js';
@@ -76,7 +77,7 @@ export async function syncEntities(
     ads,
     keywords,
   };
-  log.info({ clientId, provider, ...result }, 'entities synced');
+  log.info({ ...result }, 'entities synced');
   return result;
 }
 
@@ -174,12 +175,12 @@ async function syncAdGroups(
         externalId: group.externalId,
         name: group.name,
         status: toAdGroupStatus(group.status),
-        targetings: group.targeting,
+        targetings: toJsonObject(group.targeting),
       },
       update: {
         name: group.name,
         status: toAdGroupStatus(group.status),
-        targetings: group.targeting,
+        targetings: toJsonObject(group.targeting),
       },
       select: { id: true },
     });
