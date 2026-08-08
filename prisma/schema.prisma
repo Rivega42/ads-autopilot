@@ -1,0 +1,11 @@
+// Ads-Autopilot database schema
+// Управляется через `pnpm db:migrate` (prod) и `pnpm db:migrate:dev` (dev)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
