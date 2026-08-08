@@ -5,6 +5,7 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import { CALLBACK_PREFIX } from '@/approval/callback-data.js';
 import { handleApprovalCallback } from '@/approval/callbacks.js';
 import { createApiMessenger, setMessenger } from '@/approval/telegram.js';
+import { registerOnboardingHandlers } from '@/bot/onboarding-handlers.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
@@ -44,6 +45,8 @@ export function buildBot(token: string): Bot {
     }
     await handleApprovalCallback(ctx);
   });
+
+  registerOnboardingHandlers(bot);
 
   bot.catch((err) => {
     const inner = err.error;
