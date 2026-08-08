@@ -1,3 +1,4 @@
+import { ApprovalKind } from '@prisma/client';
 import type { InlineKeyboardMarkup } from 'grammy/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,10 +9,10 @@ interface CreatedRow {
   chatId: string;
   summary: string;
   expiresAt: Date;
-  messageId: string | null;
+  tgMessageId: bigint | null;
   error: string | null;
   payload: unknown;
-  action: string;
+  kind: ApprovalKind;
 }
 
 const h = vi.hoisted(() => {
@@ -19,28 +20,23 @@ const h = vi.hoisted(() => {
   // проверить противоположное направление расхождения нечем.
   process.env.DRY_RUN = 'false';
 
-  const state: { created: CreatedRow | null; clientDryRun: boolean; updateError: string | null } = {
+  const state: { created: CreatedRow | null; updateError: string | null } = {
     created: null,
-    clientDryRun: false,
     updateError: null,
   };
   return {
     state,
     prisma: {
       client: {
-        findUnique: vi.fn(async () => ({
-          name: 'ООО «Ромашка»',
-          approvalChatId: '-100500',
-          dryRun: state.clientDryRun,
-        })),
+        findUnique: vi.fn(async () => ({ name: 'ООО «Ромашка»', tgUserId: 357896330n })),
       },
       pendingApproval: {
         create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
           state.created = {
             id: 'ap1',
-            messageId: null,
+            tgMessageId: null,
             error: null,
-            ...(data as unknown as Omit<CreatedRow, 'id' | 'messageId' | 'error'>),
+            ...(data as unknown as Omit<CreatedRow, 'id' | 'tgMessageId' | 'error'>),
           };
           return { ...state.created };
         }),
@@ -56,7 +52,7 @@ const h = vi.hoisted(() => {
 
 vi.mock('@/db/prisma.js', () => ({ prisma: h.prisma }));
 
-const { env } = await import('@/env.js');
+const { APPROVAL_TTL_MINUTES, env } = await import('@/env.js');
 const { createApproval, requestApprovalIfNeeded } = await import('@/approval/create.js');
 const { setMessenger } = await import('@/approval/telegram.js');
 
@@ -82,8 +78,8 @@ const DRY_RUN_BANNER = '⚠️ Режим dry-run';
 beforeEach(() => {
   vi.clearAllMocks();
   h.state.created = null;
-  h.state.clientDryRun = false;
   h.state.updateError = null;
+  env.DRY_RUN = false;
   sendMessage.mockResolvedValue({ messageId: 4242 });
   setMessenger({
     sendMessage,
@@ -105,25 +101,33 @@ describe('createApproval', () => {
     expect(text).toContain('Правило: изменение дневного бюджета более чем на 20%');
   });
 
-  it('вешает три кнопки и сохраняет messageId', async () => {
+  it('шлёт карточку в личный чат клиента', async () => {
+    await createApproval(action, { now: NOW });
+
+    expect(sendMessage.mock.calls[0]?.[0]).toBe('357896330');
+    // Чат фиксируется в строке: по нему проверяется право нажать кнопку.
+    expect(h.state.created?.chatId).toBe('357896330');
+  });
+
+  it('вешает три кнопки и сохраняет tgMessageId', async () => {
     const approval = await createApproval(action, { now: NOW });
 
     const markup = sendMessage.mock.calls[0]?.[2];
     expect(markup?.inline_keyboard[0]).toHaveLength(3);
-    expect(approval.messageId).toBe('4242');
-    expect(h.state.created?.messageId).toBe('4242');
+    expect(approval.tgMessageId).toBe(4242n);
+    expect(h.state.created?.tgMessageId).toBe(4242n);
   });
 
   it('срок жизни берётся из APPROVAL_TTL_MINUTES', async () => {
     await createApproval(action, { now: NOW });
-    const expected = new Date(NOW.getTime() + env.APPROVAL_TTL_MINUTES * 60_000);
+    const expected = new Date(NOW.getTime() + APPROVAL_TTL_MINUTES * 60_000);
     expect(h.state.created?.expiresAt.getTime()).toBe(expected.getTime());
   });
 
   it('payload кладётся целиком — apply не пересчитывает решение', async () => {
     await createApproval(action, { now: NOW });
     expect(h.state.created?.payload).toMatchObject({ ...action });
-    expect(h.state.created?.action).toBe('budget_change');
+    expect(h.state.created?.kind).toBe(ApprovalKind.BUDGET_CHANGE);
   });
 
   it('недоставленная карточка не теряет заявку, а записывает ошибку', async () => {
@@ -132,7 +136,7 @@ describe('createApproval', () => {
     const approval = await createApproval(action, { now: NOW });
 
     expect(approval.error).toContain('chat not found');
-    expect(h.state.created?.messageId).toBeNull();
+    expect(h.state.created?.tgMessageId).toBeNull();
   });
 
   it('requestApprovalIfNeeded молчит, когда политика разрешает автомат', async () => {
@@ -147,8 +151,8 @@ describe('createApproval', () => {
   });
 
   // ── #11: карточка обещает ровно тот режим, который будет применён ──────────
-  it('карточка предупреждает о dry-run, когда он включён у клиента', async () => {
-    h.state.clientDryRun = true;
+  it('карточка предупреждает о dry-run, когда он включён глобально', async () => {
+    env.DRY_RUN = true;
 
     await createApproval(action, { now: NOW });
 
@@ -171,7 +175,7 @@ describe('createApproval', () => {
   });
 
   // ── #19: карточка уже в чате — её нельзя потерять ─────────────────────────
-  it('не роняет создание, если messageId не записался после отправки', async () => {
+  it('не роняет создание, если tgMessageId не записался после отправки', async () => {
     h.state.updateError = 'connection pool timeout';
 
     const approval = await createApproval(action, { now: NOW });
@@ -179,6 +183,6 @@ describe('createApproval', () => {
     // Иначе вызывающий считает создание неудачным и шлёт вторую карточку на то же изменение.
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(approval.id).toBe('ap1');
-    expect(approval.messageId).toBe('4242');
+    expect(approval.tgMessageId).toBe(4242n);
   });
 });
