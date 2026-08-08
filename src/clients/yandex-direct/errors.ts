@@ -47,7 +47,23 @@ export class AuthError extends YandexDirectError {
 
 const UNITS_EXHAUSTED = 152;
 const RATE_LIMITED = 56;
-const AUTH_CODES = new Set([53, 58, 152.1, 8000]);
+
+/** 53 — токен невалиден или отозван. 54 — нет доступа к API. 58 — заявка приложения не одобрена. */
+const AUTH_CODES = new Set([53, 54, 58]);
+
+/** Понятная подсказка вместо формулировок Директа: чинится это по-разному. */
+export function explainAuthError(code: number): string {
+  switch (code) {
+    case 53:
+      return 'Токен невалиден или отозван. Получи новый через OAuth.';
+    case 54:
+      return 'У аккаунта нет доступа к API Директа. Включается в интерфейсе Директа.';
+    case 58:
+      return 'Приложению не одобрен доступ к API. Директ → Настройки → API → заявка на доступ, дальше ждать подтверждения Яндекса.';
+    default:
+      return 'Проблема с авторизацией в Директе.';
+  }
+}
 
 export function toDirectError(payload: DirectErrorPayload): YandexDirectError {
   if (payload.error_code === UNITS_EXHAUSTED) return new UnitsExhaustedError(payload);
