@@ -13,7 +13,7 @@ import type {
   StatRow,
   WriteResult,
 } from '@/channels/types.js';
-import { ChannelError } from '@/lib/errors.js';
+import { ChannelError, describeError } from '@/lib/errors.js';
 import { scoped } from '@/lib/logger.js';
 import { VK_CHANNEL } from '@/clients/vk/auth.js';
 import { createVkHttpClient, type VkHttpClient, type VkHttpDeps } from '@/clients/vk/http.js';
@@ -483,6 +483,71 @@ function readCreatedId(created: unknown): string | undefined {
     if (parsed.success && parsed.data.id !== undefined) return String(parsed.data.id);
   }
   return undefined;
+}
+
+/** Короткая выжимка ответа для лога: тело может быть каким угодно и большим. */
+function describeAck(ack: unknown): string {
+  try {
+    return JSON.stringify(ack).slice(0, 300);
+  } catch {
+    return String(ack);
+  }
+}
+
+/** Гасим осиротевший баннер, но не даём этой попытке скрыть исходную ошибку. */
+async function pauseQuietly(http: VkHttpClient, adExternalId: string): Promise<boolean> {
+  try {
+    const outcome = await setEntitiesStatus(
+      http,
+      VK_PATHS.banners,
+      [adExternalId],
+      VK_STATUS_BLOCKED,
+    );
+    return outcome.updated === 1;
+  } catch (err) {
+    log.error({ err: describeError(err), adExternalId }, 'failed to pause orphaned vk banner');
+    return false;
+  }
+}
+
+/**
+ * Ключ кеша клиентов. Кроме кабинета включает реквизиты приложения: их смена
+ * означает другой токен и другой лимит, старый клиент для них не годится.
+ */
+function cabinetKey(ctx: ChannelContext): string {
+  const creds = ctx.credentials;
+  const part = (key: string): string => {
+    const value = creds[key];
+    return typeof value === 'string' ? value : '';
+  };
+  return [
+    ctx.clientId,
+    part('clientId') || part('client_id'),
+    part('agencyClientName') || part('agency_client_name'),
+  ].join('|');
+}
+
+/**
+ * Итог массовой записи → WriteResult. Если площадка не приняла ни одного объекта,
+ * `applied: true` был бы враньём: аудит записал бы применённым то, чего нет.
+ */
+function writeResultOf(plan: Record<string, unknown>, outcome: VkMassUpdateOutcome): WriteResult {
+  if (outcome.updated === 0 && outcome.failed.length > 0) {
+    throw new ChannelError(VK_CHANNEL, 'VK rejected every object of the mass update', {
+      code: 'VK_MASS_UPDATE_REJECTED',
+      retryable: false,
+      context: { plan, failed: outcome.failed },
+    });
+  }
+  return {
+    applied: true,
+    plan,
+    result: {
+      requested: outcome.requested,
+      updated: outcome.updated,
+      failed: outcome.failed,
+    },
+  };
 }
 
 /**

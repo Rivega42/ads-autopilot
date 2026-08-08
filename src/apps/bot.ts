@@ -1,5 +1,6 @@
 import { Bot, GrammyError, HttpError } from 'grammy';
 import { autoRetry } from '@grammyjs/auto-retry';
+import { run, sequentialize, type RunnerHandle } from '@grammyjs/runner';
 import { env } from '@/config/index.js';
 import { logger } from '@/lib/logger.js';
 import { describeError } from '@/lib/errors.js';
@@ -26,6 +27,11 @@ export function buildBot(token: string): Bot {
   // Модуль апрувов шлёт и правит сообщения через тот же Api — второй HTTP-клиент
   // к Telegram означал бы два независимых счётчика ретраев на один и тот же чат.
   setMessenger(createApiMessenger(bot.api));
+
+  // Апдейты обрабатываются параллельно (см. main → run), поэтому порядок внутри
+  // одного чата надо удержать явно: два нажатия по одной карточке должны идти
+  // друг за другом, а не одновременно.
+  bot.use(sequentialize((ctx) => (ctx.chat?.id === undefined ? undefined : String(ctx.chat.id))));
 
   bot.on('callback_query:data', async (ctx) => {
     if (!ctx.callbackQuery.data.startsWith(`${CALLBACK_PREFIX}:`)) {
@@ -62,19 +68,22 @@ async function main(): Promise<void> {
   }
 
   const bot = buildBot(token);
+  await bot.init();
+  logger.info({ username: bot.botInfo.username }, 'bot started');
+
+  // Не bot.start(): long polling grammY обрабатывает апдейты строго по одному, а
+  // применение апрува ходит в кабинет и с ретраями площадки занимает до двух минут.
+  // Один такой апрув задержал бы нажатия во всех остальных чатах.
+  const runner: RunnerHandle = run(bot, {
+    runner: { fetch: { allowed_updates: ['message', 'callback_query'] } },
+  });
 
   onShutdown(async () => {
     // stop() дожидается завершения текущих апдейтов — иначе можно оборвать
     // применение уже одобренного изменения на полпути.
-    await bot.stop();
+    if (runner.isRunning()) await runner.stop();
     setMessenger(null);
     await disconnectPrisma();
-  });
-
-  // start() резолвится только при остановке, поэтому не ждём его здесь.
-  void bot.start({
-    allowed_updates: ['message', 'callback_query'],
-    onStart: (me) => logger.info({ username: me.username }, 'bot started'),
   });
 }
 

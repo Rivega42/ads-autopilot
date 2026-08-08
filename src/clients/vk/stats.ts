@@ -102,6 +102,13 @@ export async function fetchVkStats(http: VkHttpClient, query: VkStatsQuery): Pro
   for (const batch of chunk(unique, VK_BATCH_LIMIT)) {
     const res = await http.request({
       method: 'GET',
+      /**
+       * @needs-live-token: батчевая форма `statistics/{object_type}/{granularity}.json?id=1,2,3`.
+       * ТЗ §2.2 документирует поштучную `/statistics/{object_type}/{id}/{granularity}.json`;
+       * батч выбран потому, что поштучный путь означал бы 200 запросов на одну
+       * выгрузку и мгновенный расход дневного лимита. Если ads.vk.ru ответит
+       * 404/400 — вернуться к поштучной форме, сохранив нарезку по 200.
+       */
       url: `statistics/${query.objectType}/${granularity}.json`,
       schema: vkStatsResponseSchema,
       params: {
