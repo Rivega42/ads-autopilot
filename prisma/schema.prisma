@@ -1,0 +1,485 @@
+// ads-autopilot — схема БД
+// Источник: TZ.md §3.3 (базовые сущности) + §13 (Full-AI сущности).
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Перечисления
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum Channel {
+  YANDEX_DIRECT
+  VK_ADS
+  TIKTOK
+  LINKEDIN
+  META
+  GOOGLE_ADS
+  TELEGRAM_ADS
+}
+
+enum EntityStatus {
+  DRAFT
+  MODERATION
+  ACTIVE
+  PAUSED
+  REJECTED
+  ARCHIVED
+}
+
+enum ModerationStatus {
+  DRAFT
+  PENDING
+  PREACCEPTED
+  ACCEPTED
+  REJECTED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+  APPLIED
+  FAILED
+}
+
+enum CreativeKind {
+  TEXT
+  IMAGE
+  VIDEO
+}
+
+enum BriefStatus {
+  IN_PROGRESS
+  COMPLETE
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Клиенты и доступы
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Client {
+  id             String   @id @default(cuid())
+  name           String
+  /// Telegram chat_id, куда уходят апрувы и отчёты
+  approvalChatId String
+  targetCPA      Decimal? @db.Decimal(12, 2)
+  targetROMI     Decimal? @db.Decimal(8, 4)
+  dailyBudget    Decimal  @db.Decimal(12, 2)
+  metrikaCounter Int?
+  /// Пока true — сервис только рекомендует, но ничего не пишет в кабинеты
+  dryRun         Boolean  @default(true)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  brief        ClientBrief?
+  credentials  ChannelCredential[]
+  campaigns    Campaign[]
+  approvals    PendingApproval[]
+  errors       ErrorLog[]
+  creatives    Creative[]
+  keywordSets  KeywordSet[]
+  aiRuns       AiRun[]
+  reports      Report[]
+  competitors  CompetitorSnapshot[]
+  leads        Lead[]
+
+  @@index([active])
+}
+
+/// Токены доступа к рекламным кабинетам. Все секреты — AES-256-GCM (src/lib/crypto.ts).
+model ChannelCredential {
+  id           String   @id @default(cuid())
+  clientId     String
+  client       Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  channel      Channel
+  /// Логин/идентификатор кабинета в терминах площадки (Client-Login, account_id, ...)
+  externalLogin String?
+  /// Зашифрованный JSON: { accessToken, refreshToken, clientId, clientSecret, ... }
+  secretsEnc   String   @db.Text
+  expiresAt    DateTime?
+  /// Последняя успешная авторизация — для алертов о протухших токенах
+  lastOkAt     DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([clientId, channel])
+  @@index([channel, expiresAt])
+}
+
+/// Результат AI-онбординга (TZ §13.1). Единый источник правды для стратега и креативов.
+model ClientBrief {
+  id             String      @id @default(cuid())
+  clientId       String      @unique
+  client         Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  status         BriefStatus @default(IN_PROGRESS)
+  /// Структурированный бриф, валидируется zod-схемой src/ai/onboarding/brief.schema.ts
+  data           Json
+  /// Сырой транскрипт интервью — для повторного разбора другой моделью
+  transcript     Json?
+  completedAt    DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Рекламные сущности (зеркало кабинетов)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Campaign {
+  id          String       @id @default(cuid())
+  clientId    String
+  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  channel     Channel
+  /// ID в API рекламной системы; null пока кампания не залита
+  externalId  String?
+  name        String
+  type        String
+  status      EntityStatus @default(DRAFT)
+  strategy    Json
+  dailyBudget Decimal      @db.Decimal(12, 2)
+  meta        Json         @default("{}")
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  adGroups AdGroup[]
+  stats    CampaignStat[]
+  changes  ChangeLog[]
+
+  @@unique([channel, externalId])
+  @@index([clientId, channel, status])
+}
+
+model AdGroup {
+  id         String       @id @default(cuid())
+  campaignId String
+  campaign   Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  externalId String?
+  name       String
+  status     EntityStatus @default(DRAFT)
+  targeting  Json         @default("{}")
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  ads      Ad[]
+  keywords Keyword[]
+
+  @@index([campaignId, status])
+}
+
+model Ad {
+  id               String           @id @default(cuid())
+  adGroupId        String
+  adGroup          AdGroup          @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+  externalId       String?
+  title            String
+  title2           String?
+  text             String
+  displayUrl       String?
+  href             String?
+  imageUrl         String?
+  videoUrl         String?
+  status           EntityStatus     @default(DRAFT)
+  moderationStatus ModerationStatus @default(DRAFT)
+  moderationReason String?
+  /// Сколько раз AI-модератор уже переписывал текст (эскалация человеку после 3)
+  moderationRetries Int             @default(0)
+  /// Метка варианта для A/B ("A" | "B" | "C")
+  llmVariant       String?
+  creativeId       String?
+  creative         Creative?        @relation(fields: [creativeId], references: [id])
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  stats AdStat[]
+
+  @@index([adGroupId, moderationStatus])
+}
+
+model Keyword {
+  id         String       @id @default(cuid())
+  adGroupId  String
+  adGroup    AdGroup      @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+  externalId String?
+  phrase     String
+  bid        Decimal?     @db.Decimal(12, 2)
+  status     EntityStatus @default(DRAFT)
+  /// Кластер из AI-Wordstat (TZ §13.8)
+  cluster    String?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  stats KeywordStat[]
+
+  @@index([adGroupId, status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Статистика
+// ─────────────────────────────────────────────────────────────────────────────
+
+model CampaignStat {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  date        DateTime @db.Date
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  cost        Decimal  @default(0) @db.Decimal(14, 2)
+  conversions Int      @default(0)
+  revenue     Decimal? @db.Decimal(14, 2)
+  cpa         Decimal? @db.Decimal(12, 2)
+  ctr         Decimal? @db.Decimal(8, 4)
+
+  @@unique([campaignId, date])
+  @@index([date])
+}
+
+model AdStat {
+  id          String   @id @default(cuid())
+  adId        String
+  ad          Ad       @relation(fields: [adId], references: [id], onDelete: Cascade)
+  date        DateTime @db.Date
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  cost        Decimal  @default(0) @db.Decimal(14, 2)
+  conversions Int      @default(0)
+
+  @@unique([adId, date])
+}
+
+model KeywordStat {
+  id          String   @id @default(cuid())
+  keywordId   String
+  keyword     Keyword  @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  date        DateTime @db.Date
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  cost        Decimal  @default(0) @db.Decimal(14, 2)
+  conversions Int      @default(0)
+
+  @@unique([keywordId, date])
+}
+
+/// Поисковые запросы для добычи минус-слов (TZ §3.4 wordstat-mine)
+model SearchQueryStat {
+  id          String   @id @default(cuid())
+  campaignId  String
+  date        DateTime @db.Date
+  query       String
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  cost        Decimal  @default(0) @db.Decimal(14, 2)
+  conversions Int      @default(0)
+  /// true — фраза уже добавлена в минус-слова
+  negated     Boolean  @default(false)
+
+  @@unique([campaignId, date, query])
+  @@index([campaignId, negated])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Семантика
+// ─────────────────────────────────────────────────────────────────────────────
+
+model KeywordSet {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  seed      String
+  /// [{ phrase, frequency, cluster, score }]
+  phrases   Json
+  negatives Json     @default("[]")
+  createdAt DateTime @default(now())
+
+  @@index([clientId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Креативы
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Creative {
+  id        String       @id @default(cuid())
+  clientId  String
+  client    Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  kind      CreativeKind
+  /// Модель-генератор: claude-sonnet-4-6 | kandinsky-3.1 | yandex-art | runway-gen3 ...
+  provider  String
+  prompt    String       @db.Text
+  /// Для TEXT: { title, title2, text }. Для IMAGE/VIDEO: { url, width, height, format }
+  payload   Json
+  costUsd   Decimal?     @db.Decimal(10, 4)
+  createdAt DateTime     @default(now())
+
+  ads Ad[]
+
+  @@index([clientId, kind, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Изменения, апрувы, ошибки
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ChangeLog {
+  id         String    @id @default(cuid())
+  campaignId String?
+  campaign   Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  channel    Channel?
+  /// pause | resume | bid_change | budget_change | create_campaign | add_negatives | ...
+  action     String
+  /// Сущность, к которой применено изменение: campaign | adgroup | ad | keyword
+  targetType String?
+  targetId   String?
+  before     Json
+  after      Json
+  reason     String    @db.Text
+  /// Telegram username или "auto"
+  approvedBy String?
+  /// true — изменение откачено
+  revertedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([campaignId, createdAt])
+  @@index([action, createdAt])
+}
+
+model PendingApproval {
+  id          String         @id @default(cuid())
+  clientId    String
+  client      Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  action      String
+  /// Полное описание операции, достаточное чтобы применить её без пересчёта
+  payload     Json
+  /// Человекочитаемый текст карточки в Telegram
+  summary     String         @db.Text
+  chatId      String
+  messageId   String?
+  status      ApprovalStatus @default(PENDING)
+  expiresAt   DateTime
+  respondedAt DateTime?
+  respondedBy String?
+  /// Ошибка применения, если status = FAILED
+  error       String?        @db.Text
+  createdAt   DateTime       @default(now())
+
+  @@index([status, expiresAt])
+  @@index([clientId, createdAt])
+}
+
+model ErrorLog {
+  id        String   @id @default(cuid())
+  clientId  String?
+  client    Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  channel   Channel?
+  scope     String
+  code      String?
+  message   String   @db.Text
+  context   Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([channel, code, createdAt])
+}
+
+/// Ключ идемпотентности: защищает от двойного применения при ретраях (TZ §7)
+model IdempotencyKey {
+  key       String   @id
+  scope     String
+  result    Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+/// Учёт баллов Яндекс Директа (TZ §2.1) — чтобы не ловить error 52
+model UnitsLedger {
+  id        String   @id @default(cuid())
+  clientId  String
+  method    String
+  spent     Int
+  remaining Int
+  dailyLimit Int
+  createdAt DateTime @default(now())
+
+  @@index([clientId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI-слой
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Журнал вызовов LLM: стоимость, латентность, воспроизводимость решений
+model AiRun {
+  id         String   @id @default(cuid())
+  clientId   String?
+  client     Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  /// onboarding | strategist | creatives | moderator | optimizer | analyst | recon | wordstat
+  agent      String
+  model      String
+  input      Json
+  output     Json?
+  tokensIn   Int?
+  tokensOut  Int?
+  costUsd    Decimal? @db.Decimal(10, 4)
+  latencyMs  Int?
+  error      String?  @db.Text
+  createdAt  DateTime @default(now())
+
+  @@index([clientId, agent, createdAt])
+}
+
+model Report {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  /// daily | weekly
+  kind      String
+  periodFrom DateTime @db.Date
+  periodTo   DateTime @db.Date
+  /// Готовый markdown для Telegram
+  body      String   @db.Text
+  metrics   Json     @default("{}")
+  sentAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@unique([clientId, kind, periodFrom, periodTo])
+}
+
+/// Еженедельный срез по конкурентам (TZ §13.7)
+model CompetitorSnapshot {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  channel   Channel?
+  domain    String
+  /// { ads: [...], offers: [...], usp: [...], prices: [...] }
+  data      Json
+  createdAt DateTime @default(now())
+
+  @@index([clientId, createdAt])
+}
+
+/// Лиды из лид-форм для AI-Follow-up (TZ §13.9)
+model Lead {
+  id         String   @id @default(cuid())
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  channel    Channel
+  externalId String?
+  contact    Json
+  /// new | contacted | qualified | escalated | lost
+  status     String   @default("new")
+  transcript Json     @default("[]")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([clientId, status])
+}
