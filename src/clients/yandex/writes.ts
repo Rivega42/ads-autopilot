@@ -62,14 +62,13 @@ export function summariseResults(results: ActionResult[] | undefined, label: str
   const summary = emptySummary();
   if (!results) return summary;
 
-  results.forEach((res, index) => {
+  for (const [index, res] of results.entries()) {
     for (const warn of res.Warnings ?? []) summary.warnings.push(toFailure(index, warn));
 
     const errors = res.Errors ?? [];
     if (errors.length > 0) {
       for (const err of errors) {
-        const failure = toFailure(index, err);
-        summary.failed.push(failure);
+        summary.failed.push(toFailure(index, err));
         // Ошибка операции = 20 баллов. Логируем каждую: молчаливый пропуск
         // означает, что оптимизатор считает ставку изменённой, а она прежняя.
         log.warn(
@@ -82,7 +81,7 @@ export function summariseResults(results: ActionResult[] | undefined, label: str
 
     const id = res.Id ?? res.KeywordId;
     if (typeof id === 'number') summary.succeeded.push(id);
-  });
+  }
 
   return summary;
 }

@@ -88,13 +88,12 @@ export function resolveModel(task: LlmTask, override?: ModelRef): ModelRef {
   return override ?? TASK_MODELS[task];
 }
 
-export async function runAgent<T>(
-  opts: RunAgentOptions<T> & { schema: z.ZodType<T> },
-): Promise<AgentRun<T>>;
-export async function runAgent(
-  opts: RunAgentOptions<string> & { schema?: undefined },
-): Promise<AgentRun<string>>;
-export async function runAgent<T>(opts: RunAgentOptions<T>): Promise<AgentRun<T | string>> {
+/**
+ * Одна сигнатура вместо перегрузок: без `schema` параметр T разрешается в `string`
+ * по умолчанию, со `schema: z.ZodType<X>` — выводится в X. Перегрузки читались бы
+ * чуть лучше, но базовое правило no-redeclare в ESLint их не понимает.
+ */
+export async function runAgent<T = string>(opts: RunAgentOptions<T>): Promise<AgentRun<T>> {
   const startedAt = Date.now();
   const db = opts.db ?? prisma;
   const cacheStore = opts.cacheStore ?? llmCache;
@@ -102,9 +101,7 @@ export async function runAgent<T>(opts: RunAgentOptions<T>): Promise<AgentRun<T 
   const provider = getProvider(model.provider);
 
   const messages: LlmMessage[] =
-    typeof opts.messages === 'string'
-      ? [{ role: 'user', content: opts.messages }]
-      : opts.messages;
+    typeof opts.messages === 'string' ? [{ role: 'user', content: opts.messages }] : opts.messages;
 
   const request: LlmRequest = {
     model,
@@ -132,12 +129,14 @@ export async function runAgent<T>(opts: RunAgentOptions<T>): Promise<AgentRun<T 
 
     const cached = useCache ? cacheStore.get(key) : undefined;
     let text: string;
-    let data: T | string;
+    let data: T;
 
     if (cached) {
-      const reused = opts.schema
+      // Без схемы T разрешается в string (значение по умолчанию параметра),
+      // но компилятор об этом здесь не знает — отсюда приведение.
+      const reused: CachedParse<T> = opts.schema
         ? parseCached(opts.schema, cached, key, cacheStore)
-        : { ok: true as const, value: cached.text };
+        : { ok: true, value: cached.text as unknown as T };
 
       if (reused.ok) {
         const latencyMs = Date.now() - startedAt;
@@ -194,7 +193,8 @@ export async function runAgent<T>(opts: RunAgentOptions<T>): Promise<AgentRun<T 
       finalResponse = structured.response;
     } else {
       finalResponse = await call(request);
-      data = finalResponse.text;
+      // Тот же случай: без схемы T === string.
+      data = finalResponse.text as unknown as T;
       text = finalResponse.text;
       usage = finalResponse.usage;
     }

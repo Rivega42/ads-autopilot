@@ -58,11 +58,7 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPrice>> = {
  * Стоимость вызова в USD. Возвращает null для незнакомой модели — записать в AiRun
  * честный null правильнее, чем выдуманный ноль: ноль испортит месячный бюджет молча.
  */
-export function estimateCostUsd(
-  model: string,
-  tokensIn: number,
-  tokensOut: number,
-): number | null {
+export function estimateCostUsd(model: string, tokensIn: number, tokensOut: number): number | null {
   const price = MODEL_PRICING[model];
   if (!price) {
     log.warn({ model }, 'no pricing entry for model, cost will be recorded as null');

@@ -31,7 +31,11 @@ interface FakeDb {
 function fakeDb(spentUsd = '0'): FakeDb {
   const create = vi.fn().mockResolvedValue({ id: 'run_1' });
   const aggregate = vi.fn().mockResolvedValue({ _sum: { costUsd: spentUsd } });
-  return { db: { aiRun: { create, aggregate } } as unknown as Pick<PrismaClient, 'aiRun'>, create, aggregate };
+  return {
+    db: { aiRun: { create, aggregate } } as unknown as Pick<PrismaClient, 'aiRun'>,
+    create,
+    aggregate,
+  };
 }
 
 function ok(text: string, tokensIn = 1_000, tokensOut = 200): LlmResponse {

@@ -42,7 +42,11 @@ export function createAnthropicProvider(
     }
     // Пересоздаём клиент только при смене ключа (ротация в проде).
     if (!client || clientKey !== apiKey) {
-      client = new Anthropic({ apiKey, maxRetries: 0, ...(opts.baseURL ? { baseURL: opts.baseURL } : {}) });
+      client = new Anthropic({
+        apiKey,
+        maxRetries: 0,
+        ...(opts.baseURL ? { baseURL: opts.baseURL } : {}),
+      });
       clientKey = apiKey;
     }
     return client;
