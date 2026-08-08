@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    setupFiles: ['dotenv/config'],
+    setupFiles: ['./vitest.setup.ts'],
     fileParallelism: false,
     include: ['src/**/*.test.ts', 'src/**/__tests__/**/*.test.ts'],
     coverage: {
