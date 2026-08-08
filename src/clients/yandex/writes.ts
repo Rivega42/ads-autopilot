@@ -1,6 +1,6 @@
 import { scoped } from '@/lib/logger.js';
 import type { YandexHttpClient } from '@/clients/yandex/http.js';
-import { chunk, MAX_KEYWORD_IDS, MAX_PAGE_LIMIT } from '@/clients/yandex/entities.js';
+import { chunk, MAX_PAGE_LIMIT } from '@/clients/yandex/entities.js';
 import {
   actionResultSchema,
   toMicros,
@@ -324,5 +324,3 @@ export async function addCampaignNegativeKeywords(
   const summary = await setCampaignNegativeKeywords(http, campaignId, total);
   return { summary, added, total };
 }
-
-export { MAX_KEYWORD_IDS };

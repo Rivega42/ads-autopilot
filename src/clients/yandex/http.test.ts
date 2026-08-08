@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { AuthError, OutOfUnitsError } from '@/lib/errors.js';
 import type { YandexCredentials } from '@/clients/yandex/auth.js';
@@ -212,15 +212,29 @@ describe('error handling', () => {
         ? { data: { error: { error_code: 52, error_string: 'Сервер авторизации недоступен' } } }
         : { data: { result: { ok: true } } },
     );
-    const http = clientOf(transport);
-
-    await expect(http.call('campaigns', 'get', {}, okSchema)).resolves.toBeDefined();
+    // Пауза между попытками — ровно 1 с из подсказки ошибки; крутим таймеры, не ждём.
+    vi.useFakeTimers();
+    try {
+      const pending = clientOf(transport).call('campaigns', 'get', {}, okSchema);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(pending).resolves.toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
     expect(transport.calls).toHaveLength(2);
   });
 
   it('gives up on error 52 after the configured number of attempts', async () => {
     const transport = transportOf([{ data: { error: { error_code: 52 } } }]);
-    await expect(clientOf(transport).call('campaigns', 'get', {}, okSchema)).rejects.toThrow();
+    vi.useFakeTimers();
+    try {
+      const pending = clientOf(transport).call('campaigns', 'get', {}, okSchema);
+      const assertion = expect(pending).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(transport.calls).toHaveLength(3);
   });
 
