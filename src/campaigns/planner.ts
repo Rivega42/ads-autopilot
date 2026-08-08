@@ -386,6 +386,13 @@ function dedupe(values: readonly string[]): string[] {
 
 type TextsByGroup = Map<string, PlannedAd[]>;
 
+interface PendingGroup {
+  group: GroupSkeleton;
+  note: string;
+  /** Сколько полей обрезано в уже сохранённом варианте. 0 — сохранённого нет. */
+  truncated: number;
+}
+
 /**
  * Тексты объявлений с проверкой лимитов.
  *
@@ -405,7 +412,7 @@ async function generateTexts(
 ): Promise<TextsByGroup> {
   const run = opts.runTexts ?? runAgent;
   const result: TextsByGroup = new Map();
-  let pending = groups.map((g) => ({ group: g, note: '' }));
+  let pending: PendingGroup[] = groups.map((g) => ({ group: g, note: '', truncated: 0 }));
   let truncatedTotal = 0;
 
   for (let attempt = 0; attempt <= TEXT_REGENERATION_ATTEMPTS; attempt += 1) {
@@ -435,12 +442,18 @@ async function generateTexts(
     });
 
     const byName = new Map(draft.data.groups.map((g) => [g.name.trim(), g.ads]));
-    const retry: typeof pending = [];
+    const retry: PendingGroup[] = [];
 
     for (const item of pending) {
       const ads = byName.get(item.group.name.trim());
       if (!ads || ads.length === 0) {
-        retry.push({ group: item.group, note: 'в прошлом ответе для этой группы не было текстов' });
+        // Уже сохранённый (пусть и обрезанный) вариант несём с собой: если модель
+        // так и не перепишет тексты, он останется в плане, а не будет выброшен.
+        retry.push({
+          group: item.group,
+          note: 'в прошлом ответе для этой группы не было текстов',
+          truncated: item.truncated,
+        });
         continue;
       }
 
@@ -463,6 +476,7 @@ async function generateTexts(
         retry.push({
           group: item.group,
           note: `предыдущий вариант не уложился в лимиты (${overflow.join('; ')})`,
+          truncated: overflow.length,
         });
       } else if (overflow.length > 0) {
         truncatedTotal += overflow.length;
@@ -473,9 +487,14 @@ async function generateTexts(
   }
 
   for (const item of pending) {
-    // Две попытки — и текстов всё нет. Группа без объявлений нежизнеспособна.
+    if (result.has(item.group.name)) {
+      // Модель не переписала тексты, но обрезанный вариант прошлой попытки валиден
+      // и уже уложен в лимиты. Выбрасывать его — терять оплаченную работу зря.
+      truncatedTotal += item.truncated;
+      continue;
+    }
+    // Текстов не было ни разу. Группа без объявлений нежизнеспособна.
     warnings.push(`Группа «${item.group.name}» пропущена: модель не вернула тексты объявлений.`);
-    result.delete(item.group.name);
   }
 
   if (truncatedTotal > 0) {

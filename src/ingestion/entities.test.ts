@@ -130,6 +130,48 @@ describe('syncEntities', () => {
     expect(db.store.campaign[0]?.['status']).toBe('ACTIVE');
   });
 
+  it('оборванный листинг не архивирует всё, чего не оказалось на первой странице', async () => {
+    const three = fakeAdapter('YANDEX_DIRECT', {
+      campaigns: [
+        remoteCampaign(),
+        remoteCampaign({ externalId: '101', name: 'Контекст' }),
+        remoteCampaign({ externalId: '102', name: 'РСЯ' }),
+      ],
+    });
+    await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(three));
+
+    // Ответ не пустой и не упал — просто оборвался на первой странице из трёх.
+    const truncated = fakeAdapter('YANDEX_DIRECT', { campaigns: [remoteCampaign()] });
+    const result = await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(truncated));
+
+    expect(result.campaigns.archived).toBe(0);
+    expect(db.store.campaign.every((c) => c['status'] === 'ACTIVE')).toBe(true);
+  });
+
+  it('частичный листинг фраз не архивирует ключи чужой группы', async () => {
+    const both = fakeAdapter('YANDEX_DIRECT', {
+      campaigns: [remoteCampaign()],
+      adGroups: [remoteAdGroup(), remoteAdGroup({ externalId: '201', name: 'Питер' })],
+      keywords: [
+        remoteKeyword(),
+        remoteKeyword({ externalId: '401', phrase: 'сео', adGroupExternalId: '201' }),
+      ],
+    });
+    await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(both));
+
+    // Прогон, в котором ответ пришёл только по группе 200: про 201 кабинет
+    // промолчал — это не «фразы удалили».
+    const partial = fakeAdapter('YANDEX_DIRECT', {
+      campaigns: [remoteCampaign()],
+      adGroups: [remoteAdGroup(), remoteAdGroup({ externalId: '201', name: 'Питер' })],
+      keywords: [remoteKeyword()],
+    });
+    const result = await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(partial));
+
+    expect(result.keywords.archived).toBe(0);
+    expect(db.store.keyword.find((k) => k['externalId'] === '401')?.['status']).toBe('ACTIVE');
+  });
+
   it('не трогает минус-слова и ещё не залитые фразы', async () => {
     await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(fakeAdapter('YANDEX_DIRECT', fullCabinet)));
     const adGroupId = db.store.adGroup[0]?.['id'];

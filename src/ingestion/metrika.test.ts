@@ -132,4 +132,77 @@ describe('syncMetrikaConversions', () => {
 
     expect(db.store.campaignStat).toHaveLength(1);
   });
+
+  it('обнуляет конверсии Директа там, где Метрика промолчала', async () => {
+    db.seed('campaign', [
+      { id: 'camp-2', clientId: CLIENT, provider: 'YANDEX_DIRECT', externalId: '200' },
+    ]);
+    // Обе кампании открутили по 10 000 ₽, Директ насчитал 7 и 9 конверсий.
+    db.seed('campaignStat', [
+      {
+        entityType: 'CAMPAIGN',
+        entityId: 'camp-1',
+        date: new Date('2026-08-01T00:00:00.000Z'),
+        spend: 10_000,
+        conversions: 7,
+        cpa: 1428.57,
+      },
+      {
+        entityType: 'CAMPAIGN',
+        entityId: 'camp-2',
+        date: new Date('2026-08-01T00:00:00.000Z'),
+        spend: 10_000,
+        conversions: 9,
+        cpa: 1111.11,
+      },
+    ]);
+
+    // Метрика знает только про первую кампанию.
+    const result = await syncMetrikaConversions(CLIENT, deps([goalStat({ conversions: 2 })]));
+
+    expect(result).toMatchObject({ written: 1, zeroed: 1 });
+    const first = db.store.campaignStat.find((r) => r['entityId'] === 'camp-1');
+    const second = db.store.campaignStat.find((r) => r['entityId'] === 'camp-2');
+    expect(first?.['conversions']).toBe(2);
+    expect(Number(first?.['cpa'])).toBe(5_000);
+    // Не 9 конверсий по атрибуции Директа: в колонке одна модель, и это Метрика.
+    expect(second?.['conversions']).toBe(0);
+    expect(second?.['cpa']).toBeNull();
+  });
+
+  it('не трогает дни за пределами окна', async () => {
+    db.seed('campaignStat', [
+      {
+        entityType: 'CAMPAIGN',
+        entityId: 'camp-1',
+        date: new Date('2026-06-01T00:00:00.000Z'),
+        spend: 5_000,
+        conversions: 4,
+      },
+    ]);
+
+    await syncMetrikaConversions(CLIENT, deps([goalStat()]));
+
+    const old = db.store.campaignStat.find(
+      (r) => (r['date'] as Date).toISOString() === '2026-06-01T00:00:00.000Z',
+    );
+    expect(old?.['conversions']).toBe(4);
+  });
+
+  it('пустой ответ Метрики не стирает уже записанные конверсии', async () => {
+    db.seed('campaignStat', [
+      {
+        entityType: 'CAMPAIGN',
+        entityId: 'camp-1',
+        date: new Date('2026-08-01T00:00:00.000Z'),
+        spend: 10_000,
+        conversions: 7,
+      },
+    ]);
+
+    const result = await syncMetrikaConversions(CLIENT, deps([]));
+
+    expect(result).toMatchObject({ configured: true, fetched: 0, written: 0, zeroed: 0 });
+    expect(db.store.campaignStat[0]?.['conversions']).toBe(7);
+  });
 });

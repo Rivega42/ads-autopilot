@@ -1,19 +1,20 @@
 import type { Provider } from '@prisma/client';
 import { z } from 'zod';
 
-import type {
-  AdCreateSpec,
-  AdGroupCreateSpec,
-  CampaignCreateSpec,
-  CampaignWriter,
-  CreatedEntity,
-  CreatedNamedEntity,
-  KeywordCreateSpec,
+import {
+  markCreateOutcome,
+  type AdCreateSpec,
+  type AdGroupCreateSpec,
+  type CampaignCreateSpec,
+  type CampaignWriter,
+  type CreatedEntity,
+  type CreatedNamedEntity,
+  type KeywordCreateSpec,
 } from '@/campaigns/writer.js';
 import type { ChannelContext } from '@/channels/types.js';
 import { parseCredentials } from '@/clients/yandex-direct/auth.js';
 import { chunk, MAX_ADGROUP_IDS } from '@/clients/yandex-direct/entities.js';
-import { YANDEX_CHANNEL } from '@/clients/yandex-direct/errors.js';
+import { classifyWriteOutcome, YANDEX_CHANNEL } from '@/clients/yandex-direct/errors.js';
 import {
   YandexHttpClient,
   type HttpTransport,
@@ -83,7 +84,7 @@ export class YandexCampaignWriter implements CampaignWriter {
       campaign.NegativeKeywords = { Items: spec.negativeKeywords };
     }
 
-    const res = await http.call('campaigns', 'add', { Campaigns: [campaign] }, updateResultsSchema);
+    const res = await callAdd(http, 'campaigns', { Campaigns: [campaign] }, updateResultsSchema);
     const ids = requireIds(summariseResults(res.result.AddResults, 'campaigns.add'), 1, 'кампании');
     return { externalId: String(ids[0]) };
   }
@@ -111,7 +112,7 @@ export class YandexCampaignWriter implements CampaignWriter {
         return body;
       });
 
-      const res = await http.call('adgroups', 'add', { AdGroups }, updateResultsSchema);
+      const res = await callAdd(http, 'adgroups', { AdGroups }, updateResultsSchema);
       const ids = requireIds(
         summariseResults(res.result.AddResults, 'adgroups.add'),
         batch.length,
@@ -140,7 +141,7 @@ export class YandexCampaignWriter implements CampaignWriter {
         Bid: toMicros(keyword.bidRub),
       }));
 
-      const res = await http.call('keywords', 'add', { Keywords }, updateResultsSchema);
+      const res = await callAdd(http, 'keywords', { Keywords }, updateResultsSchema);
       const ids = requireIds(
         summariseResults(res.result.AddResults, 'keywords.add'),
         batch.length,
@@ -170,7 +171,7 @@ export class YandexCampaignWriter implements CampaignWriter {
         return { AdGroupId: toNumericId(ad.adGroupExternalId), TextAd: textAd };
       });
 
-      const res = await http.call('ads', 'add', { Ads }, updateResultsSchema);
+      const res = await callAdd(http, 'ads', { Ads }, updateResultsSchema);
       const ids = requireIds(
         summariseResults(res.result.AddResults, 'ads.add'),
         batch.length,
@@ -213,10 +214,13 @@ export class YandexCampaignWriter implements CampaignWriter {
     // Инвариант контракта: в dry-run сюда не приходят. Если пришли — это баг
     // вызывающего, и лучше исключение, чем тихий запрос в кабинет клиента.
     if (ctx.dryRun) {
-      throw new AppError('CampaignWriter called with dryRun context', {
-        code: 'DRY_RUN_VIOLATION',
-        context: { clientId: ctx.clientId, channel: this.channel },
-      });
+      throw markCreateOutcome(
+        new AppError('CampaignWriter called with dryRun context', {
+          code: 'DRY_RUN_VIOLATION',
+          context: { clientId: ctx.clientId, channel: this.channel },
+        }),
+        'not-created',
+      );
     }
 
     const options: ConstructorParameters<typeof YandexHttpClient>[0] = {
@@ -231,6 +235,31 @@ export class YandexCampaignWriter implements CampaignWriter {
   }
 }
 
+/**
+ * Единственная дверь для неидемпотентных `add`.
+ *
+ * Ключа идемпотентности в API v5 нет, поэтому слепой повтор потерянного ответа
+ * создал бы вторую кампанию с полным дневным бюджетом. Внутри клиента такие вызовы
+ * повторяются только после доказанного отказа на входе, а всё остальное уезжает
+ * наверх с пометкой, по которой вызывающий отличает «точно не создано»
+ * от «неизвестно» и решает судьбу ключа идемпотентности.
+ */
+async function callAdd<T>(
+  http: YandexHttpClient,
+  service: string,
+  params: Record<string, unknown>,
+  schema: z.ZodType<T>,
+): Promise<T> {
+  try {
+    return await http.call(service, 'add', params, schema, { nonIdempotent: true });
+  } catch (err) {
+    throw markCreateOutcome(
+      err,
+      classifyWriteOutcome(err) === 'not-applied' ? 'not-created' : 'unknown',
+    );
+  }
+}
+
 function strategySide(side: { type: string; settings?: Record<string, unknown> }): {
   BiddingStrategyType: string;
 } & Record<string, unknown> {
@@ -240,9 +269,13 @@ function strategySide(side: { type: string; settings?: Record<string, unknown> }
 function toNumericId(externalId: string): number {
   const value = Number(externalId);
   if (!Number.isInteger(value)) {
-    throw new ChannelError(YANDEX_CHANNEL, `Not a numeric Yandex id: ${externalId}`, {
-      code: 'YANDEX_BAD_ID',
-    });
+    // Падаем до выхода в сеть — в кабинете точно ничего не появилось.
+    throw markCreateOutcome(
+      new ChannelError(YANDEX_CHANNEL, `Not a numeric Yandex id: ${externalId}`, {
+        code: 'YANDEX_BAD_ID',
+      }),
+      'not-created',
+    );
   }
   return value;
 }
@@ -257,21 +290,31 @@ function toNumericId(externalId: string): number {
  * создаться, по внешнему id кампании.
  */
 function requireIds(summary: ActionSummary, expected: number, what: string): number[] {
+  // Ни одного id в ответе — создано точно ничего. Пришёл хоть один — часть объектов
+  // в кабинете уже есть, и «повторить» для такого батча означает наплодить дублей.
+  const outcome = summary.succeeded.length === 0 ? 'not-created' : 'unknown';
+
   if (summary.failed.length > 0) {
     const details = summary.failed
       .slice(0, 5)
       .map((f) => `#${f.index} code=${f.code} ${f.message ?? ''}`.trim())
       .join('; ');
-    throw new ChannelError(YANDEX_CHANNEL, `Яндекс Директ отклонил создание ${what}: ${details}`, {
-      code: 'YANDEX_CREATE_REJECTED',
-      context: { failed: summary.failed.length, expected },
-    });
+    throw markCreateOutcome(
+      new ChannelError(YANDEX_CHANNEL, `Яндекс Директ отклонил создание ${what}: ${details}`, {
+        code: 'YANDEX_CREATE_REJECTED',
+        context: { failed: summary.failed.length, expected },
+      }),
+      outcome,
+    );
   }
   if (summary.succeeded.length !== expected) {
-    throw new ChannelError(
-      YANDEX_CHANNEL,
-      `Яндекс Директ вернул ${summary.succeeded.length} id вместо ${expected} при создании ${what}`,
-      { code: 'YANDEX_CREATE_INCOMPLETE', context: { expected, got: summary.succeeded.length } },
+    throw markCreateOutcome(
+      new ChannelError(
+        YANDEX_CHANNEL,
+        `Яндекс Директ вернул ${summary.succeeded.length} id вместо ${expected} при создании ${what}`,
+        { code: 'YANDEX_CREATE_INCOMPLETE', context: { expected, got: summary.succeeded.length } },
+      ),
+      outcome,
     );
   }
   return summary.succeeded;

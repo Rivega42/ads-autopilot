@@ -8,6 +8,8 @@ import {
   bySpendDesc,
   collectPeriodMetrics,
   compareTotals,
+  coverageNote,
+  emptyCoverage,
   emptyTotals,
 } from '@/reporter/metrics.js';
 
@@ -110,6 +112,65 @@ describe('collectPeriodMetrics', () => {
 
     expect(metrics.totals).toMatchObject({ spend: 0, clicks: 0, ctr: null, cpc: null, cpa: null });
     expect(activeCampaigns(metrics)).toEqual([]);
+  });
+
+  it('отличает «строк нет» от «потратили ноль»', async () => {
+    const missing = await collectPeriodMetrics(db.asDb(), CLIENT, PERIOD);
+
+    expect(missing.coverage).toMatchObject({
+      days: 1,
+      daysWithRows: 0,
+      hasData: false,
+      missingDays: ['2026-08-07'],
+    });
+
+    // Площадка отчиталась нулём — это измеренный факт, а не пробел в данных.
+    db.seedStat({ entityId: 'c1', date: '2026-08-07', spend: 0, conversions: 0 });
+    const measured = await collectPeriodMetrics(db.asDb(), CLIENT, PERIOD);
+
+    expect(measured.coverage).toMatchObject({ daysWithRows: 1, hasData: true, partial: false });
+    expect(measured.totals.spend).toBe(0);
+  });
+
+  it('помечает дни без строк в ряду и считает период неполным', async () => {
+    db.seedStat({ entityId: 'c1', date: '2026-08-05', spend: 100 });
+
+    const metrics = await collectPeriodMetrics(db.asDb(), CLIENT, {
+      from: '2026-08-04',
+      to: '2026-08-06',
+    });
+
+    expect(metrics.byDate.map((p) => p.hasRows)).toEqual([false, true, false]);
+    expect(metrics.coverage).toMatchObject({
+      days: 3,
+      daysWithRows: 1,
+      hasData: true,
+      partial: true,
+      missingDays: ['2026-08-04', '2026-08-06'],
+    });
+  });
+
+  it('оговорка о неполных данных перечисляет пропущенные даты', () => {
+    expect(coverageNote(emptyCoverage({ from: '2026-08-01', to: '2026-08-03' }))).toBeNull();
+    expect(
+      coverageNote({
+        days: 3,
+        daysWithRows: 2,
+        missingDays: ['2026-08-02'],
+        hasData: true,
+        partial: true,
+      }),
+    ).toContain('02.08');
+  });
+
+  it('денежные колонки приезжают из Postgres как Decimal, а не как number', async () => {
+    db.seedStat({ entityId: 'c1', date: '2026-08-07', spend: 1234.5678, conversions: 2 });
+
+    const metrics = await collectPeriodMetrics(db.asDb(), CLIENT, PERIOD);
+
+    // Сложение Decimal через `+` дало бы конкатенацию строк — проверяем число.
+    expect(metrics.totals.spend).toBeCloseTo(1234.5678, 4);
+    expect(metrics.campaigns.find((c) => c.campaignId === 'c1')?.targetCpa).toBe(1_000);
   });
 
   it('клиент без кампаний не ходит в статистику вовсе', async () => {

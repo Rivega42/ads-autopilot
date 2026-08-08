@@ -1,4 +1,4 @@
-import type { Provider, ReportKind, StatEntityType } from '@prisma/client';
+import { Prisma, type Provider, type ReportKind, type StatEntityType } from '@prisma/client';
 
 import type { ReporterDb } from '@/reporter/deps.js';
 
@@ -9,6 +9,10 @@ import type { ReporterDb } from '@/reporter/deps.js';
  * нужно проверить, — что повторный прогон обновляет ту же строку `Report`, а не
  * добавляет вторую. Это свойство составного уникального ключа, то есть
  * хранилища, а не вызова, поэтому `upsert` здесь настоящий.
+ *
+ * Денежные колонки хранятся настоящим `Prisma.Decimal`, а не `number`: Postgres
+ * отдаёт именно его, и на `number` тесты проскакивали мимо `toNumber` — то есть
+ * мимо того самого преобразования, ради которого он написан.
  */
 
 export interface FakeClientRow {
@@ -23,7 +27,7 @@ export interface FakeCampaignRow {
   clientId: string;
   name: string;
   provider: Provider;
-  targetCpa: number | null;
+  targetCpa: Prisma.Decimal | null;
 }
 
 export interface FakeStatRow {
@@ -33,7 +37,7 @@ export interface FakeStatRow {
   impressions: number;
   clicks: number;
   conversions: number;
-  spend: number;
+  spend: Prisma.Decimal;
 }
 
 export interface FakeReportRow {
@@ -83,7 +87,11 @@ export class FakeDb {
   private sequence = 0;
 
   /** Заставляет упасть выбранную операцию — так проверяется живучесть прогона. */
-  failOn: { reportUpdate?: Error } = {};
+  failOn: {
+    reportUpdate?: Error;
+    /** Чтение статистики по кампаниям этого клиента падает. */
+    statsForClient?: { clientId: string; error: Error };
+  } = {};
 
   private nextId(prefix: string): string {
     this.sequence += 1;
@@ -101,12 +109,22 @@ export class FakeDb {
     return full;
   }
 
-  seedCampaign(row: Partial<FakeCampaignRow> & { id: string; clientId: string }): FakeCampaignRow {
+  seedCampaign(
+    row: Partial<Omit<FakeCampaignRow, 'targetCpa'>> & {
+      id: string;
+      clientId: string;
+      targetCpa?: number | null;
+    },
+  ): FakeCampaignRow {
+    const { targetCpa, ...rest } = row;
     const full: FakeCampaignRow = {
       name: `Кампания ${row.id}`,
       provider: 'YANDEX_DIRECT' as Provider,
-      targetCpa: null,
-      ...row,
+      ...rest,
+      targetCpa:
+        targetCpa === undefined || targetCpa === null
+          ? null
+          : new Prisma.Decimal(targetCpa.toFixed(2)),
     };
     this.campaigns.push(full);
     return full;
@@ -129,7 +147,7 @@ export class FakeDb {
       impressions: row.impressions ?? 0,
       clicks: row.clicks ?? 0,
       conversions: row.conversions ?? 0,
-      spend: row.spend ?? 0,
+      spend: new Prisma.Decimal((row.spend ?? 0).toFixed(4)),
     });
   }
 
@@ -186,6 +204,13 @@ export class FakeDb {
       this.statQueries += 1;
       const where = args.where ?? {};
       const ids = where.entityId?.in;
+      const broken = this.failOn.statsForClient;
+      if (broken && this.campaigns.some((c) => c.clientId === broken.clientId)) {
+        const owned = this.campaigns
+          .filter((c) => c.clientId === broken.clientId)
+          .map((c) => c.id);
+        if (ids?.some((id) => owned.includes(id))) throw broken.error;
+      }
       return this.stats.filter(
         (row) =>
           (where.entityType ? row.entityType === where.entityType : true) &&
@@ -241,16 +266,25 @@ export class FakeDb {
     findMany: async (args: {
       where?: { createdAt?: DateFilter; clientId?: string };
       select?: unknown;
-      orderBy?: unknown;
+      orderBy?: { createdAt?: 'asc' | 'desc' };
+      take?: number;
     }): Promise<FakeErrorRow[]> => {
       const where = args.where ?? {};
-      return this.errors
+      const desc = args.orderBy?.createdAt === 'desc';
+      const rows = this.errors
         .filter(
           (row) =>
             inRange(row.createdAt, where.createdAt) &&
             (where.clientId ? row.clientId === where.clientId : true),
         )
-        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+        // Вторичный ключ — порядок вставки: без него `take` на одинаковых
+        // отметках времени отдавал бы произвольные строки, и тест на срез мигал.
+        .sort((a, b) => {
+          const byTime = a.createdAt.getTime() - b.createdAt.getTime();
+          const stable = byTime !== 0 ? byTime : Number(a.id - b.id);
+          return desc ? -stable : stable;
+        });
+      return args.take === undefined ? rows : rows.slice(0, args.take);
     },
 
     create: async (args: {

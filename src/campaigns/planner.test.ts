@@ -262,6 +262,31 @@ describe('planCampaigns: лимиты текстов', () => {
     expect(calls).toEqual([true, false]);
   });
 
+  it('обрезанные тексты не выбрасываются, если на второй попытке группу пропустили', async () => {
+    const { db } = makeDb(BRIEF);
+    // Первая попытка: обе группы с переливом. Вторая: модель починила только одну,
+    // про «Бренд» промолчала. Валидный обрезанный вариант «Бренда» терять нельзя —
+    // он уже оплачен, уложен в лимиты и отличается от «текстов не было вовсе».
+    const onlyFirstGroup: AdTextsDraft = { groups: TEXTS.groups.slice(0, 1) };
+    const runTwice = vi.fn((): Promise<AgentRun<AdTextsDraft>> => {
+      const attempt = runTwice.mock.calls.length;
+      return Promise.resolve(agentRun(attempt === 1 ? longAds : onlyFirstGroup));
+    });
+
+    const plan = await planCampaigns('c1', { db, runStructure, runTexts: runTwice });
+
+    expect(runTwice).toHaveBeenCalledTimes(2);
+    expect(plan.campaigns[0]?.adGroups.map((g) => g.name)).toEqual(['Горячий спрос', 'Бренд']);
+    // Ложное «модель не вернула тексты» здесь было бы враньём: тексты она вернула.
+    expect(plan.warnings.some((w) => w.includes('модель не вернула тексты'))).toBe(false);
+    expect(plan.warnings.some((w) => w.includes('Обрезано полей объявлений'))).toBe(true);
+
+    for (const ad of plan.campaigns[0]?.adGroups[1]?.ads ?? []) {
+      expect(textLength(ad.title)).toBeLessThanOrEqual(DIRECT_TITLE_MAX);
+      expect(textLength(ad.text)).toBeLessThanOrEqual(DIRECT_TEXT_MAX);
+    }
+  });
+
   it('группа без текстов пропускается с предупреждением', async () => {
     const { db } = makeDb(BRIEF);
     const partial: AdTextsDraft = { groups: TEXTS.groups.slice(0, 1) };

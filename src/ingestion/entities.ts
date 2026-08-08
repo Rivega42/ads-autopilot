@@ -129,17 +129,21 @@ async function syncCampaigns(
     count.upserted += 1;
   }
 
+  const missingCampaigns = {
+    clientId,
+    provider,
+    externalId: { notIn: [...byExternalId.keys()] },
+    status: { not: CampaignStatus.ARCHIVED },
+  };
   count.archived = await archiveMissing(
-    () =>
-      db.campaign.updateMany({
-        where: {
-          clientId,
-          provider,
-          externalId: { notIn: [...byExternalId.keys()] },
-          status: { not: CampaignStatus.ARCHIVED },
-        },
-        data: { status: CampaignStatus.ARCHIVED },
-      }),
+    {
+      count: () => db.campaign.count({ where: missingCampaigns }),
+      archive: () =>
+        db.campaign.updateMany({
+          where: missingCampaigns,
+          data: { status: CampaignStatus.ARCHIVED },
+        }),
+    },
     byExternalId.size,
     { clientId, provider, level: 'campaign' },
   );
@@ -193,16 +197,16 @@ async function syncAdGroups(
   // Архивируем в разрезе кампании: externalId группы уникален только внутри неё,
   // общий `notIn` защитил бы чужую группу с тем же идентификатором.
   for (const [campaignId, seen] of seenPerCampaign) {
+    const missing = {
+      campaignId,
+      externalId: { notIn: seen },
+      status: { not: AdGroupStatus.ARCHIVED },
+    };
     count.archived += await archiveMissing(
-      () =>
-        db.adGroup.updateMany({
-          where: {
-            campaignId,
-            externalId: { notIn: seen },
-            status: { not: AdGroupStatus.ARCHIVED },
-          },
-          data: { status: AdGroupStatus.ARCHIVED },
-        }),
+      {
+        count: () => db.adGroup.count({ where: missing }),
+        archive: () => db.adGroup.updateMany({ where: missing, data: { status: AdGroupStatus.ARCHIVED } }),
+      },
       seen.length,
       { campaignId, level: 'adgroup' },
     );
@@ -298,6 +302,7 @@ async function syncKeywords(
 
   const remote = await adapter.listKeywords(ctx, adGroupExternalIds);
   const matched = new Set<string>();
+  const seenPerGroup = new Map<string, number>();
 
   for (const keyword of remote) {
     const adGroupId = adGroupsByExternalId.get(keyword.adGroupExternalId);
@@ -305,6 +310,7 @@ async function syncKeywords(
       count.orphaned += 1;
       continue;
     }
+    seenPerGroup.set(adGroupId, (seenPerGroup.get(adGroupId) ?? 0) + 1);
     const id =
       byExternal.get(`${adGroupId} ${keyword.externalId}`) ??
       byPhrase.get(`${adGroupId} ${keyword.phrase}`);
@@ -327,21 +333,33 @@ async function syncKeywords(
     count.upserted += 1;
   }
 
-  const vanished = existing
-    .filter((row) => !matched.has(row.id))
-    .filter((row) => row.status !== KeywordStatus.ARCHIVED)
+  // Архивируем в разрезе группы, как и сами группы в разрезе кампании: листинг
+  // возвращает фразы по каждой группе отдельно, и группа, по которой не пришло
+  // ничего, — это не «фразы удалили», а «до этой группы ответ не доехал».
+  const vanishedPerGroup = new Map<string, string[]>();
+  for (const row of existing) {
+    if (matched.has(row.id)) continue;
+    if (row.status === KeywordStatus.ARCHIVED) continue;
     // Минус-слова живут только у нас: кабинет отдаёт их не листингом фраз, а
     // полем кампании, поэтому «не пришёл» для них не значит «удалён».
     // Фраза без externalId — созданная нами и ещё не залитая; тоже не трогаем.
-    .filter((row) => row.externalId !== null)
-    .map((row) => row.id);
+    if (row.externalId === null) continue;
+    const list = vanishedPerGroup.get(row.adGroupId) ?? [];
+    list.push(row.id);
+    vanishedPerGroup.set(row.adGroupId, list);
+  }
 
-  if (vanished.length > 0 && remote.length > 0) {
-    const res = await db.keyword.updateMany({
-      where: { id: { in: vanished }, matchType: { not: MatchType.NEGATIVE } },
-      data: { status: KeywordStatus.ARCHIVED },
-    });
-    count.archived = res.count;
+  for (const [adGroupId, ids] of vanishedPerGroup) {
+    const missing = { id: { in: ids }, matchType: { not: MatchType.NEGATIVE } };
+    count.archived += await archiveMissing(
+      {
+        count: () => db.keyword.count({ where: missing }),
+        archive: () =>
+          db.keyword.updateMany({ where: missing, data: { status: KeywordStatus.ARCHIVED } }),
+      },
+      seenPerGroup.get(adGroupId) ?? 0,
+      { adGroupId, level: 'keyword' },
+    );
   }
 
   return count;
@@ -360,13 +378,30 @@ function keywordFields(keyword: RemoteKeyword): {
 }
 
 /**
+ * Какую долю живых сущностей один прогон вправе заархивировать.
+ *
+ * Полностью пустой ответ — не единственная форма сбоя: листинг, оборвавшийся
+ * на первой странице из трёх, приходит как обычный успешный ответ, и всё, чего
+ * на этой странице не было, уезжало в архив. Половина — это заведомо больше
+ * любой нормальной чистки кабинета и заведомо меньше обрыва пагинации.
+ */
+export const MAX_ARCHIVE_SHARE = 0.5;
+
+interface ArchivePlan {
+  /** Сколько строк попадёт под архивацию, если её выполнить. */
+  count: () => Promise<number>;
+  archive: () => Promise<{ count: number }>;
+}
+
+/**
+ * Архивация пропавших сущностей с двумя предохранителями.
+ *
  * Пустой ответ площадки — почти всегда сбой, а не «клиент всё удалил»: сетевая
  * ошибка внутри адаптера, протухший фильтр, пустая страница пагинации. Массовая
- * архивация по такому ответу выключила бы клиенту всю рекламу, поэтому при нуле
- * пришедших сущностей архивация пропускается.
+ * архивация по такому ответу выключила бы клиенту всю рекламу.
  */
 async function archiveMissing(
-  run: () => Promise<{ count: number }>,
+  plan: ArchivePlan,
   seenCount: number,
   context: Record<string, unknown>,
 ): Promise<number> {
@@ -374,7 +409,20 @@ async function archiveMissing(
     log.warn(context, 'cabinet returned no entities, skipping archival');
     return 0;
   }
-  const res = await run();
+
+  const candidates = await plan.count();
+  if (candidates === 0) return 0;
+
+  const live = seenCount + candidates;
+  if (candidates > live * MAX_ARCHIVE_SHARE) {
+    log.warn(
+      { ...context, seen: seenCount, candidates },
+      'listing looks truncated, skipping archival',
+    );
+    return 0;
+  }
+
+  const res = await plan.archive();
   if (res.count > 0) log.info({ ...context, archived: res.count }, 'entities archived');
   return res.count;
 }

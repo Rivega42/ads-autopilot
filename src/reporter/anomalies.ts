@@ -78,10 +78,18 @@ export function detectAnomalies(
   previous: PeriodMetrics,
   thresholds: AnomalyThresholds = DEFAULT_THRESHOLDS,
 ): Anomaly[] {
+  // Незагруженный период — не «нулевой»: любая аномалия по нему описывала бы
+  // дырку в данных как поведение рекламы. Молчим и отдаём решение отчёту,
+  // который скажет про отсутствие данных прямым текстом.
+  if (!current.coverage.hasData) return [];
+  // Сравнивать с неизмеренной базой тоже нельзя: «расход упал на 100%» здесь
+  // значило бы «вчера мы ничего не загрузили», а прочитано будет как обвал.
+  const comparable = previous.coverage.hasData;
+
   const found: Anomaly[] = [];
   const before = indexByCampaign(previous);
 
-  collectScope(found, CLIENT_SCOPE, current.totals, previous.totals, thresholds, null);
+  collectScope(found, CLIENT_SCOPE, current.totals, previous.totals, thresholds, null, comparable);
 
   for (const campaign of current.campaigns) {
     const past = before.get(campaign.campaignId);
@@ -93,6 +101,7 @@ export function detectAnomalies(
       past,
       thresholds,
       campaign.targetCpa,
+      comparable,
     );
   }
 
@@ -115,11 +124,12 @@ function collectScope(
   previous: ScopeMetrics,
   thresholds: AnomalyThresholds,
   targetCpa: number | null,
+  comparable: boolean,
 ): void {
   const material = current.spend >= thresholds.minSpend || previous.spend >= thresholds.minSpend;
   if (!material) return;
 
-  const spendChange = pctChangeOrNull(current.spend, previous.spend);
+  const spendChange = comparable ? pctChangeOrNull(current.spend, previous.spend) : null;
   if (spendChange !== null && spendChange >= thresholds.spikePct) {
     out.push({
       kind: 'spend_spike',
@@ -143,7 +153,7 @@ function collectScope(
     });
   }
 
-  const leadsChange = pctChangeOrNull(current.conversions, previous.conversions);
+  const leadsChange = comparable ? pctChangeOrNull(current.conversions, previous.conversions) : null;
   if (leadsChange !== null && leadsChange >= thresholds.spikePct) {
     out.push({
       kind: 'leads_spike',
@@ -196,7 +206,7 @@ function collectScope(
   }
 
   const ctrChange =
-    current.ctr !== null && previous.ctr !== null
+    comparable && current.ctr !== null && previous.ctr !== null
       ? pctChangeOrNull(current.ctr, previous.ctr)
       : null;
   if (
@@ -251,6 +261,10 @@ export interface SpendOutlierOptions {
  * среднему — случай, когда история идеально ровная (σ = 0) и любая z-оценка
  * обращается в бесконечность. Ряд короче трёх дней не разбираем вовсе: на двух
  * точках «среднее» — это вторая точка.
+ *
+ * Дни без строк в ряду не участвуют ни последним значением, ни базой: их ноль
+ * означает «не загрузилось», и по нему поднялся бы алерт «расход почти
+ * остановился» на кабинете, который на самом деле откручивался как обычно.
  */
 export function detectSpendOutlier(
   series: readonly DailyPoint[],
@@ -261,9 +275,11 @@ export function detectSpendOutlier(
   const minSpend = options.minSpend ?? 1_000;
 
   const last = series[series.length - 1];
-  if (!last || series.length < 4) return null;
+  if (!last || !last.hasRows) return null;
 
-  const history = series.slice(0, -1).map((p) => p.spend);
+  const history = series.slice(0, -1).filter((p) => p.hasRows).map((p) => p.spend);
+  if (history.length < 3) return null;
+
   const baseline = meanOrNull(history);
   if (baseline === null || baseline <= 0) return null;
   if (last.spend < minSpend && baseline < minSpend) return null;

@@ -11,6 +11,7 @@ import {
   textLength,
   truncateToLimit,
 } from '@/campaigns/limits.js';
+import { plannedAdSchema } from '@/campaigns/plan.schema.js';
 
 /** Строка ровно заданной длины из повторяющегося слова: границу проверяем точно. */
 function ofLength(length: number, filler = 'а'): string {
@@ -93,6 +94,37 @@ describe('truncateToLimit', () => {
 
   it('строку в пределах лимита возвращает как есть, только обрезав пробелы', () => {
     expect(truncateToLimit('  Заголовок  ', 33)).toBe('Заголовок');
+  });
+
+  it('никогда не возвращает пустую строку: пустой Title Директ отклоняет', () => {
+    // В лимит попадает только тире и половина длинного слова: обрезка по границе
+    // слова оставляла бы «—», а снятие висячего знака — пустую строку.
+    const value = '— Профессиональнаяподготовкаспециалистовподключ сегодня';
+    const cut = truncateToLimit(value, DIRECT_TITLE_MAX);
+
+    expect(cut).not.toBe('');
+    expect(textLength(cut)).toBeLessThanOrEqual(DIRECT_TITLE_MAX);
+  });
+
+  it('строка из одних знаков препинания тоже не схлопывается в пустоту', () => {
+    expect(truncateToLimit(ofLength(50, '—'), 10)).not.toBe('');
+  });
+
+  it('обрезанное объявление проходит схему плана', () => {
+    const { ad } = fitAdText({
+      title: '— Профессиональнаяподготовкаспециалистовподключ сегодня',
+      text: `Курс ${ofLength(120, 'б')}`,
+    });
+    // Схема — последний рубеж: с пустым Title объявление отклонят на 20 баллов,
+    // а группа останется без объявлений вовсе.
+    expect(plannedAdSchema.safeParse(ad).success).toBe(true);
+  });
+});
+
+describe('plannedAdSchema', () => {
+  it('не пропускает пустой заголовок и пустой текст', () => {
+    expect(plannedAdSchema.safeParse({ title: '', text: 'Текст' }).success).toBe(false);
+    expect(plannedAdSchema.safeParse({ title: 'Заголовок', text: '   ' }).success).toBe(false);
   });
 });
 

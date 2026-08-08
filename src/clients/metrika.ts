@@ -44,6 +44,44 @@ export interface MetrikaClientOptions {
   attribution?: 'LAST' | 'FIRST' | 'LASTSIGN' | 'LAST_YANDEX_DIRECT_CLICK';
 }
 
+/** Строк за запрос. Больше Метрика и не отдаст — дальше только пагинация. */
+export const METRIKA_PAGE_LIMIT = 10_000;
+
+/**
+ * Потолок числа страниц.
+ *
+ * Нужен не ради экономии: срез «дата × кампания» за 21 день переваливает за
+ * страницу примерно с 480 кампаний, и раньше хвост просто терялся — молча,
+ * без единой записи в лог. Молчаливо потерянные конверсии хуже отказа: по ним
+ * оптимизатор двигает бюджеты. Поэтому дочитываем до конца, а если данных
+ * столько, что даже пагинация не справляется, — падаем с явной ошибкой.
+ */
+export const METRIKA_MAX_PAGES = 50;
+
+type MetrikaRow = z.infer<typeof metrikaResponseSchema>['data'][number];
+
+function toGoalStats(
+  rows: readonly MetrikaRow[],
+  goalId: number,
+  byCampaign: boolean,
+): MetrikaGoalStat[] {
+  return rows.flatMap((row): MetrikaGoalStat[] => {
+    const date = row.dimensions[0]?.name;
+    // Строки без даты бессмысленны для дневной статистики — отбрасываем явно.
+    if (!date) return [];
+
+    const campaign = byCampaign ? row.dimensions[1]?.name : undefined;
+    const stat: MetrikaGoalStat = {
+      date,
+      goalId,
+      conversions: row.metrics[0] ?? 0,
+      revenue: row.metrics[1] ?? 0,
+    };
+    if (campaign) stat.campaignExternalId = campaign;
+    return [stat];
+  });
+}
+
 export class MetrikaClient {
   private readonly http: AxiosInstance;
   private readonly counterId: number;
@@ -64,8 +102,8 @@ export class MetrikaClient {
   /**
    * Конверсии по цели в разрезе дат и кампаний Директа.
    *
-   * Лимит базового аккаунта — 5000 запросов в сутки, поэтому запрашиваем
-   * сразу весь период одним вызовом, а не по дню.
+   * Лимит базового аккаунта — 5000 запросов в сутки, поэтому период
+   * запрашивается целиком, а не по дню; страницы дочитываются по `total_rows`.
    */
   async getGoalConversions(params: {
     goalId: number;
@@ -75,20 +113,56 @@ export class MetrikaClient {
   }): Promise<MetrikaGoalStat[]> {
     const { goalId, from, to, byCampaign = true } = params;
 
-    const dimensions = byCampaign ? 'ym:s:date,ym:s:lastsignDirectClickOrder' : 'ym:s:date';
+    const rows: MetrikaGoalStat[] = [];
+    let received = 0;
+    let total: number | undefined;
 
+    for (let page = 1; ; page += 1) {
+      // Метрика считает смещение от единицы, а не от нуля.
+      const data = await this.fetchPage({ goalId, from, to, byCampaign, offset: received + 1 });
+      total = data.total_rows ?? total;
+      received += data.data.length;
+      rows.push(...toGoalStats(data.data, goalId, byCampaign));
+
+      const full = data.data.length >= METRIKA_PAGE_LIMIT;
+      if (!full || (total !== undefined && received >= total)) break;
+
+      if (page >= METRIKA_MAX_PAGES) {
+        throw new AppError('Metrika response does not fit into the page budget', {
+          code: 'METRIKA_TOO_MANY_ROWS',
+          context: { counterId: this.counterId, received, total, pages: page },
+        });
+      }
+    }
+
+    log.debug(
+      { goalId, from, to, rows: rows.length, received, total },
+      'fetched metrika goal conversions',
+    );
+    return rows;
+  }
+
+  private async fetchPage(params: {
+    goalId: number;
+    from: string;
+    to: string;
+    byCampaign: boolean;
+    offset: number;
+  }): Promise<z.infer<typeof metrikaResponseSchema>> {
+    const { goalId, from, to, byCampaign, offset } = params;
     const query = {
       ids: String(this.counterId),
       metrics: `ym:s:goal${goalId}reaches,ym:s:goal${goalId}revenue`,
-      dimensions,
+      dimensions: byCampaign ? 'ym:s:date,ym:s:lastsignDirectClickOrder' : 'ym:s:date',
       date1: from,
       date2: to,
       attribution: this.attribution,
       accuracy: 'full',
-      limit: '10000',
+      limit: String(METRIKA_PAGE_LIMIT),
+      offset: String(offset),
     };
 
-    const data = await withRetry(
+    return withRetry(
       async () => {
         const res = await this.http.get('', { params: query });
 
@@ -126,25 +200,6 @@ export class MetrikaClient {
       },
       { label: 'metrika.getGoalConversions', attempts: 3, baseMs: 2000 },
     );
-
-    const rows = data.data.flatMap((row): MetrikaGoalStat[] => {
-      const date = row.dimensions[0]?.name;
-      // Строки без даты бессмысленны для дневной статистики — отбрасываем явно.
-      if (!date) return [];
-
-      const campaign = byCampaign ? row.dimensions[1]?.name : undefined;
-      const stat: MetrikaGoalStat = {
-        date,
-        goalId,
-        conversions: row.metrics[0] ?? 0,
-        revenue: row.metrics[1] ?? 0,
-      };
-      if (campaign) stat.campaignExternalId = campaign;
-      return [stat];
-    });
-
-    log.debug({ goalId, from, to, rows: rows.length }, 'fetched metrika goal conversions');
-    return rows;
   }
 
   /** Список целей счётчика — используется на онбординге, чтобы человек выбрал целевую. */

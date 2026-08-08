@@ -12,7 +12,7 @@ import {
   type AnomalyThresholds,
 } from '@/reporter/anomalies.js';
 import { spendLeadsChartUrl } from '@/reporter/chart.js';
-import { PROVISIONAL_NOTE } from '@/reporter/daily.js';
+import { NO_DATA_NOTE, PROVISIONAL_NOTE } from '@/reporter/daily.js';
 import { resolveDeps, type ReporterDeps } from '@/reporter/deps.js';
 import { describeFailure, recordFailure, ReportDeliveryError } from '@/reporter/errors.js';
 import {
@@ -29,6 +29,7 @@ import {
   bySpendDesc,
   collectPeriodMetrics,
   compareTotals,
+  coverageNote,
   type PeriodMetrics,
 } from '@/reporter/metrics.js';
 import {
@@ -196,8 +197,27 @@ export function buildWeeklyFacts(
         };
       }),
     anomalies: anomalies.map((a) => ({ kind: a.kind, severity: a.severity, text: a.text })),
-    notes: [PROVISIONAL_NOTE],
+    notes: buildNotes(current, previous),
   };
+}
+
+/**
+ * Оговорки для модели.
+ *
+ * Дырки в данных обязаны быть здесь: иначе модель объяснит словами просадку,
+ * которой не было, — суммы занижены ровно на незагруженные дни, а по фактам
+ * это неотличимо от остановки открутки.
+ */
+function buildNotes(current: PeriodMetrics, previous: PeriodMetrics): string[] {
+  const notes = [PROVISIONAL_NOTE];
+  const currentGaps = coverageNote(current.coverage);
+  if (currentGaps) notes.push(`Разбираемая неделя. ${currentGaps}`);
+  const previousGaps = coverageNote(previous.coverage);
+  if (previousGaps) notes.push(`Неделя до неё. ${previousGaps}`);
+  if (!previous.coverage.hasData) {
+    notes.push('За прошлую неделю данных нет вовсе — сравнивать не с чем, процентов не называй.');
+  }
+  return notes;
 }
 
 function pickTotals(metrics: PeriodMetrics): WeeklyFacts['totals'] {
@@ -233,10 +253,28 @@ export async function buildWeeklyReport(
 
   const anomalies = detectAnomalies(current, previous, thresholds);
   const facts = buildWeeklyFacts(current, previous, anomalies);
-  const chartUrl = spendLeadsChartUrl(current.byDate);
+  const chartUrl = current.coverage.hasData ? spendLeadsChartUrl(current.byDate) : null;
 
   let review: WeeklyReview | null = null;
   let aiRunId: string | null = null;
+
+  // Разбирать нечего: фактов нет, а вызов Opus стоит денег клиента (ТЗ §13).
+  if (!current.coverage.hasData) {
+    log.warn(
+      { clientId: recipient.clientId, ...period },
+      'weekly period has no stats at all, skipping the LLM call',
+    );
+    return {
+      body: renderWeekly(recipient, current, previous, anomalies, null, chartUrl),
+      chartUrl,
+      facts,
+      review: null,
+      metrics: current,
+      previous,
+      anomalies,
+      aiRunId: null,
+    };
+  }
 
   try {
     const result = await run({
@@ -283,12 +321,38 @@ export function renderWeekly(
 
   const header = md`📈 ${mdBold(`Недельный разбор (${formatPeriod(current.period)})`)} — ${mdEscape(recipient.name)}`;
 
+  if (!current.coverage.hasData) {
+    return clampMarkdown(
+      mdJoin([
+        header,
+        md``,
+        md`${mdEscape(`⚠️ ${NO_DATA_NOTE}`)}`,
+        md``,
+        md`${mdEscape(PROVISIONAL_NOTE)}`,
+      ]),
+    );
+  }
+
+  const noBase = !previous.coverage.hasData;
+  const spendTail = noBase
+    ? '(за прошлую неделю данных нет)'
+    : `${trendArrow(cmp.spend.changePct)} ${formatPctChange(cmp.spend.changePct)} к прошлой`;
+  const leadsTail = noBase
+    ? '(за прошлую неделю данных нет)'
+    : `${trendArrow(cmp.conversions.changePct)} ${formatPctChange(cmp.conversions.changePct)} (было ${formatInt(previous.totals.conversions)})`;
+  const cpaTail = noBase
+    ? '(за прошлую неделю данных нет)'
+    : `(было ${formatMoney(previous.totals.cpa)}, ${formatPctChange(cmp.cpa.changePct)})`;
+
   const totals = [
-    md`Расход: ${mdBold(formatMoney(current.totals.spend))} ${mdEscape(`${trendArrow(cmp.spend.changePct)} ${formatPctChange(cmp.spend.changePct)} к прошлой`)}`,
-    md`Лиды: ${mdBold(formatInt(current.totals.conversions))} ${mdEscape(`${trendArrow(cmp.conversions.changePct)} ${formatPctChange(cmp.conversions.changePct)} (было ${formatInt(previous.totals.conversions)})`)}`,
-    md`CPA: ${mdBold(formatMoney(current.totals.cpa))} ${mdEscape(`(было ${formatMoney(previous.totals.cpa)}, ${formatPctChange(cmp.cpa.changePct)})`)}`,
+    md`Расход: ${mdBold(formatMoney(current.totals.spend))} ${mdEscape(spendTail)}`,
+    md`Лиды: ${mdBold(formatInt(current.totals.conversions))} ${mdEscape(leadsTail)}`,
+    md`CPA: ${mdBold(formatMoney(current.totals.cpa))} ${mdEscape(cpaTail)}`,
     md`Клики: ${mdEscape(formatInt(current.totals.clicks))} · CTR ${mdEscape(formatRatio(current.totals.ctr))}`,
   ];
+
+  const gaps = coverageNote(current.coverage);
+  const gapLines = gaps === null ? [] : [md``, md`${mdEscape(`⚠️ ${gaps}`)}`];
 
   const worked =
     review && review.worked.length > 0
@@ -350,6 +414,7 @@ export function renderWeekly(
       header,
       md``,
       ...totals,
+      ...gapLines,
       ...summary,
       ...worked,
       ...sagging,
@@ -382,7 +447,7 @@ export async function sendWeeklyReport(
       sent: false,
       reused: true,
       skipped: 'already_sent',
-      degraded: false,
+      degraded: storedDegraded(existing.metrics),
     };
   }
 
@@ -406,6 +471,9 @@ export async function sendWeeklyReport(
             chartUrl: content.chartUrl,
             aiRunId: content.aiRunId,
             promptVersion: WEEKLY_PROMPT_VERSION,
+            // Пишем в строку, а не выводим при переотправке из `review`: сводка
+            // должна знать про деградацию того отчёта, который лежит в БД.
+            degraded: content.review === null,
           }),
         });
 
@@ -426,8 +494,15 @@ export async function sendWeeklyReport(
     sent: true,
     reused: reuse,
     skipped: null,
-    degraded: content !== null && content.review === null,
+    degraded: content === null ? storedDegraded(stored.metrics) : content.review === null,
   };
+}
+
+/** Признак деградации из сохранённого слепка метрик. Незнакомая форма — считаем полноценным. */
+function storedDegraded(metrics: unknown): boolean {
+  if (typeof metrics !== 'object' || metrics === null) return false;
+  const value = (metrics as Record<string, unknown>)['degraded'];
+  return value === true;
 }
 
 /** Точка входа очереди `weekly-report`. */

@@ -41,6 +41,8 @@ export interface MetrikaSyncResult {
   configured: boolean;
   fetched: number;
   written: number;
+  /** Кампаний-дней, обнулённых из-за отсутствия в ответе Метрики. */
+  zeroed: number;
   /** Строк, чью кампанию не удалось сопоставить с нашей БД. */
   unresolved: number;
 }
@@ -104,6 +106,14 @@ export function directCampaignId(dimension: string | undefined): string | undefi
  * Директом: у площадки своя модель атрибуции и свой набор целей, а считать CPA
  * нужно по той цели, которую клиент назвал целевой. Колонка `conversions` одна,
  * поэтому источник должен быть один — и это Метрика, когда она настроена.
+ *
+ * «Один источник» означает и обратное: кампании-дни, которых нет в ответе
+ * Метрики, обнуляются. Метрика возвращает только строки с достижениями цели,
+ * поэтому её молчание про кампанию — это ноль по её модели, а не «нет данных».
+ * Раньше в таких строках оставалась цифра Директа: в одной колонке жили две
+ * модели атрибуции, отчёт складывал их в CPA, которого не существует ни в
+ * одной из них, а оптимизатор перекладывал бюджет на кампанию просто за то,
+ * что её не оказалось в ответе Метрики.
  */
 export async function syncMetrikaConversions(
   clientId: string,
@@ -112,7 +122,15 @@ export async function syncMetrikaConversions(
   const { range: explicitRange, metrikaFor, ...depsPatch } = options;
   const deps = resolveDeps(depsPatch);
   const range = explicitRange ?? trailingWindowMsk(STATS_WINDOW_DAYS, deps.now());
-  const base = { clientId, from: range.from, to: range.to, fetched: 0, written: 0, unresolved: 0 };
+  const base = {
+    clientId,
+    from: range.from,
+    to: range.to,
+    fetched: 0,
+    written: 0,
+    zeroed: 0,
+    unresolved: 0,
+  };
 
   const ctx = await deps.contextFor(clientId, PROVIDER);
   const settings = readMetrikaSettings(ctx.credentials);
@@ -135,11 +153,25 @@ export async function syncMetrikaConversions(
   });
   const byExternalId = new Map(campaigns.map((c) => [c.externalId, c.id]));
 
+  // Пустой ответ — почти всегда сбой на той стороне, а не «за три недели не
+  // было ни одной конверсии». Обнулять по нему всё окно нельзя: это стёрло бы
+  // конверсии Директа и обвалило бы отчёт клиента в ноль.
+  if (rows.length === 0) {
+    log.warn({ clientId, ...range }, 'metrika returned no rows at all, keeping stored conversions');
+    return { ...base, configured: true };
+  }
+
   const { totals, unresolved } = groupByCampaignDate(rows, byExternalId);
   const written = await applyConversions(deps.db, totals);
+  const zeroed = await zeroUnreported(
+    deps.db,
+    campaigns.map((c) => c.id),
+    range,
+    new Set(totals.map((t) => `${t.entityId} ${t.date}`)),
+  );
 
-  log.info({ clientId, ...range, written, unresolved }, 'metrika conversions applied');
-  return { ...base, configured: true, fetched: rows.length, written, unresolved };
+  log.info({ clientId, ...range, written, zeroed, unresolved }, 'metrika conversions applied');
+  return { ...base, configured: true, fetched: rows.length, written, zeroed, unresolved };
 }
 
 function defaultMetrikaSource(settings: MetrikaSettings): MetrikaSource {
@@ -231,4 +263,49 @@ async function applyConversions(db: PrismaClient, totals: ConversionTotal[]): Pr
     written += 1;
   }
   return written;
+}
+
+/**
+ * Обнуляет конверсии там, где Метрика промолчала.
+ *
+ * Без этого прохода колонка `conversions` остаётся смесью двух моделей
+ * атрибуции: у кампаний из ответа — Метрика, у остальных — Директ. Сравнивать
+ * такие CPA между собой нельзя, а именно это и делают отчёт и оптимизатор.
+ * CPA обнуляемой строки сбрасывается в `null`: делить расход не на что.
+ */
+async function zeroUnreported(
+  db: PrismaClient,
+  campaignIds: readonly string[],
+  range: DateRange,
+  reported: ReadonlySet<string>,
+): Promise<number> {
+  if (campaignIds.length === 0) return 0;
+
+  const stale = await db.campaignStat.findMany({
+    where: {
+      entityType: StatEntityType.CAMPAIGN,
+      entityId: { in: [...campaignIds] },
+      date: { gte: ymdToDateColumn(range.from), lte: ymdToDateColumn(range.to) },
+      conversions: { not: 0 },
+    },
+    select: { entityId: true, date: true },
+  });
+
+  let zeroed = 0;
+  for (const row of stale) {
+    if (reported.has(`${row.entityId} ${row.date.toISOString().slice(0, 10)}`)) continue;
+    await db.campaignStat.update({
+      where: {
+        entityType_entityId_date: {
+          entityType: StatEntityType.CAMPAIGN,
+          entityId: row.entityId,
+          date: row.date,
+        },
+      },
+      data: { conversions: 0, cpa: null },
+      select: { entityId: true },
+    });
+    zeroed += 1;
+  }
+  return zeroed;
 }

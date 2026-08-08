@@ -16,18 +16,39 @@
 /** Сколько молчим по одному и тому же поводу. */
 export const DEFAULT_COOLDOWN_MS = 30 * 60 * 1000;
 
+interface Entry {
+  at: number;
+  /** Своя длительность тишины: у поводов разный «естественный» период повтора. */
+  cooldownMs: number;
+}
+
 export class CooldownLimiter {
-  private readonly lastSeen = new Map<string, number>();
+  private readonly lastSeen = new Map<string, Entry>();
 
   constructor(private readonly cooldownMs: number = DEFAULT_COOLDOWN_MS) {}
 
-  /** true — по этому ключу давно не сообщали; вызов сразу засчитывает отправку. */
-  allow(key: string, now: Date = new Date()): boolean {
+  /**
+   * Проверка без побочного эффекта.
+   *
+   * Отделена от отметки намеренно: раньше фильтрация сразу засчитывала
+   * отправку, и алерт, который не влез в лимит прогона или не ушёл из-за
+   * упавшего Telegram, замолкал на весь период тишины, ни разу не доехав.
+   */
+  isAllowed(key: string, now: Date = new Date()): boolean {
+    return this.remainingMs(key, now) === 0;
+  }
+
+  /** Засчитывает доставку. Вызывать только после того, как сообщение реально ушло. */
+  markSent(key: string, now: Date = new Date(), cooldownMs?: number): void {
     const at = now.getTime();
-    const previous = this.lastSeen.get(key);
-    if (previous !== undefined && at - previous < this.cooldownMs) return false;
-    this.lastSeen.set(key, at);
+    this.lastSeen.set(key, { at, cooldownMs: cooldownMs ?? this.cooldownMs });
     this.prune(at);
+  }
+
+  /** Проверка вместе с отметкой — для поводов, у которых нет отдельной доставки. */
+  allow(key: string, now: Date = new Date(), cooldownMs?: number): boolean {
+    if (!this.isAllowed(key, now)) return false;
+    this.markSent(key, now, cooldownMs);
     return true;
   }
 
@@ -35,7 +56,7 @@ export class CooldownLimiter {
   remainingMs(key: string, now: Date = new Date()): number {
     const previous = this.lastSeen.get(key);
     if (previous === undefined) return 0;
-    return Math.max(0, this.cooldownMs - (now.getTime() - previous));
+    return Math.max(0, previous.cooldownMs - (now.getTime() - previous.at));
   }
 
   reset(): void {
@@ -48,8 +69,8 @@ export class CooldownLimiter {
 
   /** Ключи живут ровно столько, сколько длится тишина: иначе карта растёт вечно. */
   private prune(at: number): void {
-    for (const [key, seenAt] of this.lastSeen) {
-      if (at - seenAt >= this.cooldownMs) this.lastSeen.delete(key);
+    for (const [key, entry] of this.lastSeen) {
+      if (at - entry.at >= entry.cooldownMs) this.lastSeen.delete(key);
     }
   }
 }

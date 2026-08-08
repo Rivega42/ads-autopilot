@@ -25,6 +25,7 @@ import {
   bySpendDesc,
   collectPeriodMetrics,
   compareTotals,
+  coverageNote,
   type PeriodMetrics,
 } from '@/reporter/metrics.js';
 import {
@@ -67,12 +68,31 @@ export const DAILY_THRESHOLDS: AnomalyThresholds = {
   minImpressions: 200,
 };
 
+/** «21 день» в родительном падеже: «до 21 дня», но «до 22 дней». */
+function daysGenitive(days: number): string {
+  const tail = days % 100;
+  return tail % 10 === 1 && tail !== 11 ? `${days} дня` : `${days} дней`;
+}
+
 /**
  * Конверсии из Метрики доезжают до 21 дня (ТЗ §2.1) — вчерашний CPA ещё
  * изменится. Отчёт обязан это проговаривать: иначе клиент считает цифру
  * окончательной и принимает по ней решения.
  */
-export const PROVISIONAL_NOTE = `Конверсии из Метрики дозаезжают до ${STATS_WINDOW_DAYS} дней — вчерашние лиды и CPA предварительные.`;
+export const PROVISIONAL_NOTE = `Конверсии из Метрики дозаезжают до ${daysGenitive(STATS_WINDOW_DAYS)} — вчерашние лиды и CPA предварительные.`;
+
+/**
+ * Текст на случай, когда за период нет ни одной строки статистики.
+ *
+ * Отчёт с нулями здесь недопустим: он читается как «расход обвалился до нуля»,
+ * и рациональная реакция на него — остановить рекламу и звонить площадке —
+ * ровно обратна нужной. Причину («не открутилось» или «не загрузилось») по
+ * самим данным различить нельзя, поэтому её и не называем.
+ */
+export const NO_DATA_NOTE =
+  'Статистики за этот период в базе нет ни по одной кампании. Это не нулевой расход: ' +
+  'мы не знаем, ничего не откручивалось или не доехала загрузка, — поэтому цифр и ' +
+  'сравнения с прошлым периодом ниже нет.';
 
 export interface DailyReportContent {
   body: Markdown;
@@ -129,7 +149,9 @@ export async function buildDailyReport(
   const chartSeries = await collectPeriodMetrics(deps.db, recipient.clientId, chartWindow);
 
   const anomalies = detectAnomalies(current, previous, thresholds);
-  const chartUrl = spendLeadsChartUrl(chartSeries.byDate);
+  // Без данных за период график — это картинка про чужие дни рядом с текстом
+  // «данных нет»; ссылку не даём вовсе.
+  const chartUrl = current.coverage.hasData ? spendLeadsChartUrl(chartSeries.byDate) : null;
 
   return {
     body: renderDaily(recipient, current, previous, anomalies, chartUrl),
@@ -152,21 +174,43 @@ export function renderDaily(
 
   const header = md`📊 ${mdBold(`Отчёт за ${formatPeriod(current.period)}`)} — ${mdEscape(recipient.name)}`;
 
+  if (!current.coverage.hasData) {
+    return clampMarkdown(
+      mdJoin([
+        header,
+        md``,
+        md`${mdEscape(`⚠️ ${NO_DATA_NOTE}`)}`,
+        md``,
+        md`${mdEscape(PROVISIONAL_NOTE)}`,
+      ]),
+    );
+  }
+
+  // База не измерена — процент к ней был бы выдумкой, а «было 0» ложью.
+  const noBase = !previous.coverage.hasData;
+  const spendTail = noBase
+    ? `(за ${wasLabel} данных нет)`
+    : `${trendArrow(cmp.spend.changePct)} ${formatPctChange(cmp.spend.changePct)} к ${wasLabel}`;
+  const leadsTail = noBase
+    ? `(за ${wasLabel} данных нет)`
+    : `${trendArrow(cmp.conversions.changePct)} ${formatPctChange(cmp.conversions.changePct)} (было ${formatInt(previous.totals.conversions)})`;
+  const cpaTail = noBase
+    ? `(за ${wasLabel} данных нет)`
+    : `(было ${formatMoney(previous.totals.cpa)})`;
+
   const totals = [
-    md`Расход: ${mdBold(formatMoney(current.totals.spend))} ${mdEscape(`${trendArrow(cmp.spend.changePct)} ${formatPctChange(cmp.spend.changePct)} к ${wasLabel}`)}`,
-    md`Лиды: ${mdBold(formatInt(current.totals.conversions))} ${mdEscape(`${trendArrow(cmp.conversions.changePct)} ${formatPctChange(cmp.conversions.changePct)} (было ${formatInt(previous.totals.conversions)})`)}`,
-    md`CPA: ${mdBold(formatMoney(current.totals.cpa))} ${mdEscape(`(было ${formatMoney(previous.totals.cpa)})`)}`,
+    md`Расход: ${mdBold(formatMoney(current.totals.spend))} ${mdEscape(spendTail)}`,
+    md`Лиды: ${mdBold(formatInt(current.totals.conversions))} ${mdEscape(leadsTail)}`,
+    md`CPA: ${mdBold(formatMoney(current.totals.cpa))} ${mdEscape(cpaTail)}`,
     md`Клики: ${mdEscape(formatInt(current.totals.clicks))} · CTR ${mdEscape(formatRatio(current.totals.ctr))}`,
   ];
+
+  const gaps = coverageNote(current.coverage);
 
   const rows = bySpendDesc(activeCampaigns(current)).slice(0, MAX_CAMPAIGN_ROWS);
   const campaigns =
     rows.length === 0
-      ? [
-          md`
-Ни одна кампания за период не откручивалась.
-          `,
-        ]
+      ? [md`${mdEscape('Ни одна кампания за период не откручивалась.')}`]
       : [
           md`${mdBold('По кампаниям')}`,
           ...rows.map(
@@ -177,12 +221,7 @@ export function renderDaily(
 
   const problems =
     anomalies.length === 0
-      ? [
-          md`${mdBold('Проблемы')}`,
-          md`
-Ничего требующего внимания не нашлось.
-          `,
-        ]
+      ? [md`${mdBold('Проблемы')}`, md`${mdEscape('Ничего требующего внимания не нашлось.')}`]
       : [
           md`${mdBold('Топ проблем')}`,
           ...anomalies
@@ -197,6 +236,8 @@ export function renderDaily(
       header,
       md``,
       ...totals,
+      gaps === null ? null : md``,
+      gaps === null ? null : md`${mdEscape(`⚠️ ${gaps}`)}`,
       md``,
       ...campaigns,
       md``,

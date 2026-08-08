@@ -1,6 +1,7 @@
 import type { Provider } from '@prisma/client';
 
 import type { ChannelContext } from '@/channels/types.js';
+import { AppError } from '@/lib/errors.js';
 
 /**
  * Контракт создания сущностей в кабинете.
@@ -19,6 +20,38 @@ import type { ChannelContext } from '@/channels/types.js';
  *  • ошибки площадки приводятся к ChannelError/AuthError/RateLimitError/OutOfUnitsError;
  *  • ответы валидируются zod.
  */
+
+/**
+ * Что известно про кабинет, когда создание упало.
+ *
+ *  • `not-created` — площадка отказала до записи: повторять безопасно;
+ *  • `unknown` — ответ потерян (таймаут, 5xx, чужая форма тела). Объект мог быть
+ *    создан и уже тратить деньги, а второго ключа идемпотентности у нас нет.
+ *
+ * Значение по умолчанию — `unknown`: молча считать «ничего не создалось» дороже,
+ * чем позвать человека посмотреть кабинет.
+ */
+export type CreateOutcome = 'not-created' | 'unknown';
+
+/** Ключ в `AppError.context`. Канал-независимый: у VK и TikTok та же развилка. */
+export const CREATE_OUTCOME_KEY = 'createOutcome';
+
+/**
+ * Помечает ошибку создания известной судьбой. Возвращает ту же ошибку, чтобы
+ * писалось `throw markCreateOutcome(err, 'not-created')` и не терялся тип и стек.
+ */
+export function markCreateOutcome<E>(err: E, outcome: CreateOutcome): E {
+  if (err instanceof AppError) err.context[CREATE_OUTCOME_KEY] = outcome;
+  return err;
+}
+
+/** Судьба создания по ошибке. Всё непомеченное — `unknown`. */
+export function createOutcomeOf(err: unknown): CreateOutcome {
+  if (err instanceof AppError && err.context[CREATE_OUTCOME_KEY] === 'not-created') {
+    return 'not-created';
+  }
+  return 'unknown';
+}
 
 export interface CampaignCreateSpec {
   name: string;

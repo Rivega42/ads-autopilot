@@ -139,5 +139,14 @@ export async function executeCreateCampaign(
     });
   }
 
+  if (outcome.status === 'unknown') {
+    // Отдельный код, а не CAMPAIGN_CREATE_FAILED: «не удалось» приглашает нажать
+    // «повторить», а здесь кампания могла быть создана и уже тратить бюджет.
+    throw new AppError(outcome.note ?? 'Создание кампании не подтверждено', {
+      code: 'CAMPAIGN_CREATE_UNKNOWN',
+      context: { planId: ref.planId, campaignIndex: ref.campaignIndex },
+    });
+  }
+
   return { applied: outcome.status === 'created', plan: outcome.plan, result: outcome };
 }

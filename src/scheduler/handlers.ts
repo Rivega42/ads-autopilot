@@ -25,7 +25,17 @@ function notImplemented(name: QueueName): Processor {
 /** Что вернул обработчик. Уезжает в Redis, поэтому обязано быть JSON-сериализуемым. */
 export type HandlerResult = Record<string, unknown>;
 
-const running = new Map<QueueName, number>();
+const running = new Map<string, number>();
+
+/**
+ * Ключ замка. optimize-bids и pause-losers исполняют одну и ту же работу по
+ * разным расписаниям, поэтому им нужен общий ключ: с раздельными они
+ * пересекались бы, и одно и то же изменение ставки применилось бы дважды.
+ */
+const LOCK_KEY: Partial<Record<QueueName, string>> = {
+  [QUEUE_NAMES.optimizeBids]: 'optimization',
+  [QUEUE_NAMES.pauseLosers]: 'optimization',
+};
 
 /**
  * Оборачивает обработчик защитой от наложения и логированием длительности.
@@ -36,8 +46,9 @@ const running = new Map<QueueName, number>();
  * баллов API — поэтому второй вызов в том же процессе просто уходит.
  */
 function exclusive(name: QueueName, run: () => Promise<HandlerResult>): Processor {
+  const lock = LOCK_KEY[name] ?? name;
   return async (job: Job): Promise<HandlerResult> => {
-    const startedAt = running.get(name);
+    const startedAt = running.get(lock);
     if (startedAt !== undefined) {
       log.warn(
         { queue: name, jobId: job.id, runningForMs: Date.now() - startedAt },
@@ -46,7 +57,7 @@ function exclusive(name: QueueName, run: () => Promise<HandlerResult>): Processo
       return { skipped: true, reason: 'already running' };
     }
 
-    running.set(name, Date.now());
+    running.set(lock, Date.now());
     const began = Date.now();
     try {
       const result = await run();
@@ -60,7 +71,7 @@ function exclusive(name: QueueName, run: () => Promise<HandlerResult>): Processo
       );
       throw err;
     } finally {
-      running.delete(name);
+      running.delete(lock);
     }
   };
 }

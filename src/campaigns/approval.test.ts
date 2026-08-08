@@ -9,8 +9,9 @@ import { executeCreateCampaign, submitCampaignPlan } from '@/campaigns/approval.
 import { createInMemoryCampaignIdempotency } from '@/campaigns/idempotency.js';
 import { campaignPlanSchema, readPlanRef, type CampaignPlan } from '@/campaigns/plan.schema.js';
 import { CAMPAIGN_PLAN_PROVIDER } from '@/campaigns/store.js';
-import type { CampaignWriter } from '@/campaigns/writer.js';
+import { markCreateOutcome, type CampaignWriter } from '@/campaigns/writer.js';
 import type { ChannelContext } from '@/channels/types.js';
+import { AppError } from '@/lib/errors.js';
 
 const CTX: ChannelContext = { clientId: 'c1', credentials: {}, dryRun: false };
 
@@ -155,7 +156,11 @@ describe('executeCreateCampaign', () => {
         },
         campaign: { upsert: () => Promise.resolve({ id: 'db-1' }) },
         adGroup: { upsert: () => Promise.resolve({ id: 'db-g1' }) },
-        keyword: { create: () => Promise.resolve({ id: 'db-k1' }) },
+        keyword: {
+          findFirst: () => Promise.resolve(null),
+          update: () => Promise.resolve({ id: 'db-k1' }),
+          create: () => Promise.resolve({ id: 'db-k1' }),
+        },
         idempotencyKey: {},
       } as unknown as ApplyStore,
     };
@@ -204,12 +209,33 @@ describe('executeCreateCampaign', () => {
   it('провал создания превращается в исключение — апрув уходит в FAILED', async () => {
     const failing: CampaignWriter = {
       ...recordingWriter().writer,
-      createCampaign: () => Promise.reject(new Error('Директ отклонил кампанию')),
+      createCampaign: () =>
+        Promise.reject(
+          markCreateOutcome(
+            new AppError('Директ отклонил кампанию', { code: 'YANDEX_CREATE_REJECTED' }),
+            'not-created',
+          ),
+        ),
     };
 
-    await expect(executeCreateCampaign(CTX, action, depsWith(failing))).rejects.toThrow(
-      'Директ отклонил кампанию',
+    const err = await executeCreateCampaign(CTX, action, depsWith(failing)).catch(
+      (e: unknown) => e,
     );
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).code).toBe('CAMPAIGN_CREATE_FAILED');
+    expect((err as AppError).message).toContain('Директ отклонил кампанию');
+  });
+
+  it('неподтверждённое создание — отдельный код: повторять нельзя, нужен человек', async () => {
+    const lost: CampaignWriter = {
+      ...recordingWriter().writer,
+      createCampaign: () => Promise.reject(new Error('timeout of 60000ms exceeded')),
+    };
+
+    const err = await executeCreateCampaign(CTX, action, depsWith(lost)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AppError);
+    expect((err as AppError).code).toBe('CAMPAIGN_CREATE_UNKNOWN');
+    expect((err as AppError).message).toContain('проверьте кабинет вручную');
   });
 
   it('заявка без ссылки на план не создаёт «пустую» кампанию', async () => {

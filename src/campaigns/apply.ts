@@ -14,11 +14,12 @@ import {
 } from '@/campaigns/idempotency.js';
 import type { CampaignPlan, PlannedCampaign } from '@/campaigns/plan.schema.js';
 import { loadPlan, type PlanStore } from '@/campaigns/store.js';
-import type {
-  AdCreateSpec,
-  CampaignWriter,
-  CreatedNamedEntity,
-  KeywordCreateSpec,
+import {
+  createOutcomeOf,
+  type AdCreateSpec,
+  type CampaignWriter,
+  type CreatedNamedEntity,
+  type KeywordCreateSpec,
 } from '@/campaigns/writer.js';
 import { yandexCampaignWriter } from '@/campaigns/yandex-writer.js';
 import { buildContext as buildChannelContext } from '@/channels/registry.js';
@@ -42,6 +43,9 @@ const log = logger.child({ scope: 'campaigns:apply' });
  *     момента любой ретрай завершается без единого запроса в кабинет;
  *  4. группы, фразы и объявления создаются после; их падение уже не может привести
  *     ко второй кампании, а неполнота видна по счётчикам в результате.
+ *
+ * Ключ освобождается только там, где доказано, что площадка ничего не создала
+ * (`createOutcomeOf`). Потерянный ответ оставляет ключ занятым, а исход — `unknown`.
  */
 
 /**
@@ -73,7 +77,14 @@ export interface ApplyPlanOptions extends ApplyPlanDeps {
   campaignIndex?: number;
 }
 
-export type CampaignApplyStatus = 'created' | 'planned' | 'skipped' | 'failed';
+/**
+ * `unknown` — отдельный исход, а не разновидность `failed`.
+ *
+ * `failed` читается оператором как «можно повторить»; для потерянного ответа это
+ * ложь: кампания могла создаться и уже тратить дневной бюджет. Поэтому исходы
+ * разведены, а ключ идемпотентности при `unknown` остаётся занятым.
+ */
+export type CampaignApplyStatus = 'created' | 'planned' | 'skipped' | 'failed' | 'unknown';
 
 export interface CampaignApplyResult {
   campaignIndex: number;
@@ -239,9 +250,28 @@ async function createOneCampaign(args: CreateArgs): Promise<CampaignApplyResult>
     });
     externalId = created.externalId;
   } catch (err) {
-    // Кампании нет — ключ обязан освободиться, иначе повтор навсегда заблокирован.
-    await args.idempotency.release(key);
-    return { ...base, status: 'failed', externalId: null, plan, note: describeError(err) };
+    if (createOutcomeOf(err) === 'not-created') {
+      // Площадка отказала до записи — ключ обязан освободиться, иначе повтор
+      // навсегда заблокирован из-за кампании, которой не существует.
+      await args.idempotency.release(key);
+      return { ...base, status: 'failed', externalId: null, plan, note: describeError(err) };
+    }
+
+    // Ответ потерян. Кампания могла быть создана и уже тратить бюджет, поэтому ключ
+    // остаётся занятым: слепой повтор — это вторая кампания, а не вторая попытка.
+    log.error(
+      { planId, campaignIndex: index, err: describeError(err) },
+      'campaign creation outcome unknown, idempotency key kept',
+    );
+    return {
+      ...base,
+      status: 'unknown',
+      externalId: null,
+      plan,
+      note:
+        `создание не подтверждено (${describeError(err)}). Кампания могла быть создана — ` +
+        'проверьте кабинет вручную; повтор по этому плану заблокирован ключом идемпотентности',
+    };
   }
 
   // Первым делом фиксируем внешний id: с этой секунды повтор ничего не создаст.
@@ -380,11 +410,23 @@ async function persistCampaign(
       // без привязки к группе. Их проставит ingestion, а до тех пор строки нужны,
       // чтобы отчёты и оптимизатор видели состав кампании.
       for (const keyword of planned.keywords) {
+        const bid = toDecimal(keyword.bidRub, MONEY_SCALE);
+        // Апсерт по `@@unique([adGroupId, externalId])` здесь невозможен: externalId
+        // ещё null, а NULL в Postgres не конфликтует сам с собой — повторный проход
+        // (например, после восстановления зеркала) наплодил бы копии каждой фразы.
+        const existing = await db.keyword.findFirst({
+          where: { adGroupId: adGroup.id, phrase: keyword.phrase, externalId: null },
+          select: { id: true },
+        });
+        if (existing) {
+          await db.keyword.update({ where: { id: existing.id }, data: { bid } });
+          continue;
+        }
         await db.keyword.create({
           data: {
             adGroupId: adGroup.id,
             phrase: keyword.phrase,
-            bid: toDecimal(keyword.bidRub, MONEY_SCALE),
+            bid,
             matchType: MatchType.PHRASE,
             status: KeywordStatus.ACTIVE,
           },

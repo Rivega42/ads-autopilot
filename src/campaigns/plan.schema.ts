@@ -26,11 +26,18 @@ import {
 
 const trimmed = (min: number, max: number): z.ZodString => z.string().trim().min(min).max(max);
 
-/** Строка длиной не больше `limit` в счёте площадки (см. limits.ts). */
-function withinLimit(limit: number): z.ZodEffects<z.ZodString, string, string> {
+/**
+ * Строка длиной не больше `limit` в счёте площадки (см. limits.ts) и не пустая.
+ *
+ * Нижняя граница здесь не формальность: обрезка под лимит умеет схлопнуть строку
+ * почти в ничто, а `Title: ""` Директ отклоняет на 20 баллов и оставляет группу
+ * без объявлений. Пусть лучше падает схема плана, чем `Ads.add`.
+ */
+function withinLimit(limit: number, min = 1): z.ZodEffects<z.ZodString, string, string> {
   return z
     .string()
     .trim()
+    .min(min)
     .refine((value) => textLength(value) <= limit, {
       message: `длина больше ${limit} символов`,
     });

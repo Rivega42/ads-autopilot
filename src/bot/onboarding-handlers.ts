@@ -24,9 +24,11 @@ async function findClientId(ctx: Context): Promise<string | null> {
   if (tgUserId === undefined) return null;
   const client = await prisma.client.findUnique({
     where: { tgUserId: BigInt(tgUserId) },
-    select: { id: true },
+    select: { id: true, status: true },
   });
-  return client?.id ?? null;
+  // Клиент на паузе или в архиве интервью не проходит: каждый ход — платный
+  // вызов модели, и списывать его за отключённого клиента незачем.
+  return client?.status === 'ACTIVE' ? client.id : null;
 }
 
 async function reply(ctx: Context, step: InterviewStep): Promise<void> {

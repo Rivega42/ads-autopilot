@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   classifyErrorCode,
+  classifyWriteOutcome,
   extractErrorBody,
   mapHttpStatus,
   mapYandexError,
   OUT_OF_UNITS_DEFER_MS,
   RETRY_SOON_DELAY_MS,
   shouldRetryYandex,
+  shouldRetryYandexWrite,
   YandexErrorCode,
 } from '@/clients/yandex-direct/errors.js';
 import { AuthError, ChannelError, OutOfUnitsError, RateLimitError } from '@/lib/errors.js';
@@ -126,5 +128,60 @@ describe('extractErrorBody', () => {
     expect(extractErrorBody({ result: { Campaigns: [] } })).toBeNull();
     expect(extractErrorBody('plain text')).toBeNull();
     expect(extractErrorBody(null)).toBeNull();
+  });
+});
+
+describe('classifyWriteOutcome', () => {
+  it.each([
+    ['52 — сервер авторизации не принял запрос', 52],
+    ['53 — токен отвергнут до обработки', 53],
+    ['152 — квота кончилась, запись не начиналась', 152],
+    ['506 — соединение не принято в работу', 506],
+    ['8000 — запрос не прошёл валидацию', 8000],
+  ])('%s → not-applied', (_name, code) => {
+    expect(classifyWriteOutcome(mapYandexError({ error_code: code }))).toBe('not-applied');
+  });
+
+  it.each([
+    ['1000 — внутренняя ошибка после возможного коммита', 1000],
+    ['1020 — то же семейство', 1020],
+  ])('%s → unknown', (_name, code) => {
+    expect(classifyWriteOutcome(mapYandexError({ error_code: code }))).toBe('unknown');
+  });
+
+  it('HTTP 5xx — исход неизвестен, ответ потерян', () => {
+    expect(classifyWriteOutcome(mapHttpStatus(502, ''))).toBe('unknown');
+  });
+
+  it('HTTP 4xx — запрос до обработчика не дошёл', () => {
+    expect(classifyWriteOutcome(mapHttpStatus(400, 'nonsense'))).toBe('not-applied');
+  });
+
+  it('чужая ошибка (таймаут axios, TypeError) — неизвестно', () => {
+    expect(classifyWriteOutcome(new Error('socket hang up'))).toBe('unknown');
+    expect(classifyWriteOutcome('nonsense')).toBe('unknown');
+  });
+});
+
+describe('shouldRetryYandexWrite', () => {
+  it('повторяет только доказанные отказы на входе', () => {
+    expect(shouldRetryYandexWrite(mapYandexError({ error_code: 52 }))).toBe(true);
+    expect(shouldRetryYandexWrite(mapYandexError({ error_code: 506 }))).toBe(true);
+  });
+
+  it('не повторяет то, что могло примениться', () => {
+    // Именно здесь рождались дубликаты кампаний: 5xx и 1000 формально retryable.
+    expect(shouldRetryYandexWrite(mapHttpStatus(503, ''))).toBe(false);
+    expect(shouldRetryYandexWrite(mapYandexError({ error_code: 1000 }))).toBe(false);
+    expect(shouldRetryYandexWrite(new Error('timeout of 60000ms exceeded'))).toBe(false);
+
+    // Для идемпотентных вызовов поведение прежнее.
+    expect(shouldRetryYandex(mapHttpStatus(503, ''))).toBe(true);
+    expect(shouldRetryYandex(mapYandexError({ error_code: 1000 }))).toBe(true);
+  });
+
+  it('не повторяет фатальные отказы, даже доказанные', () => {
+    expect(shouldRetryYandexWrite(mapYandexError({ error_code: 53 }))).toBe(false);
+    expect(shouldRetryYandexWrite(mapYandexError({ error_code: 152 }))).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
 import { StatEntityType, type Provider } from '@prisma/client';
 
 import type { ReporterDb } from '@/reporter/deps.js';
+import { formatDayShort } from '@/reporter/format.js';
 import { divideOrNull, pctChangeOrNull, toNumber } from '@/reporter/math.js';
 import { eachDay, periodFilter, type ReportPeriod } from '@/reporter/period.js';
 
@@ -15,6 +16,13 @@ import { eachDay, periodFilter, type ReportPeriod } from '@/reporter/period.js';
  * `CampaignStat` полиморфна: строки уровня кампании отбираются по
  * `entityType = CAMPAIGN`, а `entityId` — это внутренний `Campaign.id`, не
  * идентификатор площадки.
+ *
+ * Ключевое различие, ради которого здесь есть `coverage`: «строк за период нет»
+ * и «за период потрачено 0 ₽» — разные состояния. Отсутствие строк значит, что
+ * загрузка не доехала, а сумма нулевого аккумулятора при этом выглядит как
+ * измеренный ноль. Дальше по цепочке это превращается в «расход упал на 100%»
+ * и в красный инцидент — вывод, ради которого человек ночью останавливает
+ * рекламу. Поэтому отсутствие данных доезжает до отчёта отдельным флагом.
  */
 
 export interface MetricTotals {
@@ -42,6 +50,22 @@ export interface DailyPoint {
   conversions: number;
   clicks: number;
   impressions: number;
+  /** false — за этот день в `CampaignStat` нет ни одной строки: не измерено, а не ноль. */
+  hasRows: boolean;
+}
+
+/** Насколько период вообще пригоден к тому, чтобы делать по нему выводы. */
+export interface PeriodCoverage {
+  /** Дней в периоде. */
+  days: number;
+  /** Дней, за которые есть хоть одна строка статистики. */
+  daysWithRows: number;
+  /** Даты без единой строки, по возрастанию. */
+  missingDays: string[];
+  /** false — измерять было нечего: сравнивать такой период не с чем и не за чем. */
+  hasData: boolean;
+  /** true — часть дней не загрузилась, суммы занижены на неизвестную величину. */
+  partial: boolean;
 }
 
 export interface PeriodMetrics {
@@ -51,10 +75,23 @@ export interface PeriodMetrics {
   campaigns: CampaignMetrics[];
   /** По одной точке на каждый день периода, включая дни без открутки. */
   byDate: DailyPoint[];
+  coverage: PeriodCoverage;
 }
 
 export function emptyTotals(): MetricTotals {
   return { impressions: 0, clicks: 0, conversions: 0, spend: 0, ctr: null, cpc: null, cpa: null };
+}
+
+/** Период, про который не известно ничего. Нужен тестам и пустым веткам рендера. */
+export function emptyCoverage(period: ReportPeriod): PeriodCoverage {
+  const days = eachDay(period);
+  return {
+    days: days.length,
+    daysWithRows: 0,
+    missingDays: days,
+    hasData: false,
+    partial: days.length > 0,
+  };
 }
 
 interface Accumulator {
@@ -125,6 +162,9 @@ export async function collectPeriodMetrics(
     }
   }
 
+  const days = eachDay(period);
+  const missingDays = days.filter((date) => !byDate.has(date));
+
   return {
     clientId,
     period,
@@ -136,11 +176,36 @@ export async function collectPeriodMetrics(
       targetCpa: campaign.targetCpa === null ? null : toNumber(campaign.targetCpa),
       ...derive(byCampaign.get(campaign.id) ?? emptyAccumulator()),
     })),
-    byDate: eachDay(period).map((date) => ({
+    byDate: days.map((date) => ({
       date,
       ...(byDate.get(date) ?? emptyAccumulator()),
+      hasRows: byDate.has(date),
     })),
+    coverage: {
+      days: days.length,
+      daysWithRows: days.length - missingDays.length,
+      missingDays,
+      hasData: missingDays.length < days.length,
+      partial: missingDays.length > 0,
+    },
   };
+}
+
+/** Сколько дат показываем в оговорке о неполных данных: дальше строка не читается. */
+const MAX_LISTED_MISSING_DAYS = 5;
+
+/**
+ * Оговорка о неполном периоде — одна на дневной и недельный отчёт.
+ *
+ * `null`, когда оговаривать нечего. Случай «данных нет вовсе» сюда не попадает:
+ * он не оговорка, а отдельная ветка рендера.
+ */
+export function coverageNote(coverage: PeriodCoverage): string | null {
+  if (!coverage.hasData || !coverage.partial) return null;
+  const listed = coverage.missingDays.slice(0, MAX_LISTED_MISSING_DAYS).map(formatDayShort);
+  const rest = coverage.missingDays.length - listed.length;
+  const dates = rest > 0 ? `${listed.join(', ')} и ещё ${rest}` : listed.join(', ');
+  return `Данные неполные: за ${dates} статистики в базе нет — суммы ниже занижены.`;
 }
 
 function setAndGet(store: Map<string, Accumulator>, key: string): Accumulator {

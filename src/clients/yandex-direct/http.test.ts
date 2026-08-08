@@ -254,6 +254,58 @@ describe('error handling', () => {
     expect(transport.calls).toHaveLength(3);
   });
 
+  it('retries a lost 5xx for an idempotent call', async () => {
+    const transport = transportOf((_req, n) =>
+      n === 0 ? { status: 503, data: '' } : { data: { result: { ok: true } } },
+    );
+    vi.useFakeTimers();
+    try {
+      const pending = clientOf(transport).call('campaigns', 'update', {}, okSchema);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(pending).resolves.toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  it('never replays a nonIdempotent call whose response was lost', async () => {
+    const transport = transportOf([{ status: 503, data: '' }]);
+    vi.useFakeTimers();
+    try {
+      const pending = clientOf(transport).call('campaigns', 'add', {}, okSchema, {
+        nonIdempotent: true,
+      });
+      const assertion = expect(pending).rejects.toThrow(/HTTP 503/);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+    // Ровно один POST: у Campaigns.add нет ключа идемпотентности, и повтор
+    // потерянного ответа означает вторую кампанию, а не вторую попытку.
+    expect(transport.calls).toHaveLength(1);
+  });
+
+  it('still retries a nonIdempotent call that Direct rejected on the doorstep', async () => {
+    const transport = transportOf((_req, n) =>
+      n === 0
+        ? { data: { error: { error_code: 52, error_string: 'Сервер авторизации недоступен' } } }
+        : { data: { result: { ok: true } } },
+    );
+    vi.useFakeTimers();
+    try {
+      const pending = clientOf(transport).call('campaigns', 'add', {}, okSchema, {
+        nonIdempotent: true,
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(pending).resolves.toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(transport.calls).toHaveLength(2);
+  });
+
   it('rejects a response whose shape does not match the schema', async () => {
     const transport = transportOf([{ data: { result: { Campaigns: 'not-an-array' } } }]);
     const schema = z.object({ result: z.object({ Campaigns: z.array(z.number()) }) });

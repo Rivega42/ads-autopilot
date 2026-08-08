@@ -106,16 +106,55 @@ describe('buildDailyReport', () => {
   });
 
   it('в день без открутки не делит на ноль и не врёт нулевым CPA', async () => {
+    // Строки за день есть, и они нулевые: площадка отчиталась, откручивать было
+    // нечего. Именно это — «ноль», в отличие от отсутствия строк ниже.
+    db.seedStat({ entityId: 'c1', date: '2026-08-01', spend: 0, conversions: 0 });
+    db.seedStat({ entityId: 'c2', date: '2026-08-01', spend: 0, conversions: 0 });
+
     const content = await buildDailyReport(
       RECIPIENT,
       { from: '2026-08-01', to: '2026-08-01' },
       deps(),
     );
 
+    expect(content.metrics.coverage.hasData).toBe(true);
     expect(content.metrics.totals.cpa).toBeNull();
     // Прочерк вместо «0 ₽» и вместо «+∞%».
     expect(content.body).toContain('CPA: *—*');
     expect(content.body).toContain('Ни одна кампания за период не откручивалась');
+  });
+
+  it('незагруженный день не выдаёт себя за обвал расхода и лидов', async () => {
+    // 07.08 загрузилось (10 000 ₽, 8 лидов), 08.08 — нет ни одной строки.
+    const content = await buildDailyReport(
+      RECIPIENT,
+      { from: '2026-08-08', to: '2026-08-08' },
+      deps(),
+    );
+
+    expect(content.metrics.coverage.hasData).toBe(false);
+    expect(content.previous.coverage.hasData).toBe(true);
+    // Ни «0 ₽», ни «−100%», ни красного инцидента — только честное «данных нет».
+    expect(content.body).toContain('Статистики за этот период в базе нет');
+    expect(content.body).not.toContain('−100%');
+    expect(content.body).not.toContain('Расход:');
+    expect(content.anomalies).toEqual([]);
+    expect(content.chartUrl).toBeNull();
+  });
+
+  it('неполный период проговаривает, за какие дни данных нет', async () => {
+    // 05.08 и 06.08 в базе есть, 04.08 — нет.
+    db.seedStat({ entityId: 'c1', date: '2026-08-05', spend: 3_000, conversions: 2 });
+
+    const content = await buildDailyReport(
+      RECIPIENT,
+      { from: '2026-08-04', to: '2026-08-06' },
+      deps(),
+    );
+
+    expect(content.metrics.coverage.missingDays).toEqual(['2026-08-04']);
+    expect(content.body).toContain('Данные неполные');
+    expect(content.body).toContain('04\\.08');
   });
 
   it('добавляет ссылку на график quickchart', async () => {

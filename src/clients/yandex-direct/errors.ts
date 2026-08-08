@@ -225,3 +225,50 @@ export function shouldRetryYandex(err: unknown): boolean {
   if (err instanceof OutOfUnitsError) return false;
   return err instanceof AppError && err.retryable;
 }
+
+// ── Судьба записи после ошибки ───────────────────────────────────────────────
+
+/**
+ * Что известно про кабинет после упавшего вызова.
+ *
+ *  • `not-applied` — площадка отвергла запрос ДО того, как что-либо записала;
+ *  • `unknown` — ответ потерян (5xx, внутренняя ошибка Директа, таймаут, чужая
+ *    форма тела): запрос мог доехать и примениться.
+ */
+export type YandexWriteOutcome = 'not-applied' | 'unknown';
+
+/**
+ * Коды, после которых Директ заведомо ничего не записал.
+ *
+ * Все они означают отказ на входе: авторизация, квота, лимит соединений,
+ * непрошедшая валидация запроса. Всё, чего в списке нет, — включая
+ * YANDEX_SERVER_ERROR (1000-1099), YANDEX_HTTP_5XX, YANDEX_SCHEMA и любые
+ * не-AppError вроде таймаута axios, — считается неизвестным исходом.
+ */
+const NOT_APPLIED_CODES: ReadonlySet<string> = new Set([
+  'AUTH_FAILED',
+  'OUT_OF_UNITS',
+  'RATE_LIMIT',
+  'YANDEX_RETRY_SOON',
+  'YANDEX_API_ERROR',
+  'YANDEX_HTTP_ERROR',
+]);
+
+/** Консервативно: неизвестная ошибка — неизвестный исход. */
+export function classifyWriteOutcome(err: unknown): YandexWriteOutcome {
+  if (err instanceof AppError && NOT_APPLIED_CODES.has(err.code)) return 'not-applied';
+  return 'unknown';
+}
+
+/**
+ * Предикат ретрая для неидемпотентных вызовов (`*.add`).
+ *
+ * В API v5 нет ключа идемпотентности: повтор потерянного `Campaigns.add` создаёт
+ * вторую кампанию с полным дневным бюджетом, повтор `keywords.add` — фразы,
+ * конкурирующие сами с собой. Поэтому повторяем только те отказы, после которых
+ * доказано, что записи не было; потерянный ответ отдаём наверх как есть, и
+ * решение принимает вызывающий, у которого есть ключ идемпотентности.
+ */
+export function shouldRetryYandexWrite(err: unknown): boolean {
+  return shouldRetryYandex(err) && classifyWriteOutcome(err) === 'not-applied';
+}

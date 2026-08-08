@@ -5,6 +5,7 @@ vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 import type { AgentRun, RunAgentOptions } from '@/clients/llm/index.js';
 import { FakeDb } from '@/reporter/__tests__/fake-db.js';
 import { fakeMessenger, type FakeMessenger } from '@/reporter/__tests__/fake-messenger.js';
+import { emptyCoverage } from '@/reporter/metrics.js';
 import type { ReportRecipient } from '@/reporter/recipients.js';
 import {
   buildWeeklyFacts,
@@ -168,9 +169,10 @@ describe('факты для модели', () => {
   });
 
   it('нулевая база не превращается в выдуманный процент', () => {
+    const period = { from: '2026-08-03', to: '2026-08-09' };
     const empty = {
       clientId: CLIENT,
-      period: { from: '2026-08-03', to: '2026-08-09' },
+      period,
       totals: {
         impressions: 0,
         clicks: 0,
@@ -182,6 +184,7 @@ describe('факты для модели', () => {
       },
       campaigns: [],
       byDate: [],
+      coverage: emptyCoverage(period),
     };
     const current = {
       ...empty,
@@ -278,5 +281,49 @@ describe('runWeeklyReports', () => {
     expect(summary.sent).toBe(1);
     expect(summary.degraded).toBe(1);
     expect(summary.period).toEqual({ from: '2026-08-03', to: '2026-08-09' });
+  });
+
+  it('переотправленный из БД разбор остаётся деградировавшим в сводке', async () => {
+    // Первая попытка: модель упала, Telegram тоже — отчёт лёг в БД недоставленным.
+    messenger.failWith = new Error('timeout');
+    await expect(
+      sendWeeklyReport(RECIPIENT, { ...deps(), run: runner(new Error('no key')) }),
+    ).rejects.toThrow();
+
+    messenger.failWith = null;
+    const summary = await runWeeklyReports({ ...deps(), run: runner() });
+
+    expect(summary.sent).toBe(1);
+    // Ушёл разбор без модели — сводка обязана это показать, а не отчитаться о полноценном.
+    expect(summary.degraded).toBe(1);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('неделя без данных', () => {
+  it('не зовёт модель и не рисует обвал, когда за период нет ни одной строки', async () => {
+    const emptyWeek = { from: '2026-08-17', to: '2026-08-23' };
+
+    const content = await buildWeeklyReport(RECIPIENT, emptyWeek, { ...deps(), run: runner() });
+
+    expect(calls).toHaveLength(0);
+    expect(content.review).toBeNull();
+    expect(content.body).toContain('Статистики за этот период в базе нет');
+    expect(content.body).not.toContain('Расход:');
+    expect(content.chartUrl).toBeNull();
+  });
+
+  it('предупреждает модель о днях, которых нет в базе', async () => {
+    // 05.08–09.08 в базе есть, 10.08 и 11.08 — нет: суммы недели занижены.
+    const content = await buildWeeklyReport(
+      RECIPIENT,
+      { from: '2026-08-05', to: '2026-08-11' },
+      { ...deps(), run: runner() },
+    );
+
+    const notes = content.facts.notes.join(' ');
+    expect(notes).toContain('Разбираемая неделя');
+    expect(notes).toContain('10.08');
+    expect(content.body).toContain('Данные неполные');
   });
 });

@@ -24,6 +24,14 @@ export interface StoredReport {
   sentAt: Date | null;
   /** true — строка уже была в БД до этого вызова. */
   reused: boolean;
+  /**
+   * Слепок метрик отчёта, как он лежит в колонке.
+   *
+   * Нужен переотправке: сводка прогона обязана описывать тот отчёт, который
+   * реально ушёл, а не пересчитанный. Без этого разбор, собранный без модели и
+   * доставленный со второй попытки, попадал в статистику как полноценный.
+   */
+  metrics: unknown;
 }
 
 export type ReportMetrics = Prisma.InputJsonObject;
@@ -57,9 +65,11 @@ export async function findReport(
 ): Promise<StoredReport | null> {
   const row = await db.report.findUnique({
     where: { clientId_kind_periodFrom_periodTo: periodKey(clientId, kind, period) },
-    select: { id: true, body: true, sentAt: true },
+    select: { id: true, body: true, sentAt: true, metrics: true },
   });
-  return row ? { id: row.id, body: mdRaw(row.body), sentAt: row.sentAt, reused: true } : null;
+  return row
+    ? { id: row.id, body: mdRaw(row.body), sentAt: row.sentAt, reused: true, metrics: row.metrics }
+    : null;
 }
 
 export async function saveReport(
@@ -77,9 +87,15 @@ export async function saveReport(
     where: { clientId_kind_periodFrom_periodTo: key },
     create: { ...key, body: input.body, metrics: input.metrics },
     update: { body: input.body, metrics: input.metrics },
-    select: { id: true, body: true, sentAt: true },
+    select: { id: true, body: true, sentAt: true, metrics: true },
   });
-  return { id: row.id, body: mdRaw(row.body), sentAt: row.sentAt, reused: false };
+  return {
+    id: row.id,
+    body: mdRaw(row.body),
+    sentAt: row.sentAt,
+    reused: false,
+    metrics: row.metrics,
+  };
 }
 
 export async function markReportSent(db: ReporterDb, id: string, at: Date): Promise<void> {

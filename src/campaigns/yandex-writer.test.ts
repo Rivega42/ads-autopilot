@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createOutcomeOf } from '@/campaigns/writer.js';
 import { YandexCampaignWriter } from '@/campaigns/yandex-writer.js';
 import type { ChannelContext } from '@/channels/types.js';
 import {
@@ -27,6 +28,22 @@ function transportOf(bodies: unknown[]): FakeTransport {
     const index = calls.length;
     calls.push(req);
     return Promise.resolve({ status: 200, headers: {}, data: bodies[index] ?? bodies.at(-1) });
+  };
+  fn.calls = calls;
+  return fn as FakeTransport;
+}
+
+/** Тот же шов, но с HTTP-кодами: ретраи разбираются именно по ним. */
+function transportOfSteps(steps: { status?: number; data?: unknown }[]): FakeTransport {
+  const calls: HttpRequest[] = [];
+  const fn = (req: HttpRequest): Promise<HttpResponse> => {
+    const step = steps[calls.length] ?? steps.at(-1);
+    calls.push(req);
+    return Promise.resolve({
+      status: step?.status ?? 200,
+      headers: {},
+      data: step?.data ?? { result: {} },
+    });
   };
   fn.calls = calls;
   return fn as FakeTransport;
@@ -116,6 +133,94 @@ describe('createCampaign', () => {
         startDate: '2026-08-08',
       }),
     ).rejects.toThrow(ChannelError);
+  });
+});
+
+describe('ретраи неидемпотентного add', () => {
+  const SPEC = {
+    name: 'Поиск — Курсы',
+    dailyBudgetRub: 3_500,
+    strategy: { search: { type: 'HIGHEST_POSITION' }, network: { type: 'SERVING_OFF' } },
+    negativeKeywords: [],
+    startDate: '2026-08-08',
+  };
+
+  it('потерянный ответ (502) не повторяется: одна кампания — один запрос', async () => {
+    const transport = transportOfSteps([{ status: 502, data: 'bad gateway' }]);
+
+    const err = await writerOf(transport)
+      .createCampaign(CTX, SPEC)
+      .catch((e: unknown) => e);
+
+    // Директ мог кампанию создать. Второй POST с тем же телом — вторая кампания
+    // с полным дневным бюджетом, и ключа идемпотентности в v5 нет.
+    expect(transport.calls).toHaveLength(1);
+    expect(createOutcomeOf(err)).toBe('unknown');
+  });
+
+  it('внутренняя ошибка Директа (1000) тоже не повторяется', async () => {
+    const transport = transportOfSteps([
+      { data: { error: { error_code: 1000, error_string: 'Внутренняя ошибка сервера' } } },
+    ]);
+
+    const err = await writerOf(transport)
+      .createCampaign(CTX, SPEC)
+      .catch((e: unknown) => e);
+
+    expect(transport.calls).toHaveLength(1);
+    expect(createOutcomeOf(err)).toBe('unknown');
+  });
+
+  it('чужая форма ответа не выдаётся за отказ: исход неизвестен', async () => {
+    const transport = transportOfSteps([{ data: { result: { AddResults: 'not-an-array' } } }]);
+
+    const err = await writerOf(transport)
+      .createCampaign(CTX, SPEC)
+      .catch((e: unknown) => e);
+
+    // Запись прошла, разбор ответа — нет. Кампания в кабинете может быть.
+    expect(transport.calls).toHaveLength(1);
+    expect(createOutcomeOf(err)).toBe('unknown');
+  });
+
+  it('доказанный отказ на входе (52) повторяется и доезжает со второй попытки', async () => {
+    const transport = transportOfSteps([
+      { data: { error: { error_code: 52, error_string: 'Сервер авторизации недоступен' } } },
+      { data: { result: { AddResults: [{ Id: 777 }] } } },
+    ]);
+
+    vi.useFakeTimers();
+    try {
+      const pending = writerOf(transport).createCampaign(CTX, SPEC);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(pending).resolves.toEqual({ externalId: '777' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(transport.calls).toHaveLength(2);
+  });
+
+  it('отказ уровня операции помечается как «точно не создано»', async () => {
+    const transport = transportOfSteps([
+      { data: { result: { AddResults: [{ Errors: [{ Code: 5001, Message: 'Bad budget' }] }] } } },
+    ]);
+
+    const err = await writerOf(transport)
+      .createCampaign(CTX, SPEC)
+      .catch((e: unknown) => e);
+
+    expect(createOutcomeOf(err)).toBe('not-created');
+  });
+
+  it('дубли фраз не создаются повтором: keywords.add при 503 уходит один раз', async () => {
+    const transport = transportOfSteps([{ status: 503 }]);
+
+    await expect(
+      writerOf(transport).createKeywords(CTX, [
+        { adGroupExternalId: '10', phrase: 'курсы английского', bidRub: 100 },
+      ]),
+    ).rejects.toThrow(ChannelError);
+    expect(transport.calls).toHaveLength(1);
   });
 });
 

@@ -63,9 +63,19 @@ export function truncateToLimit(value: string, limit: number): string {
   const chars = Array.from(trimmed);
   const head = chars.slice(0, limit).join('');
   const lastSpace = head.lastIndexOf(' ');
-  // Первое слово длиннее лимита — режем по символу, иначе получили бы пустую строку.
-  const cut = lastSpace > 0 ? head.slice(0, lastSpace) : head;
-  return cut.replace(/[\s,;:.\-—–]+$/u, '').trim();
+
+  const byWord = lastSpace > 0 ? stripTrailingPunctuation(head.slice(0, lastSpace)) : '';
+  if (byWord !== '') return byWord;
+
+  // Обрезка по слову схлопнулась в пустоту: либо первое слово длиннее лимита, либо
+  // в лимит попал один знак препинания («— Профессиональнаяподготовка…»). Пустой
+  // Title Директ отклоняет, отказ стоит 20 баллов, а объявления в группе не будет.
+  const byChar = stripTrailingPunctuation(head);
+  return byChar === '' ? head.trim() : byChar;
+}
+
+function stripTrailingPunctuation(value: string): string {
+  return value.replace(/[\s,;:.\-—–]+$/u, '').trim();
 }
 
 export interface AdTextDraft {

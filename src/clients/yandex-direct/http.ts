@@ -10,6 +10,7 @@ import {
   OUT_OF_UNITS_DEFER_MS,
   RETRY_SOON_ATTEMPTS,
   shouldRetryYandex,
+  shouldRetryYandexWrite,
   YANDEX_CHANNEL,
 } from '@/clients/yandex-direct/errors.js';
 import { YANDEX_DIRECT_BASE_URL } from '@/constants.js';
@@ -196,6 +197,13 @@ export interface RawCallOptions {
   bypassQueue?: boolean;
   /** HTTP-коды, которые не считаются ошибкой (Reports: 201/202). */
   acceptStatuses?: number[];
+  /**
+   * Повтор этого вызова может создать дубль (`*.add`).
+   *
+   * Ключа идемпотентности в API v5 нет, поэтому такие вызовы повторяются только
+   * после доказанного отказа на входе — см. shouldRetryYandexWrite.
+   */
+  nonIdempotent?: boolean;
 }
 
 export interface RawCallResult {
@@ -377,7 +385,7 @@ export class YandexHttpClient {
       label: `yandex.${label}`,
       attempts: this.retryAttempts,
       // OutOfUnitsError сюда не попадёт: ждать час внутри воркера нельзя.
-      shouldRetry: shouldRetryYandex,
+      shouldRetry: opts.nonIdempotent ? shouldRetryYandexWrite : shouldRetryYandex,
     });
 
     const parsed = schema.safeParse(res.data);

@@ -9,14 +9,16 @@ import {
 } from '@/campaigns/idempotency.js';
 import { campaignPlanSchema, type CampaignPlan } from '@/campaigns/plan.schema.js';
 import { CAMPAIGN_PLAN_PROVIDER } from '@/campaigns/store.js';
-import type {
-  AdCreateSpec,
-  AdGroupCreateSpec,
-  CampaignCreateSpec,
-  CampaignWriter,
-  KeywordCreateSpec,
+import {
+  markCreateOutcome,
+  type AdCreateSpec,
+  type AdGroupCreateSpec,
+  type CampaignCreateSpec,
+  type CampaignWriter,
+  type KeywordCreateSpec,
 } from '@/campaigns/writer.js';
 import type { ChannelContext } from '@/channels/types.js';
+import { ChannelError } from '@/lib/errors.js';
 
 /**
  * Заливка плана. Ни площадки, ни БД: writer, Prisma и контекст канала подменены.
@@ -132,8 +134,16 @@ function makeDb(plan: CampaignPlan = PLAN): DbHarness {
   const campaigns: Record<string, unknown>[] = [];
   const adGroups: Record<string, unknown>[] = [];
   const keywords: Record<string, unknown>[] = [];
-  let campaignSeq = 0;
-  let groupSeq = 0;
+  // Апсерт обязан быть апсертом: тот же внешний id — та же строка. Иначе повторный
+  // проход выглядел бы как новая группа, и дубли фраз тест бы не поймал.
+  const ids = new Map<string, string>();
+  const idFor = (key: string, prefix: string): string => {
+    const known = ids.get(key);
+    if (known) return known;
+    const fresh = `${prefix}-${ids.size + 1}`;
+    ids.set(key, fresh);
+    return fresh;
+  };
 
   const db = {
     creative: {
@@ -145,23 +155,44 @@ function makeDb(plan: CampaignPlan = PLAN): DbHarness {
         }),
     },
     campaign: {
-      upsert: (args: { create: Record<string, unknown> }) => {
+      upsert: (args: {
+        where: { provider_externalId: { externalId: string } };
+        create: Record<string, unknown>;
+      }) => {
         campaigns.push(args.create);
-        campaignSeq += 1;
-        return Promise.resolve({ id: `db-campaign-${campaignSeq}` });
+        return Promise.resolve({
+          id: idFor(`campaign:${args.where.provider_externalId.externalId}`, 'db-campaign'),
+        });
       },
     },
     adGroup: {
-      upsert: (args: { create: Record<string, unknown> }) => {
+      upsert: (args: {
+        where: { campaignId_externalId: { campaignId: string; externalId: string } };
+        create: Record<string, unknown>;
+      }) => {
         adGroups.push(args.create);
-        groupSeq += 1;
-        return Promise.resolve({ id: `db-group-${groupSeq}` });
+        const { campaignId, externalId } = args.where.campaignId_externalId;
+        return Promise.resolve({ id: idFor(`group:${campaignId}:${externalId}`, 'db-group') });
       },
     },
     keyword: {
+      // Ровно те три метода, которыми пользуется persistCampaign: поиск по паре
+      // (группа, фраза) вместо апсерта по nullable externalId — см. F11.
+      findFirst: (args: { where: { adGroupId: string; phrase: string } }) =>
+        Promise.resolve(
+          keywords.find(
+            (k) => k['adGroupId'] === args.where.adGroupId && k['phrase'] === args.where.phrase,
+          ) ?? null,
+        ),
+      update: (args: { where: { id: string }; data: Record<string, unknown> }) => {
+        const row = keywords.find((k) => k['id'] === args.where.id);
+        if (row) Object.assign(row, args.data);
+        return Promise.resolve(row ?? null);
+      },
       create: (args: { data: Record<string, unknown> }) => {
-        keywords.push(args.data);
-        return Promise.resolve({ id: 'db-keyword' });
+        const row = { id: `db-keyword-${keywords.length + 1}`, ...args.data };
+        keywords.push(row);
+        return Promise.resolve(row);
       },
     },
     idempotencyKey: {},
@@ -269,6 +300,30 @@ describe('applyPlan: создание', () => {
     expect(keywords).toHaveLength(2);
   });
 
+  it('повторное зеркалирование не плодит копии фраз', async () => {
+    // Ключ идемпотентности защищает кабинет, но не БД: тот же план могут залить
+    // после потери строки ключа (истёк TTL, чинили руками) — зеркало обязано
+    // сойтись, а не удвоить каждую фразу. externalId у фраз ещё null, и
+    // `@@unique([adGroupId, externalId])` от дублей не спасает: NULL != NULL.
+    const harness = makeDb();
+    // Тот же внешний id: зеркалим одну и ту же кампанию второй раз.
+    const { writer } = makeWriter({
+      createCampaign: () => Promise.resolve({ externalId: 'ext-1' }),
+    });
+
+    for (const _pass of [1, 2]) {
+      await applyPlan('plan-1', {
+        db: harness.db,
+        writers: { [Provider.YANDEX_DIRECT]: writer },
+        campaignIndex: 0,
+        ...deps(false, createInMemoryCampaignIdempotency()),
+      });
+    }
+
+    expect(harness.keywords).toHaveLength(1);
+    expect(harness.keywords[0]).toMatchObject({ phrase: 'курсы английского' });
+  });
+
   it('применяет одну кампанию плана по индексу', async () => {
     const { db } = makeDb();
     const { writer, calls } = makeWriter();
@@ -329,10 +384,19 @@ describe('applyPlan: идемпотентность', () => {
     expect(campaignCreateKey('plan-1', 1)).not.toBe(campaignCreateKey('plan-1', 0));
   });
 
-  it('упавшее создание освобождает ключ — повтор должен быть возможен', async () => {
+  it('доказанный отказ площадки освобождает ключ — повтор должен быть возможен', async () => {
     const idempotency = createInMemoryCampaignIdempotency();
     const failing = makeWriter({
-      createCampaign: () => Promise.reject(new Error('Директ отклонил кампанию')),
+      // Так падает writer, когда Директ разобрал запрос и отказал: кампании нет.
+      createCampaign: () =>
+        Promise.reject(
+          markCreateOutcome(
+            new ChannelError(Provider.YANDEX_DIRECT, 'Директ отклонил кампанию', {
+              code: 'YANDEX_CREATE_REJECTED',
+            }),
+            'not-created',
+          ),
+        ),
     });
 
     const failed = await applyPlan('plan-1', {
@@ -353,6 +417,59 @@ describe('applyPlan: идемпотентность', () => {
     });
     expect(second.campaigns[0]?.status).toBe('created');
     expect(retry.calls.campaigns).toHaveLength(1);
+  });
+
+  it('потерянный ответ не освобождает ключ: исход unknown, повтор ничего не создаёт', async () => {
+    const idempotency = createInMemoryCampaignIdempotency();
+    // Кампания могла быть создана: ответ 5xx/таймаут/чужая форма тела не доказывает
+    // обратного. Освободить здесь ключ — значит разрешить вторую кампанию с тем же
+    // дневным бюджетом по следующему нажатию «повторить».
+    const lost = makeWriter({
+      createCampaign: () =>
+        Promise.reject(
+          new ChannelError(Provider.YANDEX_DIRECT, 'Yandex Direct HTTP 502', {
+            code: 'YANDEX_HTTP_5XX',
+            retryable: true,
+          }),
+        ),
+    });
+
+    const first = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: lost.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+    expect(first.campaigns[0]?.status).toBe('unknown');
+    expect(first.campaigns[0]?.externalId).toBeNull();
+    expect(first.campaigns[0]?.note).toContain('проверьте кабинет вручную');
+
+    const retry = makeWriter();
+    const second = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: retry.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+    expect(second.campaigns[0]?.status).toBe('skipped');
+    expect(second.campaigns[0]?.note).toContain('вручную');
+    expect(retry.calls.campaigns).toEqual([]);
+  });
+
+  it('ошибка без пометки считается неизвестным исходом', async () => {
+    const idempotency = createInMemoryCampaignIdempotency();
+    const failing = makeWriter({
+      createCampaign: () => Promise.reject(new Error('socket hang up')),
+    });
+
+    const result = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: failing.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+
+    expect(result.campaigns[0]?.status).toBe('unknown');
   });
 
   it('незавершённая попытка не создаёт вторую кампанию, а требует разбора', async () => {

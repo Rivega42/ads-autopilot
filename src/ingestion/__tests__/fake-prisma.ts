@@ -77,11 +77,35 @@ function equals(a: unknown, b: unknown): boolean {
   return a === b;
 }
 
+/** Даты сравниваются по времени, числа — как есть; остальное несравнимо. */
+function comparable(value: unknown): number | undefined {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return value;
+  return undefined;
+}
+
+function matchRange(cond: Record<string, unknown>, value: unknown): boolean {
+  const left = comparable(value);
+  if (left === undefined) return false;
+  for (const [op, bound] of Object.entries(cond)) {
+    const right = comparable(bound);
+    if (right === undefined) return false;
+    if (op === 'gte' && !(left >= right)) return false;
+    if (op === 'gt' && !(left > right)) return false;
+    if (op === 'lte' && !(left <= right)) return false;
+    if (op === 'lt' && !(left < right)) return false;
+  }
+  return true;
+}
+
+const RANGE_OPS = ['gte', 'gt', 'lte', 'lt'];
+
 function matchValue(cond: unknown, value: unknown): boolean {
   if (!isPlainObject(cond)) return equals(cond, value);
   if ('in' in cond) return (cond['in'] as unknown[]).some((v) => equals(v, value));
   if ('notIn' in cond) return !(cond['notIn'] as unknown[]).some((v) => equals(v, value));
   if ('not' in cond) return !matchValue(cond['not'], value);
+  if (RANGE_OPS.some((op) => op in cond)) return matchRange(cond, value);
   return equals(cond, value);
 }
 

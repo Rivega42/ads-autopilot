@@ -78,14 +78,17 @@ export {
   type YandexCampaignWriterOptions,
 } from '@/campaigns/yandex-writer.js';
 
-export type {
-  AdCreateSpec,
-  AdGroupCreateSpec,
-  CampaignCreateSpec,
-  CampaignWriter,
-  CreatedEntity,
-  CreatedNamedEntity,
-  KeywordCreateSpec,
+export {
+  createOutcomeOf,
+  markCreateOutcome,
+  type AdCreateSpec,
+  type AdGroupCreateSpec,
+  type CampaignCreateSpec,
+  type CampaignWriter,
+  type CreateOutcome,
+  type CreatedEntity,
+  type CreatedNamedEntity,
+  type KeywordCreateSpec,
 } from '@/campaigns/writer.js';
 
 export {

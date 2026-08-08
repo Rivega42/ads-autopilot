@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { detectAnomalies, detectSpendOutlier, DEFAULT_THRESHOLDS } from '@/reporter/anomalies.js';
-import type { CampaignMetrics, DailyPoint, PeriodMetrics } from '@/reporter/metrics.js';
+import { emptyCoverage, type CampaignMetrics, type DailyPoint, type PeriodMetrics } from '@/reporter/metrics.js';
 
 const PERIOD = { from: '2026-08-03', to: '2026-08-09' };
 const PREVIOUS = { from: '2026-07-27', to: '2026-08-02' };
@@ -26,7 +26,23 @@ function campaign(patch: Partial<CampaignMetrics> & { campaignId: string }): Cam
   };
 }
 
-function metrics(period: typeof PERIOD, campaigns: CampaignMetrics[]): PeriodMetrics {
+/** Период, за который данные есть: именно так выглядит штатный результат сбора. */
+function covered(period: typeof PERIOD): PeriodMetrics['coverage'] {
+  const empty = emptyCoverage(period);
+  return {
+    ...empty,
+    daysWithRows: empty.days,
+    missingDays: [],
+    hasData: true,
+    partial: false,
+  };
+}
+
+function metrics(
+  period: typeof PERIOD,
+  campaigns: CampaignMetrics[],
+  coverage: PeriodMetrics['coverage'] = covered(period),
+): PeriodMetrics {
   const totals = campaigns.reduce(
     (acc, c) => ({
       impressions: acc.impressions + c.impressions,
@@ -41,6 +57,7 @@ function metrics(period: typeof PERIOD, campaigns: CampaignMetrics[]): PeriodMet
     period,
     campaigns,
     byDate: [],
+    coverage,
     totals: {
       ...totals,
       ctr: totals.impressions > 0 ? totals.clicks / totals.impressions : null,
@@ -133,6 +150,33 @@ describe('detectAnomalies', () => {
     expect(detectAnomalies(fat, fatBefore).some((a) => a.kind === 'ctr_collapse')).toBe(true);
   });
 
+  it('незагруженный период не превращается в обвал', () => {
+    // 50 000 ₽ и 40 лидов позавчера, вчера не загрузилось ни строки.
+    const current = metrics(PERIOD, [], emptyCoverage(PERIOD));
+    const previous = metrics(PREVIOUS, [
+      campaign({ campaignId: 'c1', spend: 50_000, conversions: 40 }),
+    ]);
+
+    expect(detectAnomalies(current, previous)).toEqual([]);
+  });
+
+  it('не сравнивает с периодом, за который данных нет', () => {
+    const current = metrics(PERIOD, [
+      campaign({ campaignId: 'c1', spend: 50_000, conversions: 40 }),
+    ]);
+    const previous = metrics(
+      PREVIOUS,
+      [campaign({ campaignId: 'c1', spend: 0, conversions: 0 })],
+      emptyCoverage(PREVIOUS),
+    );
+
+    const found = detectAnomalies(current, previous);
+
+    // Роста «с нуля» не было — база просто не измерена.
+    expect(found.map((a) => a.kind)).not.toContain('spend_spike');
+    expect(found.map((a) => a.kind)).not.toContain('leads_spike');
+  });
+
   it('пороги настраиваются', () => {
     const current = metrics(PERIOD, [
       campaign({ campaignId: 'c1', spend: 11_000, conversions: 10 }),
@@ -148,13 +192,15 @@ describe('detectAnomalies', () => {
   });
 });
 
-function series(spends: number[], start = 1): DailyPoint[] {
+function series(spends: Array<number | null>, start = 1): DailyPoint[] {
   return spends.map((spend, i) => ({
     date: `2026-08-${String(start + i).padStart(2, '0')}`,
-    spend,
+    // null — день, за который строк нет вовсе (загрузка не доехала).
+    spend: spend ?? 0,
     conversions: 0,
     clicks: 0,
     impressions: 0,
+    hasRows: spend !== null,
   }));
 }
 
@@ -197,5 +243,20 @@ describe('detectSpendOutlier', () => {
 
   it('не будит по мелочи', () => {
     expect(detectSpendOutlier(series([10, 12, 9, 11, 400]))).toBeNull();
+  });
+
+  it('незагруженный последний день — не обвал расхода', () => {
+    // Без флага строк это выглядело бы как падение с 5 000 ₽ до нуля.
+    expect(detectSpendOutlier(series([5_000, 5_200, 4_800, 5_100, null]))).toBeNull();
+  });
+
+  it('дырки в истории не занижают базу', () => {
+    // Три дня по 5 000 ₽ и два незагруженных: среднее — 5 000, а не 3 000.
+    const outlier = detectSpendOutlier(series([5_000, null, 5_000, null, 5_000, 20_000]));
+
+    expect(outlier?.baseline).toBe(5_000);
+
+    // А после отсева дырок истории остаётся слишком мало, чтобы гадать.
+    expect(detectSpendOutlier(series([5_000, null, null, null, 20_000]))).toBeNull();
   });
 });

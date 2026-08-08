@@ -10,6 +10,7 @@ function points(count: number, spend = 1_000): DailyPoint[] {
     conversions: i,
     clicks: 0,
     impressions: 0,
+    hasRows: true,
   }));
 }
 
