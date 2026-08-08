@@ -1,5 +1,5 @@
 import { subDays } from 'date-fns';
-import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz';
+import { formatInTimeZone, fromZonedTime } from 'date-fns-tz';
 
 import { MSK } from '@/constants.js';
 
@@ -12,14 +12,21 @@ export function ymdMsk(date: Date): string {
   return formatInTimeZone(date, MSK, 'yyyy-MM-dd');
 }
 
-/** Полуинтервал последних N полных дней по МСК, не включая сегодня. */
+/**
+ * Последние N полных дней по МСК, не включая сегодня. Границы включительные.
+ *
+ * Арифметика идёт по календарным датам, а не по моментам времени. Прежняя
+ * версия звала toZonedTime, а результат печатала через formatInTimeZone —
+ * сдвиг +3 применялся дважды, и после 21:00 МСК «вчера» превращалось в
+ * «сегодня». Крон в 08:30 в эту полосу не попадал, поэтому баг не проявлялся,
+ * но отчёт по требованию вечером показал бы не тот день.
+ */
 export function lastNDaysMsk(n: number, now: Date = new Date()): { from: string; to: string } {
-  const zoned = toZonedTime(now, MSK);
-  const to = subDays(zoned, 1);
-  const from = subDays(zoned, n);
+  const todayUtcAnchored = new Date(`${todayMsk(now)}T00:00:00Z`);
+  const ymdUtc = (d: Date) => formatInTimeZone(d, 'UTC', 'yyyy-MM-dd');
   return {
-    from: formatInTimeZone(from, MSK, 'yyyy-MM-dd'),
-    to: formatInTimeZone(to, MSK, 'yyyy-MM-dd'),
+    from: ymdUtc(subDays(todayUtcAnchored, n)),
+    to: ymdUtc(subDays(todayUtcAnchored, 1)),
   };
 }
 

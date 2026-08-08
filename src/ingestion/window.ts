@@ -1,9 +1,8 @@
 import { subDays } from 'date-fns';
-import { toZonedTime } from 'date-fns-tz';
+import { formatInTimeZone } from 'date-fns-tz';
 
 import type { DateRange } from '@/channels/types.js';
-import { MSK } from '@/constants.js';
-import { ymdMsk } from '@/lib/dates.js';
+import { todayMsk } from '@/lib/dates.js';
 
 /**
  * Конверсии из Метрики доезжают до 21 дня (ТЗ §2.1), поэтому вчерашняя цифра
@@ -20,10 +19,13 @@ export const STATS_WINDOW_DAYS = 21;
  * неполного дня безопасна — ключ upsert'а тот же самый.
  */
 export function trailingWindowMsk(days: number, now: Date = new Date()): DateRange {
-  const zoned = toZonedTime(now, MSK);
+  // Арифметика по календарным датам, а не по моментам: toZonedTime плюс
+  // ymdMsk применяли сдвиг +3 дважды, и после 21:00 МСК окно съезжало на сутки.
+  const today = todayMsk(now);
+  const anchored = new Date(`${today}T00:00:00Z`);
   return {
-    from: ymdMsk(subDays(zoned, Math.max(days, 1) - 1)),
-    to: ymdMsk(zoned),
+    from: formatInTimeZone(subDays(anchored, Math.max(days, 1) - 1), 'UTC', 'yyyy-MM-dd'),
+    to: today,
   };
 }
 

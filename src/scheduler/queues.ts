@@ -13,6 +13,7 @@ export const QUEUE_NAMES = {
   weeklyReport: 'weekly-report',
   refreshTokens: 'refresh-tokens',
   expireApprovals: 'expire-approvals',
+  alertScan: 'alert-scan',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -31,6 +32,7 @@ export const CRON_SCHEDULE: Record<QueueName, string | null> = {
   [QUEUE_NAMES.weeklyReport]: '0 10 * * 1',
   [QUEUE_NAMES.refreshTokens]: '0 */4 * * *',
   [QUEUE_NAMES.expireApprovals]: '*/5 * * * *',
+  [QUEUE_NAMES.alertScan]: '*/5 * * * *',
 };
 
 export const DEFAULT_JOB_OPTIONS: JobsOptions = {

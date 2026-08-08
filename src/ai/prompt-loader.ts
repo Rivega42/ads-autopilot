@@ -26,6 +26,8 @@ import { AppError } from '@/lib/errors.js';
 export const PROMPT_VERSION = {
   'onboarding-interview': '1.0.0',
   'onboarding-eval-persona': '1.0.0',
+  'campaign-structure': '1.0.0',
+  'campaign-texts': '1.0.0',
 } as const;
 
 export type PromptName = keyof typeof PROMPT_VERSION;

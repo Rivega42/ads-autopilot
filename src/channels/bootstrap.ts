@@ -1,5 +1,6 @@
 import { registerAdapter, registeredChannels } from './registry.js';
 
+import { registerCampaignApprovalExecutor } from '@/campaigns/index.js';
 import { vkAdsAdapter } from '@/clients/vk-ads/adapter.js';
 import { yandexDirectAdapter } from '@/clients/yandex-direct/index.js';
 import { logger } from '@/logger.js';
@@ -21,6 +22,9 @@ export function bootstrapChannels(): void {
 
   registerAdapter(yandexDirectAdapter);
   registerAdapter(vkAdsAdapter);
+
+  // Без этого апрув на создание кампании отклоняется как неподдерживаемый.
+  registerCampaignApprovalExecutor();
 
   logger.info({ channels: registeredChannels() }, 'channel adapters registered');
 }

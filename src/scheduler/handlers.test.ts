@@ -92,8 +92,12 @@ describe('handlers', () => {
     expect(h.runIngestion).toHaveBeenCalledTimes(2);
   });
 
-  it('нереализованные обработчики честно сообщают об этом', async () => {
-    const result = await handlers[QUEUE_NAMES.dailyReport](job(), 'token');
+  it('нереализованный обработчик честно сообщает об этом', async () => {
+    // Осталась одна заглушка — модерация (эпик E10). Остальные очереди
+    // подключены к реальным реализациям, и брать их сюда нельзя: они пойдут
+    // в Prisma. Когда модерация будет готова, тест удаляется вместе с
+    // notImplemented, а не переписывается на другую очередь.
+    const result = await handlers[QUEUE_NAMES.checkModeration](job(), 'token');
 
     expect(result).toEqual({ skipped: true, reason: 'not implemented' });
   });
