@@ -5,6 +5,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     setupFiles: ['dotenv/config'],
+    fileParallelism: false,
     include: ['src/**/*.test.ts', 'src/**/__tests__/**/*.test.ts'],
     coverage: {
       provider: 'v8',
