@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 import { briefDraftSchema, type ClientBriefDraft } from './brief.schema.js';
@@ -55,6 +56,15 @@ export function parseTranscript(value: unknown): InterviewTranscript {
 export function parseDraft(value: unknown): ClientBriefDraft {
   const parsed = briefDraftSchema.safeParse(value);
   return parsed.success ? parsed.data : {};
+}
+
+/**
+ * Готовит значение к записи в Json-колонку. Прогон через JSON нужен не ради типа:
+ * он выкидывает ключи со значением `undefined`, которые Prisma иначе трактует как
+ * «не менять поле», и в Postgres уехал бы объект с дырами.
+ */
+export function toJsonValue(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
 }
 
 /**
