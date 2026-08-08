@@ -189,7 +189,12 @@ export async function runOptimizer(
       : Promise.resolve([]),
   ]);
 
-  const entityIds = [campaign.id, ...adGroupIds, ...keywords.map((k) => k.id), ...ads.map((a) => a.id)];
+  const entityIds = [
+    campaign.id,
+    ...adGroupIds,
+    ...keywords.map((k) => k.id),
+    ...ads.map((a) => a.id),
+  ];
   const stats = await db.campaignStat.findMany({
     where: { entityId: { in: entityIds }, date: { gte: windowStart, lte: windowEnd } },
   });
@@ -201,7 +206,10 @@ export async function runOptimizer(
   const aggregates = aggregateStats(stats, bidByKeywordId);
   const entities = aggregates.filter((entity) => entity.entityId !== campaign.id);
 
-  const targets = buildTargets(campaign, aggregates.find((e) => e.entityId === campaign.id) ?? null);
+  const targets = buildTargets(
+    campaign,
+    aggregates.find((e) => e.entityId === campaign.id) ?? null,
+  );
   const searchQueries = options.searchQueries ?? [];
   const input: RuleInput = { entities, searchQueries };
 
@@ -240,9 +248,7 @@ export async function runOptimizer(
  * two changes of the same kind in one run.
  */
 export function resolveConflicts(decisions: readonly Decision[]): Decision[] {
-  const paused = new Set(
-    decisions.filter((d) => d.action === 'PAUSE').map((d) => d.entityId),
-  );
+  const paused = new Set(decisions.filter((d) => d.action === 'PAUSE').map((d) => d.entityId));
   const seen = new Set<string>();
   const result: Decision[] = [];
 

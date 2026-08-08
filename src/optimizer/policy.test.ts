@@ -81,8 +81,12 @@ describe('approval threshold for money changes', () => {
   });
 
   it('auto-applies the MVP bid steps, which sit under the threshold', () => {
-    expect(approvalKindFor(decision({ nextValue: { kind: 'bid', amount: 85 } }), context(), false)).toBeNull();
-    expect(approvalKindFor(decision({ nextValue: { kind: 'bid', amount: 110 } }), context(), false)).toBeNull();
+    expect(
+      approvalKindFor(decision({ nextValue: { kind: 'bid', amount: 85 } }), context(), false),
+    ).toBeNull();
+    expect(
+      approvalKindFor(decision({ nextValue: { kind: 'bid', amount: 110 } }), context(), false),
+    ).toBeNull();
   });
 
   it('demands approval when the baseline is unknown', () => {
@@ -169,7 +173,10 @@ describe('handover mode', () => {
       prevValue: { kind: 'absent' },
       nextValue: { kind: 'negativeKeyword', phrase: 'бесплатно' },
     });
-    const outcome = classifyDecisions([pause('kw-1'), negative, decision(), budget(5100)], context('ASSIST'));
+    const outcome = classifyDecisions(
+      [pause('kw-1'), negative, decision(), budget(5100)],
+      context('ASSIST'),
+    );
     expect(outcome.autoApply.map((d) => d.action)).toEqual(['PAUSE', 'ADD_NEGATIVE_KEYWORD']);
     expect(outcome.approvals[0]?.kind).toBe('IMPORT_HANDOVER');
     expect(outcome.approvals[0]?.decisions.map((d) => d.action)).toEqual([

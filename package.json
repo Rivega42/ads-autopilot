@@ -38,6 +38,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",
     "@grammyjs/auto-retry": "^2.0.2",
+    "@grammyjs/runner": "^2.0.3",
     "@prisma/client": "^6.3.0",
     "axios": "^1.7.9",
     "bullmq": "^5.34.0",

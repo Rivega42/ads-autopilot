@@ -106,7 +106,9 @@ export function relativeChange(decision: Decision): number | null {
   const { prevValue, nextValue } = decision;
   if (prevValue.kind !== nextValue.kind) return null;
   if (prevValue.kind === 'bid' && nextValue.kind === 'bid') {
-    return prevValue.amount > 0 ? Math.abs(nextValue.amount - prevValue.amount) / prevValue.amount : null;
+    return prevValue.amount > 0
+      ? Math.abs(nextValue.amount - prevValue.amount) / prevValue.amount
+      : null;
   }
   if (prevValue.kind === 'budget' && nextValue.kind === 'budget') {
     return prevValue.amount > 0

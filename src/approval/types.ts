@@ -121,6 +121,40 @@ export function parseAction(input: unknown): ApprovalAction {
 }
 
 /**
+ * Метаданные заявки: не часть действия, но нужны при применении.
+ *
+ * Живут в том же Json-поле `payload`, отдельной колонки под них нет. Это безопасно:
+ * `approvalActionSchema` — обычный (не strict) объект, лишний ключ `meta` он срезает,
+ * поэтому старые строки без метаданных читаются ровно как раньше.
+ */
+export const approvalMetaSchema = z.object({
+  /**
+   * Эффективный dry-run, вычисленный в момент отрисовки карточки. Человек принимает
+   * решение по тексту карточки, а он рисуется именно из этого значения — значит и
+   * применять надо с ним, а не с флагом, каким он станет через APPROVAL_TTL_MINUTES.
+   */
+  dryRun: z.boolean(),
+});
+
+export type ApprovalMeta = z.infer<typeof approvalMetaSchema>;
+
+const payloadEnvelopeSchema = z.object({ meta: approvalMetaSchema.partial() });
+
+/** Payload для колонки: действие целиком + метаданные исполнения. */
+export function buildApprovalPayload(
+  action: ApprovalAction,
+  meta: ApprovalMeta,
+): Prisma.InputJsonValue {
+  return toJson({ ...action, meta });
+}
+
+/** Пустой объект — заявка создана старой версией кода, метаданных в ней нет. */
+export function readApprovalMeta(payload: unknown): Partial<ApprovalMeta> {
+  const parsed = payloadEnvelopeSchema.safeParse(payload);
+  return parsed.success ? parsed.data.meta : {};
+}
+
+/**
  * Приведение к Prisma Json.
  *
  * `Record<string, unknown>` внутри стратегий несовместим с `InputJsonValue` по типам,

@@ -9,7 +9,13 @@ import {
   type ObservationCounts,
 } from './guardrails.js';
 import { runMvpRules } from './rules.js';
-import type { Decision, DecisionValue, EntityMetrics, OptimizationTargets, SearchQueryMetrics } from './types.js';
+import type {
+  Decision,
+  DecisionValue,
+  EntityMetrics,
+  OptimizationTargets,
+  SearchQueryMetrics,
+} from './types.js';
 
 function decision(overrides: Partial<Decision> = {}): Decision {
   return {
@@ -29,7 +35,9 @@ function decision(overrides: Partial<Decision> = {}): Decision {
 
 function context(
   overrides: Partial<GuardrailContext> = {},
-  observations: ReadonlyArray<[string, ObservationCounts]> = [['KEYWORD:kw-1', { impressions: 1000, days: 7 }]],
+  observations: ReadonlyArray<[string, ObservationCounts]> = [
+    ['KEYWORD:kw-1', { impressions: 1000, days: 7 }],
+  ],
 ): GuardrailContext {
   return {
     dailyBudget: 5000,
@@ -49,10 +57,18 @@ function bidAmount(value: DecisionValue): number | null {
 describe('observationKey', () => {
   it('keys negative keywords by phrase, not only by ad group', () => {
     const first = observationKey(
-      decision({ entityType: 'ADGROUP', entityId: 'ag-1', nextValue: { kind: 'negativeKeyword', phrase: 'a' } }),
+      decision({
+        entityType: 'ADGROUP',
+        entityId: 'ag-1',
+        nextValue: { kind: 'negativeKeyword', phrase: 'a' },
+      }),
     );
     const second = observationKey(
-      decision({ entityType: 'ADGROUP', entityId: 'ag-1', nextValue: { kind: 'negativeKeyword', phrase: 'b' } }),
+      decision({
+        entityType: 'ADGROUP',
+        entityId: 'ag-1',
+        nextValue: { kind: 'negativeKeyword', phrase: 'b' },
+      }),
     );
     expect(first).not.toBe(second);
   });
@@ -168,9 +184,21 @@ describe('minimum observations floor', () => {
   });
 
   const cases: ReadonlyArray<{ name: string; counts: ObservationCounts; allowed: boolean }> = [
-    { name: 'impressions just below the floor', counts: { impressions: 99, days: 7 }, allowed: false },
-    { name: 'impressions exactly at the floor', counts: { impressions: 100, days: 7 }, allowed: true },
-    { name: 'impressions just above the floor', counts: { impressions: 101, days: 7 }, allowed: true },
+    {
+      name: 'impressions just below the floor',
+      counts: { impressions: 99, days: 7 },
+      allowed: false,
+    },
+    {
+      name: 'impressions exactly at the floor',
+      counts: { impressions: 100, days: 7 },
+      allowed: true,
+    },
+    {
+      name: 'impressions just above the floor',
+      counts: { impressions: 101, days: 7 },
+      allowed: true,
+    },
     { name: 'days just below the floor', counts: { impressions: 5000, days: 2 }, allowed: false },
     { name: 'days exactly at the floor', counts: { impressions: 5000, days: 3 }, allowed: true },
     { name: 'zero impressions and zero days', counts: { impressions: 0, days: 0 }, allowed: false },
@@ -195,7 +223,12 @@ describe('minimum observations floor', () => {
 describe('share of entities changed per run', () => {
   const many = (count: number): Decision[] =>
     Array.from({ length: count }, (_unused, index) =>
-      decision({ entityId: `kw-${index}`, action: 'PAUSE', prevValue: { kind: 'status', status: 'ACTIVE' }, nextValue: { kind: 'status', status: 'PAUSED' } }),
+      decision({
+        entityId: `kw-${index}`,
+        action: 'PAUSE',
+        prevValue: { kind: 'status', status: 'ACTIVE' },
+        nextValue: { kind: 'status', status: 'PAUSED' },
+      }),
     );
 
   const observationsFor = (count: number): ReadonlyArray<[string, ObservationCounts]> =>
@@ -234,12 +267,39 @@ describe('share of entities changed per run', () => {
     const outcome = applyGuardrails(
       [
         decision({ entityId: 'kw-0' }),
-        decision({ entityId: 'kw-0', action: 'PAUSE', prevValue: { kind: 'status', status: 'ACTIVE' }, nextValue: { kind: 'status', status: 'PAUSED' } }),
+        decision({
+          entityId: 'kw-0',
+          action: 'PAUSE',
+          prevValue: { kind: 'status', status: 'ACTIVE' },
+          nextValue: { kind: 'status', status: 'PAUSED' },
+        }),
         decision({ entityId: 'kw-1' }),
       ],
       context({ eligibleEntityCount: 4 }, observationsFor(2)),
     );
     expect(outcome.allowed).toHaveLength(2);
+    expect(outcome.rejected[0]?.decision.entityId).toBe('kw-1');
+  });
+
+  it('does not spend the quota on negative keywords', () => {
+    const negatives = Array.from({ length: 5 }, (_unused, index) =>
+      decision({
+        action: 'ADD_NEGATIVE_KEYWORD',
+        entityType: 'ADGROUP',
+        entityId: `ag-${index}`,
+        prevValue: { kind: 'absent' },
+        nextValue: { kind: 'negativeKeyword', phrase: `минус ${index}` },
+      }),
+    );
+    const observations = negatives.map((_negative, index): [string, ObservationCounts] => [
+      `ADGROUP:ag-${index}:минус ${index}`,
+      { impressions: 1000, days: 7 },
+    ]);
+    const outcome = applyGuardrails(
+      [...negatives, ...many(2)],
+      context({ eligibleEntityCount: 4 }, [...observations, ...observationsFor(2)]),
+    );
+    expect(outcome.allowed).toHaveLength(6);
     expect(outcome.rejected[0]?.decision.entityId).toBe('kw-1');
   });
 
@@ -361,7 +421,11 @@ describe('property: no rule output escapes the guardrails', () => {
       seen.rejected += outcome.rejected.length;
 
       const ceiling = scenario.targets.dailyBudget * settings.budgetCeilingRatio;
-      const touched = new Set(outcome.allowed.map((allowed) => allowed.entityId));
+      const touched = new Set(
+        outcome.allowed
+          .filter((allowed) => allowed.nextValue.kind !== 'negativeKeyword')
+          .map((allowed) => allowed.entityId),
+      );
 
       expect(touched.size).toBeLessThanOrEqual(
         Math.max(1, Math.floor(scenario.entities.length * settings.maxChangedEntityShare)),

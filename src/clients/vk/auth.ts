@@ -29,6 +29,14 @@ export const VK_REFRESH_MARGIN_MS = 4 * 60 * 60 * 1000;
  */
 export const VK_MAX_SIMULTANEOUS_TOKENS = 5;
 
+/**
+ * Защита от самозатаптывания при параллельных 401: два запроса, ушедшие с одним
+ * и тем же протухшим токеном, получают 401 почти одновременно. Второй forceRefresh
+ * убил бы токен, только что выпущенный первым (mint начинается с token/delete),
+ * и уронил бы чужой ретрай. Поэтому свежевыпущенный токен не переминчивается.
+ */
+export const VK_MIN_REMINT_INTERVAL_MS = 10_000;
+
 const TOKEN_URL = `${VK_ADS_BASE_URL}oauth2/token.json`;
 const TOKEN_DELETE_URL = `${VK_ADS_BASE_URL}oauth2/token/delete.json`;
 
@@ -65,6 +73,10 @@ export interface VkAuthDeps {
 interface CachedToken {
   accessToken: string;
   expiresAtMs: number;
+  /** Момент, начиная с которого токен пора обновлять (истечение минус запас). */
+  refreshAtMs: number;
+  /** Когда этот токен был выпущен — см. VK_MIN_REMINT_INTERVAL_MS. */
+  mintedAt: number;
 }
 
 /**
@@ -151,25 +163,61 @@ export function grantTypeFor(creds: VkCredentials): VkGrantType {
   return creds.agencyClientName ? 'agency_client_credentials' : 'client_credentials';
 }
 
+/**
+ * Реальный запас перед обновлением для токена с временем жизни `ttlMs`.
+ *
+ * Запас в 4 часа осмыслен только для суточного токена. Если VK отдаст короткий
+ * `expires_in` (документация обещает 86400, но это не контракт), фиксированный
+ * запас сделает токен «протухшим» в момент выдачи: каждый запрос будет минтить
+ * новый токен, удалять предыдущий и писать в БД — а на пятом упрётся в потолок.
+ * Поэтому запас никогда не съедает больше половины жизни токена.
+ */
+export function refreshMarginForTtlMs(ttlMs: number): number {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) return 0;
+  return Math.min(VK_REFRESH_MARGIN_MS, Math.floor(ttlMs / 2));
+}
+
 /** Токен считается годным, пока до истечения больше окна обновления. */
-export function isTokenFresh(expiresAtMs: number | undefined, now: number): boolean {
+export function isTokenFresh(
+  expiresAtMs: number | undefined,
+  now: number,
+  marginMs: number = VK_REFRESH_MARGIN_MS,
+): boolean {
   if (expiresAtMs === undefined) return false;
-  return expiresAtMs - now > VK_REFRESH_MARGIN_MS;
+  return expiresAtMs - now > marginMs;
 }
 
 /**
- * 403 на token.json почти всегда означает исчерпанный лимит из 5 токенов:
- * прочих причин отдать 403 именно на выдаче у VK нет. Отдельно ловим текст,
- * чтобы не принять за лимит настоящий запрет доступа.
+ * Сигнатуры потолка токенов в теле 403. Список закрытый намеренно: единственное
+ * лечение потолка — снести все токены пользователя, а это ломает и воркер, и
+ * бота, и любой другой процесс. Такую операцию нельзя запускать по догадке.
+ *
+ * @needs-live-token: точная формулировка VK не проверена; ниже — варианты из
+ * документации и myTarget. Ошибка в сторону «не распознали» безопасна: получим
+ * обычный AuthError с текстом ответа в логе и добавим формулировку сюда.
+ */
+const TOKEN_LIMIT_SIGNALS = [
+  'count of tokens',
+  'tokens limit',
+  'token limit',
+  'tokens_limit',
+  'token_limit',
+  'limit of tokens',
+  'limit of active tokens',
+];
+
+/**
+ * 403 на token.json означает исчерпанный лимит из 5 токенов только если VK так и
+ * сказал. Всё остальное — «Rate limit exceeded», пустое тело от WAF, настоящий
+ * запрет доступа — обычная ошибка: сносить чужие живые токены по неоднозначному
+ * признаку дороже, чем упасть.
  */
 export function isTokenLimitResponse(status: number, data: unknown): boolean {
   if (status !== 403) return false;
   const { code, message } = parseVkError(data);
   const haystack = `${code ?? ''} ${message ?? ''}`.toLowerCase();
-  if (haystack.includes('limit') || haystack.includes('count of tokens')) return true;
-  // Пустое/нераспознанное тело при 403 — считаем лимитом: попытка освободить
-  // слот безопасна, а альтернатива (упасть с AuthError) требует ручного вмешательства.
-  return haystack.trim() === '';
+  if (haystack.trim() === '') return false;
+  return TOKEN_LIMIT_SIGNALS.some((signal) => haystack.includes(signal));
 }
 
 /**
@@ -223,10 +271,18 @@ async function postTokenRequest(
  * новый. «Попросить и посмотреть, что будет» — плохой план, потому что 6-й
  * токен не выдаётся вовсе, а не вытесняет самый старый.
  */
+export interface MintedVkToken {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAtMs: number;
+  /** Время жизни, как его назвал VK: нужно, чтобы посчитать запас на обновление. */
+  ttlMs: number;
+}
+
 export async function mintVkToken(
   creds: VkCredentials,
   deps: VkAuthDeps = defaultVkAuthDeps,
-): Promise<{ accessToken: string; refreshToken?: string; expiresAtMs: number }> {
+): Promise<MintedVkToken> {
   if (creds.accessToken) {
     await deleteVkToken(creds, { accessToken: creds.accessToken }, deps);
   }
@@ -245,11 +301,23 @@ export async function mintVkToken(
 
   if (res.status >= 400) {
     const info = parseVkError(res.data);
-    throw new AuthError(VK_CHANNEL, `VK token request failed: ${info.message ?? res.status}`, {
-      status: res.status,
-      code: info.code,
-      grantType: grantTypeFor(creds),
-    });
+    const context = { status: res.status, code: info.code, grantType: grantTypeFor(creds) };
+
+    // 5xx/429 на выдаче токена — это недоступность эндпоинта, а не отказ в доступе.
+    // Отдавать здесь AuthError нельзя: withRetry его не повторит, а кабинет уже
+    // остался без токена (старый мы погасили выше) до ручного вмешательства.
+    if (res.status >= 500 || res.status === 429) {
+      throw new ChannelError(
+        VK_CHANNEL,
+        `VK token endpoint unavailable: ${info.message ?? res.status}`,
+        { code: 'VK_TOKEN_ENDPOINT_UNAVAILABLE', retryable: true, context },
+      );
+    }
+    throw new AuthError(
+      VK_CHANNEL,
+      `VK token request failed: ${info.message ?? res.status}`,
+      context,
+    );
   }
 
   const parsed = vkTokenSchema.safeParse(res.data);
@@ -260,10 +328,11 @@ export async function mintVkToken(
     });
   }
 
-  const ttlSec = parsed.data.expires_in ?? VK_TOKEN_TTL_SEC;
-  const out: { accessToken: string; refreshToken?: string; expiresAtMs: number } = {
+  const ttlMs = (parsed.data.expires_in ?? VK_TOKEN_TTL_SEC) * 1000;
+  const out: MintedVkToken = {
     accessToken: parsed.data.access_token,
-    expiresAtMs: deps.now() + ttlSec * 1000,
+    expiresAtMs: deps.now() + ttlMs,
+    ttlMs,
   };
   if (parsed.data.refresh_token) out.refreshToken = parsed.data.refresh_token;
   return out;
@@ -283,9 +352,12 @@ async function refreshAndStore(
   };
   if (minted.refreshToken) updated.refreshToken = minted.refreshToken;
 
+  const mintedAt = deps.now();
   tokenCache.set(ctx.clientId, {
     accessToken: minted.accessToken,
     expiresAtMs: minted.expiresAtMs,
+    refreshAtMs: minted.expiresAtMs - refreshMarginForTtlMs(minted.ttlMs),
+    mintedAt,
   });
 
   // Синхронизируем сам ctx: он живёт весь прогон задачи, и следующий вызов
@@ -324,17 +396,33 @@ export async function getVkAccessToken(
 
   if (!opts.forceRefresh) {
     const cached = tokenCache.get(ctx.clientId);
-    if (cached && isTokenFresh(cached.expiresAtMs, now)) return cached.accessToken;
+    // Порог обновления посчитан при выдаче — он учитывает реальный TTL токена.
+    if (cached && now < cached.refreshAtMs) return cached.accessToken;
 
-    // Холодный старт процесса: в БД может лежать ещё живой токен.
+    // Холодный старт процесса: в БД может лежать ещё живой токен. Настоящий TTL
+    // здесь неизвестен, поэтому запас берём полный — худший случай — один минт.
     if (creds.accessToken && creds.expiresAt) {
       const expiresAtMs = Date.parse(creds.expiresAt);
       if (Number.isFinite(expiresAtMs) && isTokenFresh(expiresAtMs, now)) {
-        tokenCache.set(ctx.clientId, { accessToken: creds.accessToken, expiresAtMs });
+        tokenCache.set(ctx.clientId, {
+          accessToken: creds.accessToken,
+          expiresAtMs,
+          refreshAtMs: expiresAtMs - VK_REFRESH_MARGIN_MS,
+          // Момент выдачи неизвестен: считаем токен «старым», чтобы 401 по нему
+          // приводил к настоящему обновлению, а не к защите от переминчивания.
+          mintedAt: 0,
+        });
         return creds.accessToken;
       }
     }
   } else {
+    const cached = tokenCache.get(ctx.clientId);
+    if (cached && now - cached.mintedAt < VK_MIN_REMINT_INTERVAL_MS) {
+      // Токен выпущен только что: 401 пришёл по запросу, ушедшему со старым
+      // токеном ещё до обновления. Повторный минт снёс бы рабочий токен.
+      log.debug({ clientId: ctx.clientId }, 'vk force refresh suppressed, token just minted');
+      return cached.accessToken;
+    }
     tokenCache.delete(ctx.clientId);
   }
 

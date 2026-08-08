@@ -120,7 +120,8 @@ export function applyGuardrails(
       continue;
     }
 
-    if (entityCap !== null && !touchedEntities.has(decision.entityId)) {
+    const countsTowardShare = decision.nextValue.kind !== 'negativeKeyword';
+    if (entityCap !== null && countsTowardShare && !touchedEntities.has(decision.entityId)) {
       // Overflow is dropped rather than clamped: the limit is on how much of the account may move
       // in one run, and the decisions arrive worst-first, so the tail is the least valuable.
       if (touchedEntities.size >= entityCap) {
@@ -141,7 +142,10 @@ export function applyGuardrails(
       continue;
     }
 
-    touchedEntities.add(decision.entityId);
+    // Negative keywords are excluded from the share rail: they are additive, ad-group scoped and
+    // the safest action we have (TZ §15.7 week one), so they must not consume the quota that
+    // exists to stop mass bid/status movement across the keyword population.
+    if (countsTowardShare) touchedEntities.add(decision.entityId);
 
     if (limited.outcome === 'clamped') {
       clamped.push({
@@ -198,10 +202,7 @@ function limitValue(
       const next = withNextValue(decision, { kind: 'budget', amount: ceiling });
       return {
         outcome: 'clamped',
-        decision: annotate(
-          next,
-          `ограничено guardrail: дневной бюджет ≤ ${formatMoney(ceiling)}`,
-        ),
+        decision: annotate(next, `ограничено guardrail: дневной бюджет ≤ ${formatMoney(ceiling)}`),
         rail: 'BUDGET_CEILING',
         note:
           `бюджет ${formatMoney(decision.nextValue.amount)} превышает потолок ` +

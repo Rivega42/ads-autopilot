@@ -39,8 +39,7 @@ export function deriveMetrics(source: {
     // Spend without a single conversion is the exact situation the pause rule exists for, so it
     // must compare as "worse than any target" rather than as missing data. Zero spend and zero
     // conversions is genuinely unknown and stays null, which no rule ever acts on.
-    cpa:
-      conversions > 0 ? spend / conversions : spend > 0 ? Number.POSITIVE_INFINITY : null,
+    cpa: conversions > 0 ? spend / conversions : spend > 0 ? Number.POSITIVE_INFINITY : null,
   };
 }
 
@@ -56,16 +55,15 @@ function targetText(cpa: number, targetCpa: number): string {
     : ` (цель ${formatMoney(targetCpa)})`;
 }
 
-function ruleDecision(partial: Omit<Decision, 'requiresApproval' | 'layer' | 'approvalKind'>): Decision {
+function ruleDecision(
+  partial: Omit<Decision, 'requiresApproval' | 'layer' | 'approvalKind'>,
+): Decision {
   // Rules never decide approval — policy.ts owns that and overwrites these two fields.
   return { ...partial, requiresApproval: false, layer: 'rule', approvalKind: null };
 }
 
 /** TZ §3.5: пауза ключа/объявления, если impressions > 500 И CPA > 3 × target за 7 дней. */
-export function pauseHighCpaEntities(
-  input: RuleInput,
-  targets: OptimizationTargets,
-): Decision[] {
+export function pauseHighCpaEntities(input: RuleInput, targets: OptimizationTargets): Decision[] {
   const { targetCpa } = targets;
   if (targetCpa === null || targetCpa <= 0) return [];
 
@@ -98,10 +96,7 @@ export function pauseHighCpaEntities(
 }
 
 /** TZ §3.5: снижение ставки на 15%, если CPA > 1.5 × target И impressions > 200. */
-export function decreaseBidOnHighCpa(
-  input: RuleInput,
-  targets: OptimizationTargets,
-): Decision[] {
+export function decreaseBidOnHighCpa(input: RuleInput, targets: OptimizationTargets): Decision[] {
   const { targetCpa } = targets;
   if (targetCpa === null || targetCpa <= 0) return [];
 
@@ -143,10 +138,7 @@ export function decreaseBidOnHighCpa(
  * The underspend condition is campaign-wide, so either every biddable entity qualifies or none —
  * spending headroom is a property of the budget, not of the keyword.
  */
-export function increaseBidOnLowCpa(
-  input: RuleInput,
-  targets: OptimizationTargets,
-): Decision[] {
+export function increaseBidOnLowCpa(input: RuleInput, targets: OptimizationTargets): Decision[] {
   const { targetCpa, dailyBudget, dailySpend } = targets;
   if (targetCpa === null || targetCpa <= 0) return [];
   if (dailyBudget <= 0) return [];
@@ -186,10 +178,7 @@ export function increaseBidOnLowCpa(
 }
 
 /** TZ §3.5: добавление минус-слов из search queries, где CTR < 0.5% И clicks > 5. */
-export function addNegativeKeywords(
-  input: RuleInput,
-  _targets: OptimizationTargets,
-): Decision[] {
+export function addNegativeKeywords(input: RuleInput, _targets: OptimizationTargets): Decision[] {
   const { maxCtr, minClicks } = RULE_THRESHOLDS.addNegativeKeyword;
   const decisions: Decision[] = [];
 

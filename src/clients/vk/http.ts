@@ -27,6 +27,14 @@ export const VK_DEFAULT_CONCURRENCY = 4;
 /** Потолок ожидания по подсказке площадки: дольше держать воркер занятым бессмысленно. */
 export const VK_MAX_BACKOFF_MS = 30_000;
 
+/**
+ * Срок годности снимка лимитов. Счётчики `*-remaining` — это состояние окна на
+ * момент ответа; через минуту простоя они ничего не описывают. Без срока годности
+ * один ответ с `daily-remaining: 0` навсегда парализует клиент в процессе, даже
+ * когда сутки давно сменились. Сам `rpsLimit` — настройка аккаунта, он не протухает.
+ */
+export const VK_SNAPSHOT_TTL_MS = 60_000;
+
 export interface RateLimitSnapshot {
   rpsLimit?: number;
   rpsRemaining?: number;
@@ -91,7 +99,7 @@ export interface ThrottleInput {
 export function computeThrottleDelayMs(input: ThrottleInput): number {
   const { snapshot, lastRequestAt, now } = input;
 
-  if (snapshot) {
+  if (snapshot && now - snapshot.observedAt <= VK_SNAPSHOT_TTL_MS) {
     if (snapshot.dailyRemaining !== undefined && snapshot.dailyRemaining <= 0) {
       return msUntilNextBoundary(now, 24 * 60 * 60 * 1000);
     }
@@ -128,7 +136,10 @@ export class RateLimitGovernor {
 
   constructor(
     private readonly now: () => number = () => Date.now(),
-    private readonly wait: (ms: number) => Promise<void> = (ms) => sleep(ms),
+    private readonly wait: (ms: number, signal?: AbortSignal) => Promise<void> = (ms, signal) =>
+      sleep(ms, signal),
+    /** Дольше этого внутри слота очереди не спим — см. acquire(). */
+    private readonly maxWaitMs: number = VK_MAX_BACKOFF_MS,
   ) {}
 
   get snapshot(): RateLimitSnapshot | null {
@@ -140,14 +151,36 @@ export class RateLimitGovernor {
     if (parsed) this.snap = parsed;
   }
 
-  async acquire(): Promise<void> {
+  /**
+   * Занимает слот, выдержав нужную паузу.
+   *
+   * Пауза больше `maxWaitMs` (исчерпанные сутки — это до 24 часов) не отсиживается
+   * здесь: воркер держал бы слот BullMQ, `setTimeout` не дал бы завершиться
+   * graceful shutdown, и никто бы так и не узнал, что происходит. Вместо этого
+   * бросаем RateLimitError с `retryAfterMs` — планировщик отложит задачу.
+   */
+  async acquire(signal?: AbortSignal): Promise<void> {
     const run = this.chain.then(async () => {
+      if (signal?.aborted) {
+        throw new ChannelError(VK_CHANNEL, 'VK request aborted', {
+          code: 'VK_ABORTED',
+          retryable: false,
+        });
+      }
       const delay = computeThrottleDelayMs({
         snapshot: this.snap,
         lastRequestAt: this.lastRequestAt,
         now: this.now(),
       });
-      if (delay > 0) await this.wait(delay);
+      if (delay > this.maxWaitMs) {
+        throw new RateLimitError(VK_CHANNEL, delay, {
+          reason: 'vk-window-exhausted',
+          waitMs: delay,
+          maxWaitMs: this.maxWaitMs,
+          snapshot: this.snap,
+        });
+      }
+      if (delay > 0) await this.wait(delay, signal);
       this.lastRequestAt = this.now();
     });
     // Ошибку ожидания не тащим в следующую итерацию цепочки, иначе очередь встанет.
@@ -171,6 +204,8 @@ export interface VkHttpDeps {
   concurrency?: number;
   /** Сколько всего попыток на запрос, включая первую. */
   attempts?: number;
+  /** Отмена: прерывает и паузы троттлинга, и паузы между ретраями. */
+  signal?: AbortSignal;
 }
 
 export interface VkRequestOptions<T extends z.ZodTypeAny> {
@@ -198,6 +233,18 @@ function retryAfterMs(headers: Record<string, unknown> | undefined): number | un
   return Math.min(seconds * 1000, VK_MAX_BACKOFF_MS);
 }
 
+/**
+ * Повторять внутри процесса имеет смысл только короткие паузы. Если площадка
+ * (или наш governor) просит вернуться позже, чем через `VK_MAX_BACKOFF_MS`,
+ * ошибка уходит наверх: воркер освободит слот, а задачу отложит планировщик по
+ * `retryAfterMs`. Иначе `withRetry` уснул бы на подсказанное время целиком —
+ * `maxDelayMs` на подсказку площадки не распространяется.
+ */
+export function shouldRetryInProcess(err: unknown): boolean {
+  if (!isRetryable(err)) return false;
+  return err.retryAfterMs === undefined || err.retryAfterMs <= VK_MAX_BACKOFF_MS;
+}
+
 /** Раскладывает HTTP-ответ VK по доменным классам ошибок. */
 export function mapVkHttpError(res: VkResponse, method: string, url: string): AppError {
   const info = parseVkError(res.data);
@@ -208,6 +255,14 @@ export function mapVkHttpError(res: VkResponse, method: string, url: string): Ap
     return new AuthError(VK_CHANNEL, `VK unauthorized: ${message}`, context);
   }
   if (res.status === 429) {
+    // 429 ретраится независимо от метода — в отличие от таймаута и 5xx.
+    // Инвариант, который это разрешает: 429 отдаёт лимитер до применения запроса,
+    // а все наши записи в VK — абсолютные присваивания (status / max_price /
+    // budget_limit_day через mass_action), поэтому повтор не «складывается».
+    // Единственная неидемпотентная запись — создание баннера (createEntity);
+    // повтор после 429 создал бы дубль, только если бы VK успел применить
+    // запрос и всё равно ответил 429. Если такое поведение подтвердится на живом
+    // токене — гейтить 429 по идемпотентности, как это сделано для 5xx.
     return new RateLimitError(VK_CHANNEL, retryAfterMs(res.headers) ?? 5_000, context);
   }
   if (res.status === 403) {
@@ -242,6 +297,7 @@ export class VkHttpClient {
   private readonly governor: RateLimitGovernor;
   private readonly queue: PQueue;
   private readonly attempts: number;
+  private readonly signal: AbortSignal | undefined;
 
   constructor(deps: VkHttpDeps) {
     this.transport = deps.transport;
@@ -249,6 +305,7 @@ export class VkHttpClient {
     this.governor = deps.governor ?? new RateLimitGovernor();
     this.queue = new PQueue({ concurrency: deps.concurrency ?? VK_DEFAULT_CONCURRENCY });
     this.attempts = deps.attempts ?? 4;
+    this.signal = deps.signal;
   }
 
   get rateLimit(): RateLimitSnapshot | null {
@@ -261,8 +318,9 @@ export class VkHttpClient {
       attempts: this.attempts,
       baseMs: 1_000,
       maxDelayMs: VK_MAX_BACKOFF_MS,
-      shouldRetry: isRetryable,
+      shouldRetry: shouldRetryInProcess,
       label: `vk ${label}`,
+      ...(this.signal ? { signal: this.signal } : {}),
     });
   }
 
@@ -310,9 +368,10 @@ export class VkHttpClient {
   /** Очередь + троттлинг + перевод сетевого сбоя в ChannelError. */
   private async send(config: AxiosRequestConfig): Promise<VkResponse> {
     const task = async (): Promise<VkResponse> => {
-      await this.governor.acquire();
+      await this.governor.acquire(this.signal);
       try {
-        const res = await this.transport(config);
+        // Сигнал уходит и в транспорт: иначе отмена не прервёт запрос, уже ушедший в сеть.
+        const res = await this.transport(this.signal ? { ...config, signal: this.signal } : config);
         this.governor.observe(res.headers);
         return res;
       } catch (err) {
@@ -358,5 +417,6 @@ export function createVkHttpClient(
     ...(overrides.governor ? { governor: overrides.governor } : {}),
     ...(overrides.concurrency !== undefined ? { concurrency: overrides.concurrency } : {}),
     ...(overrides.attempts !== undefined ? { attempts: overrides.attempts } : {}),
+    ...(overrides.signal ? { signal: overrides.signal } : {}),
   });
 }

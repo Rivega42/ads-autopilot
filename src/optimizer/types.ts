@@ -1,11 +1,7 @@
 export type OptimizerEntityType = 'CAMPAIGN' | 'ADGROUP' | 'AD' | 'KEYWORD';
 
 export type ApprovalKindName =
-  | 'BUDGET_CHANGE'
-  | 'NEW_CAMPAIGN'
-  | 'MASS_PAUSE'
-  | 'STRATEGY_CHANGE'
-  | 'IMPORT_HANDOVER';
+  'BUDGET_CHANGE' | 'NEW_CAMPAIGN' | 'MASS_PAUSE' | 'STRATEGY_CHANGE' | 'IMPORT_HANDOVER';
 
 export type HandoverModeName = 'OBSERVER' | 'ASSIST' | 'FULL';
 

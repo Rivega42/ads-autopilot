@@ -9,12 +9,7 @@ import {
   runMvpRules,
   RULE_IDS,
 } from './rules.js';
-import type {
-  EntityMetrics,
-  OptimizationTargets,
-  RuleInput,
-  SearchQueryMetrics,
-} from './types.js';
+import type { EntityMetrics, OptimizationTargets, RuleInput, SearchQueryMetrics } from './types.js';
 
 function entity(overrides: Partial<EntityMetrics> = {}): EntityMetrics {
   return {
@@ -55,10 +50,7 @@ function targets(overrides: Partial<OptimizationTargets> = {}): OptimizationTarg
   };
 }
 
-function input(
-  entities: EntityMetrics[],
-  searchQueries: SearchQueryMetrics[] = [],
-): RuleInput {
+function input(entities: EntityMetrics[], searchQueries: SearchQueryMetrics[] = []): RuleInput {
   return { entities, searchQueries };
 }
 
@@ -96,18 +88,68 @@ describe('pauseHighCpaEntities (impressions > 500 AND CPA > 3× target)', () => 
     targetCpa?: number | null;
     expected: boolean;
   }> = [
-    { name: 'impressions just below the threshold', metrics: { impressions: 499, spend: 2000 }, expected: false },
-    { name: 'impressions exactly at the threshold', metrics: { impressions: 500, spend: 2000 }, expected: false },
-    { name: 'impressions just above the threshold', metrics: { impressions: 501, spend: 2000 }, expected: true },
-    { name: 'CPA just below 3× target', metrics: { impressions: 600, spend: 1499, conversions: 1 }, expected: false },
-    { name: 'CPA exactly 3× target', metrics: { impressions: 600, spend: 1500, conversions: 1 }, expected: false },
-    { name: 'CPA just above 3× target', metrics: { impressions: 600, spend: 1500.01, conversions: 1 }, expected: true },
-    { name: 'zero conversions with spend', metrics: { impressions: 600, spend: 900, conversions: 0 }, expected: true },
-    { name: 'zero conversions and zero spend', metrics: { impressions: 600, spend: 0, conversions: 0 }, expected: false },
-    { name: 'zero impressions', metrics: { impressions: 0, clicks: 0, spend: 900, conversions: 0 }, expected: false },
-    { name: 'zero clicks but heavy impressions', metrics: { impressions: 900, clicks: 0, spend: 0, conversions: 0 }, expected: false },
-    { name: 'missing targetCpa', metrics: { impressions: 900, spend: 9000, conversions: 0 }, targetCpa: null, expected: false },
-    { name: 'zero targetCpa', metrics: { impressions: 900, spend: 9000, conversions: 0 }, targetCpa: 0, expected: false },
+    {
+      name: 'impressions just below the threshold',
+      metrics: { impressions: 499, spend: 2000 },
+      expected: false,
+    },
+    {
+      name: 'impressions exactly at the threshold',
+      metrics: { impressions: 500, spend: 2000 },
+      expected: false,
+    },
+    {
+      name: 'impressions just above the threshold',
+      metrics: { impressions: 501, spend: 2000 },
+      expected: true,
+    },
+    {
+      name: 'CPA just below 3× target',
+      metrics: { impressions: 600, spend: 1499, conversions: 1 },
+      expected: false,
+    },
+    {
+      name: 'CPA exactly 3× target',
+      metrics: { impressions: 600, spend: 1500, conversions: 1 },
+      expected: false,
+    },
+    {
+      name: 'CPA just above 3× target',
+      metrics: { impressions: 600, spend: 1500.01, conversions: 1 },
+      expected: true,
+    },
+    {
+      name: 'zero conversions with spend',
+      metrics: { impressions: 600, spend: 900, conversions: 0 },
+      expected: true,
+    },
+    {
+      name: 'zero conversions and zero spend',
+      metrics: { impressions: 600, spend: 0, conversions: 0 },
+      expected: false,
+    },
+    {
+      name: 'zero impressions',
+      metrics: { impressions: 0, clicks: 0, spend: 900, conversions: 0 },
+      expected: false,
+    },
+    {
+      name: 'zero clicks but heavy impressions',
+      metrics: { impressions: 900, clicks: 0, spend: 0, conversions: 0 },
+      expected: false,
+    },
+    {
+      name: 'missing targetCpa',
+      metrics: { impressions: 900, spend: 9000, conversions: 0 },
+      targetCpa: null,
+      expected: false,
+    },
+    {
+      name: 'zero targetCpa',
+      metrics: { impressions: 900, spend: 9000, conversions: 0 },
+      targetCpa: 0,
+      expected: false,
+    },
   ];
 
   it.each(cases)('$name → $expected', ({ metrics, targetCpa, expected }) => {
@@ -120,7 +162,15 @@ describe('pauseHighCpaEntities (impressions > 500 AND CPA > 3× target)', () => 
 
   it('pauses ads as well as keywords', () => {
     const decisions = pauseHighCpaEntities(
-      input([entity({ entityType: 'AD', entityId: 'ad-1', impressions: 600, spend: 5000, conversions: 0 })]),
+      input([
+        entity({
+          entityType: 'AD',
+          entityId: 'ad-1',
+          impressions: 600,
+          spend: 5000,
+          conversions: 0,
+        }),
+      ]),
       targets(),
     );
     expect(decisions[0]?.entityType).toBe('AD');
@@ -172,20 +222,77 @@ describe('decreaseBidOnHighCpa (impressions > 200 AND CPA > 1.5× target)', () =
     targetCpa?: number | null;
     expected: boolean;
   }> = [
-    { name: 'impressions just below the threshold', metrics: { impressions: 199, spend: 1000, conversions: 1 }, expected: false },
-    { name: 'impressions exactly at the threshold', metrics: { impressions: 200, spend: 1000, conversions: 1 }, expected: false },
-    { name: 'impressions just above the threshold', metrics: { impressions: 201, spend: 1000, conversions: 1 }, expected: true },
-    { name: 'CPA just below 1.5× target', metrics: { impressions: 300, spend: 749, conversions: 1 }, expected: false },
-    { name: 'CPA exactly 1.5× target', metrics: { impressions: 300, spend: 750, conversions: 1 }, expected: false },
-    { name: 'CPA just above 1.5× target', metrics: { impressions: 300, spend: 750.01, conversions: 1 }, expected: true },
-    { name: 'zero conversions with spend', metrics: { impressions: 300, spend: 400, conversions: 0 }, expected: true },
-    { name: 'zero conversions and zero spend', metrics: { impressions: 300, spend: 0, conversions: 0 }, expected: false },
-    { name: 'zero clicks', metrics: { impressions: 300, clicks: 0, spend: 0, conversions: 0 }, expected: false },
-    { name: 'missing bid', metrics: { impressions: 300, spend: 1000, conversions: 1, currentBid: null }, expected: false },
-    { name: 'zero bid', metrics: { impressions: 300, spend: 1000, conversions: 1, currentBid: 0 }, expected: false },
-    { name: 'bid too small to move by 15%', metrics: { impressions: 300, spend: 1000, conversions: 1, currentBid: 0.01 }, expected: false },
-    { name: 'non-keyword entity', metrics: { entityType: 'AD', impressions: 300, spend: 1000, conversions: 1 }, expected: false },
-    { name: 'missing targetCpa', metrics: { impressions: 300, spend: 1000, conversions: 1 }, targetCpa: null, expected: false },
+    {
+      name: 'impressions just below the threshold',
+      metrics: { impressions: 199, spend: 1000, conversions: 1 },
+      expected: false,
+    },
+    {
+      name: 'impressions exactly at the threshold',
+      metrics: { impressions: 200, spend: 1000, conversions: 1 },
+      expected: false,
+    },
+    {
+      name: 'impressions just above the threshold',
+      metrics: { impressions: 201, spend: 1000, conversions: 1 },
+      expected: true,
+    },
+    {
+      name: 'CPA just below 1.5× target',
+      metrics: { impressions: 300, spend: 749, conversions: 1 },
+      expected: false,
+    },
+    {
+      name: 'CPA exactly 1.5× target',
+      metrics: { impressions: 300, spend: 750, conversions: 1 },
+      expected: false,
+    },
+    {
+      name: 'CPA just above 1.5× target',
+      metrics: { impressions: 300, spend: 750.01, conversions: 1 },
+      expected: true,
+    },
+    {
+      name: 'zero conversions with spend',
+      metrics: { impressions: 300, spend: 400, conversions: 0 },
+      expected: true,
+    },
+    {
+      name: 'zero conversions and zero spend',
+      metrics: { impressions: 300, spend: 0, conversions: 0 },
+      expected: false,
+    },
+    {
+      name: 'zero clicks',
+      metrics: { impressions: 300, clicks: 0, spend: 0, conversions: 0 },
+      expected: false,
+    },
+    {
+      name: 'missing bid',
+      metrics: { impressions: 300, spend: 1000, conversions: 1, currentBid: null },
+      expected: false,
+    },
+    {
+      name: 'zero bid',
+      metrics: { impressions: 300, spend: 1000, conversions: 1, currentBid: 0 },
+      expected: false,
+    },
+    {
+      name: 'bid too small to move by 15%',
+      metrics: { impressions: 300, spend: 1000, conversions: 1, currentBid: 0.01 },
+      expected: false,
+    },
+    {
+      name: 'non-keyword entity',
+      metrics: { entityType: 'AD', impressions: 300, spend: 1000, conversions: 1 },
+      expected: false,
+    },
+    {
+      name: 'missing targetCpa',
+      metrics: { impressions: 300, spend: 1000, conversions: 1 },
+      targetCpa: null,
+      expected: false,
+    },
   ];
 
   it.each(cases)('$name → $expected', ({ metrics, targetCpa, expected }) => {
@@ -218,18 +325,73 @@ describe('increaseBidOnLowCpa (CPA < 0.7× target AND daily spend < 50% of budge
     target: Partial<OptimizationTargets>;
     expected: boolean;
   }> = [
-    { name: 'CPA just below 0.7× target', metrics: { spend: 349, conversions: 1 }, target: {}, expected: true },
-    { name: 'CPA exactly 0.7× target', metrics: { spend: 350, conversions: 1 }, target: {}, expected: false },
-    { name: 'CPA just above 0.7× target', metrics: { spend: 351, conversions: 1 }, target: {}, expected: false },
-    { name: 'daily spend just below half the budget', metrics: { spend: 100, conversions: 1 }, target: { dailySpend: 2499.99 }, expected: true },
-    { name: 'daily spend exactly half the budget', metrics: { spend: 100, conversions: 1 }, target: { dailySpend: 2500 }, expected: false },
-    { name: 'daily spend just above half the budget', metrics: { spend: 100, conversions: 1 }, target: { dailySpend: 2500.01 }, expected: false },
-    { name: 'zero conversions with spend', metrics: { spend: 100, conversions: 0 }, target: {}, expected: false },
-    { name: 'zero conversions and zero spend', metrics: { spend: 0, conversions: 0 }, target: {}, expected: false },
+    {
+      name: 'CPA just below 0.7× target',
+      metrics: { spend: 349, conversions: 1 },
+      target: {},
+      expected: true,
+    },
+    {
+      name: 'CPA exactly 0.7× target',
+      metrics: { spend: 350, conversions: 1 },
+      target: {},
+      expected: false,
+    },
+    {
+      name: 'CPA just above 0.7× target',
+      metrics: { spend: 351, conversions: 1 },
+      target: {},
+      expected: false,
+    },
+    {
+      name: 'daily spend just below half the budget',
+      metrics: { spend: 100, conversions: 1 },
+      target: { dailySpend: 2499.99 },
+      expected: true,
+    },
+    {
+      name: 'daily spend exactly half the budget',
+      metrics: { spend: 100, conversions: 1 },
+      target: { dailySpend: 2500 },
+      expected: false,
+    },
+    {
+      name: 'daily spend just above half the budget',
+      metrics: { spend: 100, conversions: 1 },
+      target: { dailySpend: 2500.01 },
+      expected: false,
+    },
+    {
+      name: 'zero conversions with spend',
+      metrics: { spend: 100, conversions: 0 },
+      target: {},
+      expected: false,
+    },
+    {
+      name: 'zero conversions and zero spend',
+      metrics: { spend: 0, conversions: 0 },
+      target: {},
+      expected: false,
+    },
     { name: 'free conversions', metrics: { spend: 0, conversions: 3 }, target: {}, expected: true },
-    { name: 'missing bid', metrics: { spend: 100, conversions: 1, currentBid: null }, target: {}, expected: false },
-    { name: 'missing targetCpa', metrics: { spend: 100, conversions: 1 }, target: { targetCpa: null }, expected: false },
-    { name: 'zero daily budget', metrics: { spend: 100, conversions: 1 }, target: { dailyBudget: 0, dailySpend: 0 }, expected: false },
+    {
+      name: 'missing bid',
+      metrics: { spend: 100, conversions: 1, currentBid: null },
+      target: {},
+      expected: false,
+    },
+    {
+      name: 'missing targetCpa',
+      metrics: { spend: 100, conversions: 1 },
+      target: { targetCpa: null },
+      expected: false,
+    },
+    {
+      name: 'zero daily budget',
+      metrics: { spend: 100, conversions: 1 },
+      target: { dailyBudget: 0, dailySpend: 0 },
+      expected: false,
+    },
   ];
 
   it.each(cases)('$name → $expected', ({ metrics, target, expected }) => {
@@ -258,9 +420,21 @@ describe('addNegativeKeywords (CTR < 0.5% AND clicks > 5)', () => {
     metrics: Partial<SearchQueryMetrics>;
     expected: boolean;
   }> = [
-    { name: 'clicks just below the threshold', metrics: { clicks: 4, impressions: 5000 }, expected: false },
-    { name: 'clicks exactly at the threshold', metrics: { clicks: 5, impressions: 5000 }, expected: false },
-    { name: 'clicks just above the threshold', metrics: { clicks: 6, impressions: 5000 }, expected: true },
+    {
+      name: 'clicks just below the threshold',
+      metrics: { clicks: 4, impressions: 5000 },
+      expected: false,
+    },
+    {
+      name: 'clicks exactly at the threshold',
+      metrics: { clicks: 5, impressions: 5000 },
+      expected: false,
+    },
+    {
+      name: 'clicks just above the threshold',
+      metrics: { clicks: 6, impressions: 5000 },
+      expected: true,
+    },
     { name: 'CTR just below 0.5%', metrics: { clicks: 6, impressions: 1201 }, expected: true },
     { name: 'CTR exactly 0.5%', metrics: { clicks: 6, impressions: 1200 }, expected: false },
     { name: 'CTR just above 0.5%', metrics: { clicks: 6, impressions: 1199 }, expected: false },
@@ -279,7 +453,10 @@ describe('addNegativeKeywords (CTR < 0.5% AND clicks > 5)', () => {
   });
 
   it('targets the ad group and carries the phrase', () => {
-    const [decision] = addNegativeKeywords(input([], [query({ impressions: 2000, clicks: 6 })]), targets());
+    const [decision] = addNegativeKeywords(
+      input([], [query({ impressions: 2000, clicks: 6 })]),
+      targets(),
+    );
     expect(decision).toMatchObject({
       action: 'ADD_NEGATIVE_KEYWORD',
       entityType: 'ADGROUP',

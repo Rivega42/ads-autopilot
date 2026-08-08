@@ -6,7 +6,7 @@ import { scoped } from '@/lib/logger.js';
 import { buildApprovalKeyboard, renderApprovalCard } from '@/approval/card.js';
 import { matchApprovalRule } from '@/approval/policy.js';
 import { getMessenger } from '@/approval/telegram.js';
-import { parseAction, toJson, type ApprovalAction } from '@/approval/types.js';
+import { buildApprovalPayload, parseAction, type ApprovalAction } from '@/approval/types.js';
 
 const log = scoped('approval:create');
 
@@ -15,8 +15,24 @@ export interface CreateApprovalOptions {
   chatId?: string;
   /** Точка отсчёта TTL; параметр существует ради детерминированных тестов. */
   now?: Date;
-  /** Отражается в карточке: клиент должен понимать, что нажатие ничего не открутит. */
+  /**
+   * Только усиливает защиту: true включает dry-run для этой заявки, даже если
+   * настройки его не требуют. Выключить dry-run через опцию нельзя — иначе карточка
+   * пообещала бы человеку реальное изменение, которого настройки не допускают.
+   */
   dryRun?: boolean;
+}
+
+/**
+ * Эффективный dry-run заявки.
+ *
+ * Формула обязана совпадать с `buildContext` (src/channels/registry.ts): именно её
+ * результат решает, уйдёт ли запись в кабинет. Считаем один раз здесь и кладём в
+ * payload, потому что между карточкой и применением проходит до APPROVAL_TTL_MINUTES,
+ * и флаги за это время могут измениться — а человек соглашался на текст карточки.
+ */
+function effectiveDryRun(clientDryRun: boolean, opt: boolean | undefined): boolean {
+  return env.DRY_RUN || clientDryRun || opt === true;
 }
 
 /**
@@ -36,7 +52,7 @@ export async function createApproval(
 
   const client = await prisma.client.findUnique({
     where: { id: action.clientId },
-    select: { name: true, approvalChatId: true },
+    select: { name: true, approvalChatId: true, dryRun: true },
   });
   if (!client) {
     throw new AppError(`Client ${action.clientId} not found`, {
@@ -46,34 +62,29 @@ export async function createApproval(
   }
 
   const chatId = opts.chatId ?? client.approvalChatId;
+  const dryRun = effectiveDryRun(client.dryRun, opts.dryRun);
   const summary = renderApprovalCard({
     action,
     clientName: client.name,
     expiresAt,
-    dryRun: opts.dryRun ?? false,
+    dryRun,
   });
 
   const approval = await prisma.pendingApproval.create({
     data: {
       clientId: action.clientId,
       action: action.kind,
-      payload: toJson(action),
+      // Вместе с действием сохраняем режим: применять будем ровно то, что обещала карточка.
+      payload: buildApprovalPayload(action, { dryRun }),
       summary,
       chatId,
       expiresAt,
     },
   });
 
+  let sent;
   try {
-    const sent = await getMessenger().sendMessage(
-      chatId,
-      summary,
-      buildApprovalKeyboard(approval.id),
-    );
-    return await prisma.pendingApproval.update({
-      where: { id: approval.id },
-      data: { messageId: String(sent.messageId) },
-    });
+    sent = await getMessenger().sendMessage(chatId, summary, buildApprovalKeyboard(approval.id));
   } catch (err) {
     // Не пробрасываем: оптимизатор уже сделал свою работу, а недоставленная
     // карточка — проблема доставки. Она видна в `error` и в логе, заявка истечёт сама.
@@ -84,6 +95,29 @@ export async function createApproval(
       data: { error: message },
     });
   }
+
+  // Дальше карточка с рабочими кнопками уже висит в чате. Отсюда нельзя ни бросить
+  // исключение (вызывающий отправит вторую карточку на то же изменение), ни потерять
+  // messageId (без него итог не допишется в карточку).
+  const messageId = String(sent.messageId);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      return await prisma.pendingApproval.update({
+        where: { id: approval.id },
+        data: { messageId, error: null },
+      });
+    } catch (err) {
+      log.error(
+        { approvalId: approval.id, messageId, attempt, err: describeError(err) },
+        'cannot persist approval messageId',
+      );
+    }
+  }
+
+  // БД не приняла messageId: заявка жива и нажимается, правка карточки по итогу
+  // не сработает. Возвращаем строку с messageId в памяти, чтобы вызывающий не
+  // считал создание неудачным и не задублировал карточку.
+  return { ...approval, messageId };
 }
 
 /**

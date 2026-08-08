@@ -36,10 +36,7 @@ export interface ApplyDb {
   changeLog: {
     create(args: { data: ChangeLogCreateData }): Promise<ChangeLogRecord>;
     findUnique(args: { where: { id: string } }): Promise<ChangeLogRecord | null>;
-    update(args: {
-      where: { id: string };
-      data: { rolledBackAt: Date };
-    }): Promise<ChangeLogRecord>;
+    update(args: { where: { id: string }; data: { rolledBackAt: Date } }): Promise<ChangeLogRecord>;
   };
 }
 
@@ -144,10 +141,7 @@ export function idempotencyKeyFor(runId: string, decision: Decision): string {
  * Decisions still carrying `requiresApproval` are never applied here — the approval module
  * re-submits them once a human has confirmed.
  */
-export async function applyDecisions(
-  deps: ApplyDeps,
-  params: ApplyParams,
-): Promise<ApplyReport> {
+export async function applyDecisions(deps: ApplyDeps, params: ApplyParams): Promise<ApplyReport> {
   const report: ApplyReport = {
     runId: params.runId,
     campaignId: params.campaignId,
@@ -229,11 +223,7 @@ export async function applyDecisions(
 }
 
 export type RollbackStatus =
-  | 'rolled_back'
-  | 'already_rolled_back'
-  | 'not_found'
-  | 'unsupported'
-  | 'failed';
+  'rolled_back' | 'already_rolled_back' | 'not_found' | 'unsupported' | 'failed';
 
 export interface RollbackResult {
   status: RollbackStatus;
@@ -300,9 +290,7 @@ export function parseDecisionValue(value: unknown): DecisionValue | null {
 
   if (kind === 'bid' || kind === 'budget') {
     const amount = record['amount'];
-    return typeof amount === 'number' && Number.isFinite(amount)
-      ? { kind, amount }
-      : null;
+    return typeof amount === 'number' && Number.isFinite(amount) ? { kind, amount } : null;
   }
   if (kind === 'status') {
     const status = record['status'];

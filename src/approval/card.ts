@@ -109,7 +109,18 @@ export function buildApprovalKeyboard(approvalId: string): InlineKeyboardMarkup 
 }
 
 export type CardOutcome =
-  | { kind: 'applied'; by: string; dryRun: boolean }
+  | {
+      kind: 'applied';
+      by: string;
+      dryRun: boolean;
+      /** Площадке нечего было менять: запись не выполнялась, но и dry-run тут ни при чём. */
+      noop?: boolean;
+      /**
+       * Изменение выполнено, но что-то рядом пошло не так (журнал, статус, расхождение
+       * режима). Человеку это показываем: «применено» без оговорки было бы неправдой.
+       */
+      warning?: string;
+    }
   | { kind: 'failed'; by: string; error: string }
   | { kind: 'rejected'; by: string }
   | { kind: 'expired' };
@@ -121,10 +132,14 @@ export type CardOutcome =
 export function renderOutcome(card: string, outcome: CardOutcome): string {
   const footer = (() => {
     switch (outcome.kind) {
-      case 'applied':
-        return outcome.dryRun
+      case 'applied': {
+        const head = outcome.dryRun
           ? `✅ Одобрено (${outcome.by}). Dry-run: в кабинет ничего не отправлено, изменение записано в журнал.`
-          : `✅ Одобрено (${outcome.by}) и применено.`;
+          : outcome.noop
+            ? `✅ Одобрено (${outcome.by}). Площадка сообщила, что менять нечего — в кабинете ничего не изменилось.`
+            : `✅ Одобрено (${outcome.by}) и применено.`;
+        return outcome.warning ? `${head}\n⚠️ ${outcome.warning}` : head;
+      }
       case 'failed':
         return `⚠️ Одобрено (${outcome.by}), но применить не удалось: ${outcome.error}`;
       case 'rejected':

@@ -47,6 +47,16 @@ export const VK_STATUS_ACTIVE = 'active';
 export const VK_STATUS_BLOCKED = 'blocked';
 export const VK_STATUS_DELETED = 'deleted';
 
+/**
+ * Фильтр по умолчанию: всё, кроме удалённого. Без него удалённые сущности едят
+ * бюджет батча в 200 объектов и тянут за собой пустую статистику.
+ *
+ * @needs-live-token: словарь статусов подтверждён только для active/blocked/deleted.
+ * Если у ads.vk.ru есть другие значения, перечисление их скроет — тогда заменить
+ * на исключающий фильтр (`_status__ne=deleted`), если площадка его поддерживает.
+ */
+export const VK_DEFAULT_STATUSES: readonly string[] = [VK_STATUS_ACTIVE, VK_STATUS_BLOCKED];
+
 export function chunk<T>(items: readonly T[], size: number = VK_BATCH_LIMIT): T[][] {
   if (size <= 0) throw new RangeError('chunk size must be positive');
   const out: T[][] = [];
@@ -57,7 +67,11 @@ export function chunk<T>(items: readonly T[], size: number = VK_BATCH_LIMIT): T[
 export interface VkListOptions {
   /** Если задано — тянем только эти объекты, батчами по 200. */
   ids?: readonly string[];
-  /** Значения для фильтра `_status__in`. По умолчанию — всё, кроме удалённого. */
+  /**
+   * Значения для фильтра `_status__in`. По умолчанию — всё, кроме удалённого
+   * (`VK_DEFAULT_STATUSES`). Пустой массив — явный отказ от фильтра, то есть
+   * «включая удалённые».
+   */
   statuses?: readonly string[];
   /** Список полей; VK по умолчанию отдаёт урезанный набор. */
   fields?: readonly string[];
@@ -95,7 +109,8 @@ export async function listEntities<T extends z.ZodTypeAny>(
 ): Promise<Array<z.infer<T>>> {
   const base: Record<string, unknown> = { ...opts.filters };
   if (opts.fields?.length) base['fields'] = opts.fields.join(',');
-  if (opts.statuses?.length) base['_status__in'] = opts.statuses.join(',');
+  const statuses = opts.statuses ?? VK_DEFAULT_STATUSES;
+  if (statuses.length) base['_status__in'] = statuses.join(',');
 
   if (opts.ids) {
     const unique = [...new Set(opts.ids)];
