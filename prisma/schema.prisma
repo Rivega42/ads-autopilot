@@ -92,6 +92,7 @@ enum ChangeActor {
 
 enum ApprovalKind {
   BUDGET_CHANGE
+  BID_CHANGE
   NEW_CAMPAIGN
   MASS_PAUSE
   STRATEGY_CHANGE
@@ -103,6 +104,9 @@ enum ApprovalDecision {
   APPROVED
   REJECTED
   EXPIRED
+  APPLYING
+  APPLIED
+  FAILED
 }
 
 // ============================================================================
@@ -123,6 +127,14 @@ model Client {
   credentials      Credential[]
   campaigns        Campaign[]
   pendingApprovals PendingApproval[]
+  brief            ClientBrief?
+  creatives        Creative[]
+  aiRuns           AiRun[]
+  reports          Report[]
+  competitors      CompetitorSnapshot[]
+  leads            Lead[]
+  keywordSets      KeywordSet[]
+  errors           ErrorLog[]
 
   @@index([status])
 }
@@ -180,9 +192,10 @@ model AdGroup {
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
-  campaign Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  ads      Ad[]
-  keywords Keyword[]
+  campaign      Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  ads           Ad[]
+  keywords      Keyword[]
+  searchQueries SearchQueryStat[]
 
   @@unique([campaignId, externalId])
   @@index([status])
@@ -200,10 +213,14 @@ model Ad {
   cta               String?
   moderationStatus  ModerationStatus @default(PENDING)
   moderationReason  String?
+  moderationRetries Int              @default(0)
+  llmVariant        String?
+  creativeId        String?
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
 
-  adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+  adGroup  AdGroup   @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+  creative Creative? @relation(fields: [creativeId], references: [id], onDelete: SetNull)
 
   @@unique([adGroupId, externalId])
   @@index([moderationStatus])
@@ -268,10 +285,19 @@ model PendingApproval {
   clientId     String
   kind         ApprovalKind
   payload      Json
+  /// Текст карточки в Telegram — то, на основании чего человек принял решение.
+  /// Хранится отдельно от payload, чтобы потом было видно, что именно ему показали.
+  summary      String?
+  /// Чат, куда ушла карточка. Сверяется при нажатии: пересланная карточка
+  /// не должна давать право одобрять чужую трату.
+  chatId       String?
   tgMessageId  BigInt?
   expiresAt    DateTime
   decision     ApprovalDecision @default(PENDING)
   decidedAt    DateTime?
+  respondedBy  String?
+  /// Ошибка применения при decision = FAILED.
+  error        String?
   createdAt    DateTime         @default(now())
 
   client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
@@ -292,4 +318,222 @@ model AuditLog {
 
   @@index([actor, createdAt])
   @@index([resource, createdAt])
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum BriefStatus {
+  IN_PROGRESS
+  COMPLETE
+}
+
+enum CreativeKind {
+  TEXT
+  IMAGE
+  VIDEO
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  ESCALATED
+  LOST
+}
+
+enum ReportKind {
+  DAILY
+  WEEKLY
+}
+
+// ============================================================================
+// AI-слой
+// ============================================================================
+
+/// Результат AI-онбординга (TZ § 13.1). Источник правды для стратега и креативов.
+model ClientBrief {
+  id          String      @id @default(cuid())
+  clientId    String      @unique
+  status      BriefStatus @default(IN_PROGRESS)
+  data        Json
+  transcript  Json?
+  completedAt DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+}
+
+/// Журнал вызовов LLM: стоимость, латентность, воспроизводимость решений.
+model AiRun {
+  id        BigInt   @id @default(autoincrement())
+  clientId  String?
+  agent     String
+  model     String
+  input     Json
+  output    Json?
+  tokensIn  Int?
+  tokensOut Int?
+  costUsd   Decimal? @db.Decimal(12, 6)
+  latencyMs Int?
+  error     String?
+  createdAt DateTime @default(now())
+
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, agent, createdAt])
+  @@index([createdAt])
+}
+
+model Creative {
+  id        String       @id @default(cuid())
+  clientId  String
+  kind      CreativeKind
+  provider  String
+  prompt    String
+  payload   Json
+  costUsd   Decimal?     @db.Decimal(12, 6)
+  createdAt DateTime     @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  ads    Ad[]
+
+  @@index([clientId, kind, createdAt])
+}
+
+model Report {
+  id         String     @id @default(cuid())
+  clientId   String
+  kind       ReportKind
+  periodFrom DateTime   @db.Date
+  periodTo   DateTime   @db.Date
+  body       String
+  metrics    Json       @default("{}")
+  sentAt     DateTime?
+  createdAt  DateTime   @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, kind, periodFrom, periodTo])
+}
+
+/// Еженедельный срез по конкурентам (TZ § 13.7).
+model CompetitorSnapshot {
+  id        String    @id @default(cuid())
+  clientId  String
+  provider  Provider?
+  domain    String
+  data      Json
+  createdAt DateTime  @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, createdAt])
+}
+
+/// Лиды из лид-форм для AI-Follow-up (TZ § 13.9).
+model Lead {
+  id         String     @id @default(cuid())
+  clientId   String
+  provider   Provider
+  externalId String?
+  contact    Json
+  status     LeadStatus @default(NEW)
+  transcript Json       @default("[]")
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, status])
+}
+
+// ============================================================================
+// Семантика
+// ============================================================================
+
+model KeywordSet {
+  id        String   @id @default(cuid())
+  clientId  String
+  seed      String
+  phrases   Json
+  negatives Json     @default("[]")
+  createdAt DateTime @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, createdAt])
+}
+
+/// Поисковые запросы — сырьё для минус-слов (TZ § 3.4, задача wordstat-mine).
+/// Ключ по adGroupId, а не по кампании: правило 4 оптимизатора вешает
+/// минус-слово именно на группу, и агрегат по кампании потерял бы адрес.
+/// Сами минус-слова хранятся в Keyword с matchType: NEGATIVE.
+model SearchQueryStat {
+  id          BigInt   @id @default(autoincrement())
+  adGroupId   String
+  date        DateTime @db.Date
+  query       String
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  spend       Decimal  @default(0) @db.Decimal(14, 4)
+  conversions Int      @default(0)
+  negated     Boolean  @default(false)
+
+  adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([adGroupId, date, query])
+  @@index([adGroupId, negated])
+}
+
+// ============================================================================
+// Надёжность
+// ============================================================================
+
+model ErrorLog {
+  id        BigInt    @id @default(autoincrement())
+  clientId  String?
+  provider  Provider?
+  scope     String
+  code      String?
+  message   String
+  context   Json      @default("{}")
+  createdAt DateTime  @default(now())
+
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([provider, code, createdAt])
+}
+
+/// Защита от двойного применения при ретраях (TZ § 7).
+/// Форма согласована с src/optimizer/apply.ts: reserve = create, P2002
+/// трактуется как 'duplicate'; release = delete. Ключ детерминированный,
+/// вида opt:<campaignId>:<YYYY-MM-DD>:<entityType>:<entityId>:<action>[:phrase],
+/// поэтому повторный прогон в тот же день схлопывается.
+model IdempotencyKey {
+  key         String   @id
+  scope       String
+  entityType  String
+  entityId    String
+  changeLogId String?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+/// Учёт баллов Яндекс Директа (TZ § 2.1) — чтобы не ловить error_code 52.
+model UnitsLedger {
+  id         BigInt   @id @default(autoincrement())
+  clientId   String
+  method     String
+  spent      Int
+  remaining  Int
+  dailyLimit Int
+  createdAt  DateTime @default(now())
+
+  @@index([clientId, createdAt])
 }
