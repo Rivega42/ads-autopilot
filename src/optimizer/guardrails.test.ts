@@ -355,6 +355,11 @@ describe('property: no rule output escapes the guardrails', () => {
         settings,
       );
 
+      seen.proposed += decisions.length;
+      seen.allowed += outcome.allowed.length;
+      seen.clamped += outcome.clamped.length;
+      seen.rejected += outcome.rejected.length;
+
       const ceiling = scenario.targets.dailyBudget * settings.budgetCeilingRatio;
       const touched = new Set(outcome.allowed.map((allowed) => allowed.entityId));
 
@@ -380,5 +385,11 @@ describe('property: no rule output escapes the guardrails', () => {
         }
       }
     }
+
+    // Guards against a vacuous property: the invariants above must have been exercised by real
+    // decisions of every outcome class, not by empty batches.
+    expect(seen.proposed).toBeGreaterThan(100);
+    expect(seen.allowed).toBeGreaterThan(0);
+    expect(seen.rejected).toBeGreaterThan(0);
   });
 });
