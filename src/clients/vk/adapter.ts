@@ -26,10 +26,12 @@ import {
   deleteEntity,
   createEntity,
   massUpdateEntities,
+  toVkMoney,
   VK_BATCH_LIMIT,
   VK_PATHS,
   VK_STATUS_ACTIVE,
   VK_STATUS_BLOCKED,
+  type VkMassUpdateOutcome,
 } from '@/clients/vk/entities.js';
 import {
   vkListSchema,
@@ -61,10 +63,20 @@ const TEXTBLOCK_TITLE = 'title_25';
 const TEXTBLOCK_TITLE2 = 'title_2';
 const TEXTBLOCK_TEXT = 'text_90';
 
-/** Точка внедрения фейкового транспорта в тестах; в проде всегда пусто. */
+/**
+ * Точка внедрения фейкового транспорта в тестах; в проде всегда пусто.
+ * Подменяется именно транспорт, а не фабрика клиента: кеширование клиента по
+ * кабинету — часть поведения адаптера, и тест не должен его подменять.
+ */
 export interface VkAdapterOptions {
-  httpFactory?: (ctx: ChannelContext) => VkHttpClient;
+  http?: Partial<VkHttpDeps>;
 }
+
+/**
+ * Сколько кабинетов держим одновременно. Клиент хранит очередь и снимок лимитов,
+ * так что это не кеш ради скорости, а место, где вообще живёт состояние троттлинга.
+ */
+const CLIENT_CACHE_LIMIT = 64;
 
 function dry(plan: Record<string, unknown>): WriteResult {
   return { applied: false, plan };
@@ -73,14 +85,32 @@ function dry(plan: Record<string, unknown>): WriteResult {
 export class VkAdsAdapter implements ChannelAdapter {
   readonly channel: Channel = VK_CHANNEL;
 
-  private readonly httpFactory: (ctx: ChannelContext) => VkHttpClient;
+  private readonly overrides: Partial<VkHttpDeps>;
+  private readonly clients = new Map<string, VkHttpClient>();
 
   constructor(opts: VkAdapterOptions = {}) {
-    this.httpFactory = opts.httpFactory ?? ((ctx) => createVkHttpClient(ctx));
+    this.overrides = opts.http ?? {};
   }
 
+  /**
+   * Один клиент на кабинет — иначе `Promise.all([listCampaigns, listAdGroups,
+   * listAds])` поднимает три независимых очереди с пустым governor: тройной RPS
+   * без всякого спейсинга, то есть гарантированный 429 на первом же синке.
+   */
   private http(ctx: ChannelContext): VkHttpClient {
-    return this.httpFactory(ctx);
+    const key = cabinetKey(ctx);
+    const cached = this.clients.get(key);
+    if (cached) return cached;
+
+    const client = createVkHttpClient(ctx, this.overrides);
+    // Ключ включает реквизиты: после переподключения кабинета клиент с прежним
+    // ctx ходил бы со старыми client_id/секретом.
+    if (this.clients.size >= CLIENT_CACHE_LIMIT) {
+      const oldest = this.clients.keys().next();
+      if (!oldest.done) this.clients.delete(oldest.value);
+    }
+    this.clients.set(key, client);
+    return client;
   }
 
   /**
