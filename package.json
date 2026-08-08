@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('src/ai/prompts','dist/ai/prompts',{recursive:true})\"",
     "start": "node dist/server.js",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -31,7 +31,8 @@
     "dev:worker": "tsx watch src/apps/worker.ts",
     "dev:bot": "tsx watch src/apps/bot.ts",
     "start:worker": "node dist/apps/worker.js",
-    "start:bot": "node dist/apps/bot.js"
+    "start:bot": "node dist/apps/bot.js",
+    "test:evals": "vitest run tests/ai-evals"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
