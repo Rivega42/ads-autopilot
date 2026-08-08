@@ -264,13 +264,6 @@ async function postTokenRequest(
   return deps.post(TOKEN_URL, body);
 }
 
-/**
- * Минтит новый access-токен.
- *
- * Порядок важен: сначала гасим известный нам старый токен, только потом просим
- * новый. «Попросить и посмотреть, что будет» — плохой план, потому что 6-й
- * токен не выдаётся вовсе, а не вытесняет самый старый.
- */
 export interface MintedVkToken {
   accessToken: string;
   refreshToken?: string;
@@ -279,6 +272,13 @@ export interface MintedVkToken {
   ttlMs: number;
 }
 
+/**
+ * Минтит новый access-токен.
+ *
+ * Порядок важен: сначала гасим известный нам старый токен, только потом просим
+ * новый. «Попросить и посмотреть, что будет» — плохой план, потому что 6-й
+ * токен не выдаётся вовсе, а не вытесняет самый старый.
+ */
 export async function mintVkToken(
   creds: VkCredentials,
   deps: VkAuthDeps = defaultVkAuthDeps,

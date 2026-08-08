@@ -332,8 +332,8 @@ export class VkAdsAdapter implements ChannelAdapter {
     const created = await createEntity(http, VK_PATHS.banners, payload);
     const createdId = readCreatedId(created);
     if (!createdId) {
-      // Без подтверждённого id замены удалять нечем подкреплённое: если схема
-      // ответа поехала, старый баннер снесён, а что создалось — неизвестно.
+      // Без подтверждённого id замены старый баннер не трогаем: если схема ответа
+      // поехала, мы снесём работающее объявление, не зная, что создалось взамен.
       throw new ChannelError(
         VK_CHANNEL,
         `VK banner create returned no id, keeping ${adExternalId} alive`,
