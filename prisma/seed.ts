@@ -9,7 +9,8 @@ if (!databaseUrl) throw new Error('DATABASE_URL is not set');
 const prisma = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl }) });
 
 async function main() {
-  const demoTgId = 357896330n;
+  // Реальный Telegram id в коде не хранится: репозиторий публичный.
+  const demoTgId = BigInt(process.env.SEED_ADMIN_TG_ID ?? '100000000');
 
   const client = await prisma.client.upsert({
     where: { tgUserId: demoTgId },

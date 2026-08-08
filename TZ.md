@@ -3,7 +3,7 @@
 **Заказчик:** Роман Гудков (@Rivega42)
 **Исполнитель:** Claude (Sonnet/Opus 4.7)
 **Дата:** 2026-08-08
-**Целевая площадка запуска:** `/root/projects/ads-autopilot/`
+**Целевая площадка запуска:** каталог из `DEPLOY_PATH`
 **Основное применение:** GrandHub Private (multi-tenant), позже — внешние клиенты
 
 ---
@@ -554,7 +554,7 @@ enum Channel { YANDEX_DIRECT VK_ADS }
 - [ ] A/B-тестирование: 3 варианта → выбор лучшего по CTR
 
 ### Milestone 8 — Прод и мониторинг (день 15)
-- [ ] Docker образ + деплой на сервер 185.23.239.126
+- [ ] Docker образ + деплой на прод-сервер (хост — в `DEPLOY_HOST`)
 - [ ] Systemd unit / docker-compose
 - [ ] Nginx reverse-proxy для дашборда (auth через Cloudflare или basic)
 - [ ] Алерты в TG на 5xx, 401, out of units

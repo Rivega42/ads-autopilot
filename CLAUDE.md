@@ -16,7 +16,7 @@
 3. Прочти [`CHANGELOG.md`](./CHANGELOG.md) — что уже сделано
 4. Только потом — писать код
 
-Если после чтения ТЗ остались вопросы — **не додумывай, спроси у Романа** через `sessions_send` (chat_id: `357896330`).
+Если после чтения ТЗ остались вопросы — **не додумывай, спроси у Романа** через `sessions_send` (chat_id — в `TELEGRAM_ADMIN_CHAT_ID`).
 
 ---
 
@@ -310,7 +310,7 @@ logger.info({ campaignId, budgetBefore, budgetAfter }, 'Budget updated')
 
 ## 10. Работа с Романом
 
-- **chat_id для sessions_send:** `357896330`
+- **chat_id для sessions_send:** переменная `TELEGRAM_ADMIN_CHAT_ID`
 - **Timezone:** Europe/Moscow (UTC+3), не писать в 22:00-08:00 без крайней необходимости
 - **Стиль общения:** на «ты», без формальностей, без «уважаемый»
 - **Ответы:** краткие, по делу, с фактами и ссылками на файлы
@@ -394,7 +394,7 @@ docker compose down       # остановить
 docker compose logs -f    # логи
 
 # Деплой
-pnpm deploy               # деплой на прод (185.23.239.126)
+pnpm deploy               # деплой на прод (хост — в DEPLOY_HOST)
 ```
 
 ---
@@ -412,7 +412,7 @@ pnpm deploy               # деплой на прод (185.23.239.126)
 7. По ходу — обновляй `CHANGELOG.md` (секция Unreleased)
 8. По готовности — PR в `develop`
 
-При любых вопросах — `sessions_send` в чат Романа (357896330). Не додумывай, спрашивай.
+При любых вопросах — `sessions_send` в чат Романа (`TELEGRAM_ADMIN_CHAT_ID`). Не додумывай, спрашивай.
 
 ---
 
