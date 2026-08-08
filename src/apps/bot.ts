@@ -5,7 +5,7 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import { CALLBACK_PREFIX } from '@/approval/callback-data.js';
 import { handleApprovalCallback } from '@/approval/callbacks.js';
 import { createApiMessenger, setMessenger } from '@/approval/telegram.js';
-import { disconnectPrisma } from '@/db/prisma.js';
+import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
@@ -84,7 +84,7 @@ async function main(): Promise<void> {
     // применение уже одобренного изменения на полпути.
     if (runner.isRunning()) await runner.stop();
     setMessenger(null);
-    await disconnectPrisma();
+    await prisma.$disconnect();
   });
 }
 

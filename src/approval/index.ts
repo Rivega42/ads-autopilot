@@ -11,7 +11,7 @@ export {
   requestApprovalIfNeeded,
   type CreateApprovalOptions,
 } from '@/approval/create.js';
-export { applyApproval, APPLY_LEASE_PREFIX, type ApplyOutcome } from '@/approval/apply.js';
+export { applyApproval, type ApplyOutcome } from '@/approval/apply.js';
 export {
   handleApprovalCallback,
   processApprovalCallback,
@@ -35,6 +35,7 @@ export {
 } from '@/approval/policy.js';
 export {
   approvalActionSchema,
+  approvalKindOf,
   parseAction,
   buildApprovalPayload,
   readApprovalMeta,

@@ -4,7 +4,7 @@ import type { InlineKeyboardMarkup } from 'grammy/types';
 
 import { env } from '@/env.js';
 import { AppError } from '@/lib/errors.js';
-import { scoped } from '@/logger.js';
+import { logger } from '@/logger.js';
 
 /**
  * Тонкая прослойка над Telegram API.
@@ -14,7 +14,7 @@ import { scoped } from '@/logger.js';
  * нужна подмена без токена и без сети. Поэтому наружу торчат ровно четыре метода.
  */
 
-const log = scoped('approval:telegram');
+const log = logger.child({ scope: 'approval:telegram' });
 
 export interface SentMessage {
   messageId: number;
