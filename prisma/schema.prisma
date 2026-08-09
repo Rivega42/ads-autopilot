@@ -77,6 +77,16 @@ enum KeywordStatus {
   ARCHIVED
 }
 
+/// Чьи конверсии лежат в строке. Без явного признака колонка молча смешивала
+/// две модели атрибуции: Метрика перезаписывала только отчитанные ей пары, а
+/// остальные оставались директовскими, и CPA соседних кампаний становился
+/// несопоставимым.
+enum ConversionSource {
+  DIRECT
+  METRIKA
+  NONE
+}
+
 enum StatEntityType {
   CAMPAIGN
   ADGROUP
@@ -117,15 +127,20 @@ enum ApprovalDecision {
 // ============================================================================
 
 model Client {
-  id          String       @id @default(cuid())
-  tgUserId    BigInt       @unique
-  tgUsername  String?
-  name        String
-  status      ClientStatus @default(ACTIVE)
-  industry    String?
-  timezone    String       @default("Europe/Moscow")
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  id                 String       @id @default(cuid())
+  tgUserId           BigInt       @unique
+  tgUsername         String?
+  name               String
+  status             ClientStatus @default(ACTIVE)
+  industry           String?
+  timezone           String       @default("Europe/Moscow")
+  /// Счётчик и цель Метрики. Не секрет, поэтому лежат тут, а не в Credential:
+  /// их заполняет онбординг и читает загрузка статистики.
+  metrikaCounterId   Int?
+  metrikaGoalId      Int?
+  metrikaAttribution String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
 
   credentials      Credential[]
   campaigns        Campaign[]
@@ -161,21 +176,21 @@ model Credential {
 }
 
 model Campaign {
-  id             String         @id @default(cuid())
-  clientId       String
-  externalId     String
-  provider       Provider
-  name           String
-  status         CampaignStatus @default(DRAFT)
-  dailyBudget    Decimal        @db.Decimal(12, 2)
-  strategy       String?
-  targetCpa      Decimal?       @db.Decimal(12, 2)
-  handoverMode   HandoverMode   @default(FULL)
-  importedAt     DateTime?
-  importSource   String?
-  baselineData   Json?
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  id           String         @id @default(cuid())
+  clientId     String
+  externalId   String
+  provider     Provider
+  name         String
+  status       CampaignStatus @default(DRAFT)
+  dailyBudget  Decimal        @db.Decimal(12, 2)
+  strategy     String?
+  targetCpa    Decimal?       @db.Decimal(12, 2)
+  handoverMode HandoverMode   @default(FULL)
+  importedAt   DateTime?
+  importSource String?
+  baselineData Json?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
 
   client     Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
   adGroups   AdGroup[]
@@ -243,22 +258,27 @@ model Keyword {
   adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
 
   @@unique([adGroupId, externalId])
+  /// Делает upsert атомарным. matchType в ключе намеренно: одна и та же фраза
+  /// может быть и ключом, и минус-словом — это не дубликат.
+  @@unique([adGroupId, matchType, phrase])
   @@index([adGroupId, status])
 }
 
 model CampaignStat {
-  id          BigInt         @id @default(autoincrement())
-  entityType  StatEntityType
-  entityId    String
-  date        DateTime       @db.Date
-  impressions Int            @default(0)
-  clicks      Int            @default(0)
-  spend       Decimal        @default(0) @db.Decimal(14, 4)
-  conversions Int            @default(0)
-  ctr         Decimal?       @db.Decimal(6, 4)
-  cpc         Decimal?       @db.Decimal(12, 4)
-  cpa         Decimal?       @db.Decimal(12, 4)
-  createdAt   DateTime       @default(now())
+  id               BigInt           @id @default(autoincrement())
+  entityType       StatEntityType
+  entityId         String
+  date             DateTime         @db.Date
+  impressions      Int              @default(0)
+  clicks           Int              @default(0)
+  spend            Decimal          @default(0) @db.Decimal(14, 4)
+  conversions      Int              @default(0)
+  ctr              Decimal?         @db.Decimal(6, 4)
+  cpc              Decimal?         @db.Decimal(12, 4)
+  cpa              Decimal?         @db.Decimal(12, 4)
+  /// Из какой модели атрибуции взято `conversions`.
+  conversionSource ConversionSource @default(DIRECT)
+  createdAt        DateTime         @default(now())
 
   @@unique([entityType, entityId, date])
   @@index([entityId, date])
@@ -288,24 +308,24 @@ model ChangeLog {
 }
 
 model PendingApproval {
-  id           String           @id @default(cuid())
-  clientId     String
-  kind         ApprovalKind
-  payload      Json
+  id          String           @id @default(cuid())
+  clientId    String
+  kind        ApprovalKind
+  payload     Json
   /// Текст карточки в Telegram — то, на основании чего человек принял решение.
   /// Хранится отдельно от payload, чтобы потом было видно, что именно ему показали.
-  summary      String?
+  summary     String?
   /// Чат, куда ушла карточка. Сверяется при нажатии: пересланная карточка
   /// не должна давать право одобрять чужую трату.
-  chatId       String?
-  tgMessageId  BigInt?
-  expiresAt    DateTime
-  decision     ApprovalDecision @default(PENDING)
-  decidedAt    DateTime?
-  respondedBy  String?
+  chatId      String?
+  tgMessageId BigInt?
+  expiresAt   DateTime
+  decision    ApprovalDecision @default(PENDING)
+  decidedAt   DateTime?
+  respondedBy String?
   /// Ошибка применения при decision = FAILED.
-  error        String?
-  createdAt    DateTime         @default(now())
+  error       String?
+  createdAt   DateTime         @default(now())
 
   client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
