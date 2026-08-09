@@ -82,7 +82,10 @@ enum KeywordStatus {
 /// остальные оставались директовскими, и CPA соседних кампаний становился
 /// несопоставимым.
 enum ConversionSource {
-  DIRECT
+  /// Собственные конверсии рекламной площадки — Директа, VK, TikTok. Не «Яндекс
+  /// Директ»: значение пишется для всех каналов, и имя DIRECT читалось бы как
+  /// название площадки.
+  PLATFORM
   METRIKA
   NONE
 }
@@ -277,7 +280,7 @@ model CampaignStat {
   cpc              Decimal?         @db.Decimal(12, 4)
   cpa              Decimal?         @db.Decimal(12, 4)
   /// Из какой модели атрибуции взято `conversions`.
-  conversionSource ConversionSource @default(DIRECT)
+  conversionSource ConversionSource @default(PLATFORM)
   createdAt        DateTime         @default(now())
 
   @@unique([entityType, entityId, date])

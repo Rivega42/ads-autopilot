@@ -1,5 +1,10 @@
-import { StatEntityType, type Provider } from '@prisma/client';
+import { ConversionSource, StatEntityType, type Provider } from '@prisma/client';
 
+import {
+  emptyAttribution,
+  summarizeConversionSources,
+  type AttributionSummary,
+} from '@/ingestion/attribution.js';
 import type { ReporterDb } from '@/reporter/deps.js';
 import { formatDayShort } from '@/reporter/format.js';
 import { divideOrNull, pctChangeOrNull, toNumber } from '@/reporter/math.js';
@@ -76,6 +81,8 @@ export interface PeriodMetrics {
   /** По одной точке на каждый день периода, включая дни без открутки. */
   byDate: DailyPoint[];
   coverage: PeriodCoverage;
+  /** Чья модель атрибуции стоит за `conversions` этих строк. */
+  attribution: AttributionSummary;
 }
 
 export function emptyTotals(): MetricTotals {
@@ -128,6 +135,7 @@ export async function collectPeriodMetrics(
   const byCampaign = new Map<string, Accumulator>();
   const byDate = new Map<string, Accumulator>();
   const total = emptyAccumulator();
+  let attribution = emptyAttribution();
 
   if (campaigns.length > 0) {
     const stats = await db.campaignStat.findMany({
@@ -143,8 +151,11 @@ export async function collectPeriodMetrics(
         clicks: true,
         conversions: true,
         spend: true,
+        conversionSource: true,
       },
     });
+
+    attribution = summarizeConversionSources(stats);
 
     for (const row of stats) {
       const spend = toNumber(row.spend);
@@ -188,6 +199,7 @@ export async function collectPeriodMetrics(
       hasData: missingDays.length < days.length,
       partial: missingDays.length > 0,
     },
+    attribution,
   };
 }
 
@@ -206,6 +218,32 @@ export function coverageNote(coverage: PeriodCoverage): string | null {
   const rest = coverage.missingDays.length - listed.length;
   const dates = rest > 0 ? `${listed.join(', ')} и ещё ${rest}` : listed.join(', ');
   return `Данные неполные: за ${dates} статистики в базе нет — суммы ниже занижены.`;
+}
+
+/**
+ * Одна строка о том, чьи это конверсии.
+ *
+ * CPA, посчитанный по атрибуции кабинета, и CPA по целям Метрики — разные
+ * величины: у них разные окна атрибуции и разный набор целей. В самих цифрах это
+ * никак не видно, поэтому подпись обязательна, а при смешении — это уже не
+ * подпись, а предупреждение: складывать и сравнивать такие строки нельзя.
+ *
+ * `null` — говорить нечего: конверсий в периоде не измеряли вовсе.
+ */
+export function attributionNote(attribution: AttributionSummary): string | null {
+  if (attribution.mixed) {
+    return (
+      'В периоде смешаны две модели атрибуции: часть кампаний-дней посчитана по целям ' +
+      'Метрики, часть — по атрибуции рекламного кабинета. CPA между ними несопоставим.'
+    );
+  }
+  if (attribution.primary === ConversionSource.METRIKA) {
+    return 'Конверсии и CPA — по цели Метрики.';
+  }
+  if (attribution.primary === ConversionSource.PLATFORM) {
+    return 'Конверсии и CPA — по атрибуции рекламного кабинета, не по Метрике.';
+  }
+  return null;
 }
 
 function setAndGet(store: Map<string, Accumulator>, key: string): Accumulator {

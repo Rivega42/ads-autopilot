@@ -30,10 +30,18 @@ export {
   directCampaignId,
   readMetrikaSettings,
   syncMetrikaConversions,
+  type MetrikaClientConfig,
   type MetrikaSettings,
   type MetrikaSource,
   type MetrikaSyncResult,
 } from '@/ingestion/metrika.js';
+export {
+  auditConversionSources,
+  emptyAttribution,
+  platformConversionSource,
+  summarizeConversionSources,
+  type AttributionSummary,
+} from '@/ingestion/attribution.js';
 export { refreshExpiringTokens, type TokenRefreshResult } from '@/ingestion/tokens.js';
 export {
   listIngestionTargets,

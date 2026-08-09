@@ -1,6 +1,12 @@
-import { StatEntityType, type PrismaClient, type Provider } from '@prisma/client';
+import {
+  StatEntityType,
+  type ConversionSource,
+  type PrismaClient,
+  type Provider,
+} from '@prisma/client';
 
 import type { DateRange, StatLevel, StatRow } from '@/channels/types.js';
+import { platformConversionSource } from '@/ingestion/attribution.js';
 import type { IngestionDeps } from '@/ingestion/deps.js';
 import { resolveDeps } from '@/ingestion/deps.js';
 import { ratioOrNull, SPEND_SCALE, toDecimal } from '@/ingestion/mapping.js';
@@ -98,7 +104,8 @@ interface Accumulator {
   impressions: number;
   clicks: number;
   spend: number;
-  conversions: number;
+  /** `null` — площадка не дала ни одного пригодного числа по этой паре. */
+  conversions: number | null;
 }
 
 /**
@@ -159,12 +166,17 @@ function aggregate(
       impressions: 0,
       clicks: 0,
       spend: 0,
-      conversions: 0,
+      conversions: null,
     };
     acc.impressions += row.impressions;
     acc.clicks += row.clicks;
     acc.spend += row.spend;
-    acc.conversions += row.conversions;
+    // Тип обещает число, но приходит оно из разбора нетипизированного ответа
+    // площадки. NaN, записанный как конверсия, — это ноль, которого никто не
+    // измерял; такую строку честнее пометить «источника нет».
+    if (Number.isFinite(row.conversions)) {
+      acc.conversions = (acc.conversions ?? 0) + row.conversions;
+    }
     byKey.set(key, acc);
   }
 
@@ -202,23 +214,32 @@ async function writeLevel(
   return { fetched: rows.length, written: accumulators.length, unresolved };
 }
 
+/**
+ * `conversionSource` пишется в каждой записи, а не оставляется на умолчание
+ * колонки: следом по тем же строкам проходит Метрика со своей моделью, и
+ * перезалив окна обязан возвращать источник в «площадочный», иначе в базе
+ * останется вчерашняя пометка при сегодняшних цифрах.
+ */
 function statFields(acc: Accumulator): {
   impressions: number;
   clicks: number;
   spend: ReturnType<typeof toDecimal>;
   conversions: number;
+  conversionSource: ConversionSource;
   ctr: ReturnType<typeof ratioOrNull>;
   cpc: ReturnType<typeof ratioOrNull>;
   cpa: ReturnType<typeof ratioOrNull>;
 } {
+  const conversions = acc.conversions ?? 0;
   return {
     impressions: acc.impressions,
     clicks: acc.clicks,
     spend: toDecimal(acc.spend, SPEND_SCALE),
-    conversions: acc.conversions,
+    conversions,
+    conversionSource: platformConversionSource(acc.conversions),
     // CTR — доля, а не проценты: колонка Decimal(6,4), в процентах 100% не влезло бы.
     ctr: ratioOrNull(acc.clicks, acc.impressions, 4),
     cpc: ratioOrNull(acc.spend, acc.clicks, SPEND_SCALE),
-    cpa: ratioOrNull(acc.spend, acc.conversions, SPEND_SCALE),
+    cpa: ratioOrNull(acc.spend, conversions, SPEND_SCALE),
   };
 }

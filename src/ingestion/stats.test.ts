@@ -62,6 +62,46 @@ describe('syncStats', () => {
     expect(Number(row?.['ctr'])).toBeCloseTo(0.05, 4);
     expect(Number(row?.['cpc'])).toBeCloseTo(24.6914, 4);
     expect(Number(row?.['cpa'])).toBeCloseTo(246.9136, 4);
+    // Цифра пришла из отчёта кабинета — так и записана. Дальше по ней пройдёт
+    // Метрика со своей моделью, и различить их можно только по этой колонке.
+    expect(row?.['conversionSource']).toBe('PLATFORM');
+  });
+
+  it('возвращает источник в площадочный, перезаливая окно поверх Метрики', async () => {
+    // Строку уже перезаписала Метрика; сегодняшний перезалив кладёт в неё цифру
+    // Директа — пометка обязана поехать вместе с цифрой, иначе в базе окажется
+    // директовское значение под флагом Метрики.
+    db.seed('campaignStat', [
+      {
+        entityType: 'CAMPAIGN',
+        entityId: 'camp-internal',
+        date: new Date('2026-08-01T00:00:00.000Z'),
+        conversions: 2,
+        conversionSource: 'METRIKA',
+      },
+    ]);
+    const adapter = fakeAdapter('YANDEX_DIRECT', { stats: { campaign: [statRow()] } });
+
+    await syncStats(CLIENT, 'YANDEX_DIRECT', { ...deps(adapter), levels: ['campaign'] });
+
+    expect(db.store.campaignStat).toHaveLength(1);
+    expect(db.store.campaignStat[0]?.['conversions']).toBe(5);
+    expect(db.store.campaignStat[0]?.['conversionSource']).toBe('PLATFORM');
+  });
+
+  it('строку без пригодной цифры конверсий не выдаёт за измеренный ноль', async () => {
+    // Разбор ответа площадки может отдать NaN: типы это обещают числом, но
+    // приходит оно из нетипизированного JSON. Ноль под флагом «посчитано
+    // кабинетом» здесь означал бы «кампания не приносит заявок».
+    const adapter = fakeAdapter('YANDEX_DIRECT', {
+      stats: { campaign: [statRow({ conversions: Number.NaN })] },
+    });
+
+    await syncStats(CLIENT, 'YANDEX_DIRECT', { ...deps(adapter), levels: ['campaign'] });
+
+    expect(db.store.campaignStat[0]?.['conversions']).toBe(0);
+    expect(db.store.campaignStat[0]?.['conversionSource']).toBe('NONE');
+    expect(db.store.campaignStat[0]?.['cpa']).toBeNull();
   });
 
   it('по умолчанию перезаливает скользящее окно в 21 день, включая сегодня', async () => {

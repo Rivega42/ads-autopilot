@@ -1,4 +1,10 @@
-import { Prisma, type Provider, type ReportKind, type StatEntityType } from '@prisma/client';
+import {
+  ConversionSource,
+  Prisma,
+  type Provider,
+  type ReportKind,
+  type StatEntityType,
+} from '@prisma/client';
 
 import type { ReporterDb } from '@/reporter/deps.js';
 
@@ -38,6 +44,7 @@ export interface FakeStatRow {
   clicks: number;
   conversions: number;
   spend: Prisma.Decimal;
+  conversionSource: ConversionSource;
 }
 
 export interface FakeReportRow {
@@ -139,6 +146,8 @@ export class FakeDb {
     clicks?: number;
     impressions?: number;
     entityType?: StatEntityType;
+    /** Умолчание совпадает со схемой: строка без явного источника — площадочная. */
+    conversionSource?: ConversionSource;
   }): void {
     this.stats.push({
       entityType: (row.entityType ?? 'CAMPAIGN') as StatEntityType,
@@ -148,6 +157,7 @@ export class FakeDb {
       clicks: row.clicks ?? 0,
       conversions: row.conversions ?? 0,
       spend: new Prisma.Decimal((row.spend ?? 0).toFixed(4)),
+      conversionSource: row.conversionSource ?? ConversionSource.PLATFORM,
     });
   }
 

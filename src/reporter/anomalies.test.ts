@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { emptyAttribution } from '@/ingestion/attribution.js';
 import { detectAnomalies, detectSpendOutlier, DEFAULT_THRESHOLDS } from '@/reporter/anomalies.js';
 import {
   emptyCoverage,
@@ -63,6 +64,7 @@ function metrics(
     campaigns,
     byDate: [],
     coverage,
+    attribution: emptyAttribution(),
     totals: {
       ...totals,
       ctr: totals.impressions > 0 ? totals.clicks / totals.impressions : null,

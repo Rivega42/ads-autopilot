@@ -6,7 +6,7 @@
 -- и схлопнуть найденное, оставив строку с непустым externalId.
 
 -- CreateEnum
-CREATE TYPE "ConversionSource" AS ENUM ('DIRECT', 'METRIKA', 'NONE');
+CREATE TYPE "ConversionSource" AS ENUM ('PLATFORM', 'METRIKA', 'NONE');
 
 -- AlterTable
 ALTER TABLE "Client" ADD COLUMN     "metrikaAttribution" TEXT,
@@ -14,7 +14,7 @@ ADD COLUMN     "metrikaCounterId" INTEGER,
 ADD COLUMN     "metrikaGoalId" INTEGER;
 
 -- AlterTable
-ALTER TABLE "CampaignStat" ADD COLUMN     "conversionSource" "ConversionSource" NOT NULL DEFAULT 'DIRECT';
+ALTER TABLE "CampaignStat" ADD COLUMN     "conversionSource" "ConversionSource" NOT NULL DEFAULT 'PLATFORM';
 
 -- CreateIndex
 CREATE UNIQUE INDEX "Keyword_adGroupId_matchType_phrase_key" ON "Keyword"("adGroupId", "matchType", "phrase");

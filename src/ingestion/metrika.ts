@@ -1,9 +1,14 @@
-import { StatEntityType, type PrismaClient } from '@prisma/client';
+import { ConversionSource, StatEntityType, type PrismaClient } from '@prisma/client';
 
 import type { DateRange } from '@/channels/types.js';
 import type { MetrikaClientOptions, MetrikaGoalStat } from '@/clients/metrika.js';
 import { MetrikaClient } from '@/clients/metrika.js';
 import { env } from '@/env.js';
+import {
+  auditConversionSources,
+  emptyAttribution,
+  type AttributionSummary,
+} from '@/ingestion/attribution.js';
 import type { IngestionDeps } from '@/ingestion/deps.js';
 import { resolveDeps } from '@/ingestion/deps.js';
 import { ratioOrNull, SPEND_SCALE } from '@/ingestion/mapping.js';
@@ -24,6 +29,13 @@ export interface MetrikaSettings {
   attribution?: MetrikaClientOptions['attribution'];
 }
 
+/** Колонки `Client`, в которых живёт настройка счётчика. */
+export interface MetrikaClientConfig {
+  metrikaCounterId: number | null;
+  metrikaGoalId: number | null;
+  metrikaAttribution: string | null;
+}
+
 export interface MetrikaSource {
   getGoalConversions(params: {
     goalId: number;
@@ -41,10 +53,12 @@ export interface MetrikaSyncResult {
   configured: boolean;
   fetched: number;
   written: number;
-  /** Кампаний-дней, обнулённых из-за отсутствия в ответе Метрики. */
+  /** Кампаний-дней, приведённых к ответу Метрики: обнулённых или перемеченных. */
   zeroed: number;
   /** Строк, чью кампанию не удалось сопоставить с нашей БД. */
   unresolved: number;
+  /** Что реально лежит в колонке `conversions` у этого клиента за окно. */
+  attribution: AttributionSummary;
 }
 
 export interface SyncMetrikaOptions extends Partial<IngestionDeps> {
@@ -65,24 +79,50 @@ function str(value: unknown): string | undefined {
 }
 
 /**
- * Настройки Метрики лежат в секретах кабинета Директа: отдельного провайдера
- * под счётчик в схеме нет, а OAuth-токен у них общий — Метрика принимает тот же
- * токен Яндекса, если у приложения выдан доступ к статистике.
+ * Настройка счётчика читается из карточки клиента, токен — из секретов кабинета.
+ *
+ * Номер счётчика, цель и модель атрибуции секретом не являются: их называет
+ * клиент на онбординге, и лежать они должны там, где их видно и можно поправить,
+ * — в `Client`. В зашифрованном payload они были недостижимы для всего, кроме
+ * этой функции, поэтому и не заполнялись никогда.
+ *
+ * Токен остаётся в `Credential`: Метрика принимает тот же OAuth-токен Яндекса,
+ * если приложению выдан доступ к статистике. Общий сервисный токен из окружения
+ * — запасной вариант для кабинетов, где отдельного доступа нет.
  */
-export function readMetrikaSettings(credentials: Record<string, unknown>): MetrikaSettings | null {
-  const counterId = num(credentials['metrikaCounterId'] ?? credentials['metrika_counter_id']);
-  const goalId = num(credentials['metrikaGoalId'] ?? credentials['metrika_goal_id']);
+export function readMetrikaSettings(
+  config: MetrikaClientConfig,
+  credentials: Record<string, unknown>,
+): MetrikaSettings | null {
+  const counterId = num(config.metrikaCounterId);
+  const goalId = num(config.metrikaGoalId);
   const token =
     str(credentials['metrikaToken']) ?? env.YANDEX_METRIKA_TOKEN ?? str(credentials['accessToken']);
 
   if (counterId === undefined || goalId === undefined || token === undefined) return null;
 
   const settings: MetrikaSettings = { counterId, goalId, token };
-  const attribution = str(credentials['metrikaAttribution']);
+  const attribution = str(config.metrikaAttribution);
   if (attribution && (ATTRIBUTIONS as readonly string[]).includes(attribution)) {
     settings.attribution = attribution as MetrikaClientOptions['attribution'];
   }
   return settings;
+}
+
+/**
+ * Ключи, по которым настройка счётчика лежала в зашифрованном payload до
+ * переезда в `Client`. Нужны ровно для того, чтобы не промолчать: кабинет со
+ * старой настройкой иначе просто перестал бы получать конверсии Метрики.
+ */
+const LEGACY_CONFIG_KEYS = [
+  'metrikaCounterId',
+  'metrika_counter_id',
+  'metrikaGoalId',
+  'metrika_goal_id',
+] as const;
+
+function hasLegacyConfig(credentials: Record<string, unknown>): boolean {
+  return LEGACY_CONFIG_KEYS.some((key) => credentials[key] !== undefined);
 }
 
 /**
@@ -114,6 +154,10 @@ export function directCampaignId(dimension: string | undefined): string | undefi
  * модели атрибуции, отчёт складывал их в CPA, которого не существует ни в
  * одной из них, а оптимизатор перекладывал бюджет на кампанию просто за то,
  * что её не оказалось в ответе Метрики.
+ *
+ * Каждый прогон заканчивается сверкой источников по окну — в том числе когда
+ * счётчик не настроен: единственность модели не должна держаться на том, что
+ * шаги идут в правильном порядке и ни один из них не упал.
  */
 export async function syncMetrikaConversions(
   clientId: string,
@@ -130,13 +174,33 @@ export async function syncMetrikaConversions(
     written: 0,
     zeroed: 0,
     unresolved: 0,
+    attribution: emptyAttribution(),
   };
 
+  const campaigns = await deps.db.campaign.findMany({
+    where: { clientId, provider: PROVIDER },
+    select: { id: true, externalId: true },
+  });
+  const campaignIds = campaigns.map((c) => c.id);
+  const audit = async (): Promise<AttributionSummary> =>
+    reportMixedAttribution(clientId, await auditConversionSources(deps.db, campaignIds, range));
+
   const ctx = await deps.contextFor(clientId, PROVIDER);
-  const settings = readMetrikaSettings(ctx.credentials);
+  const config = await readClientConfig(deps.db, clientId);
+  const settings = readMetrikaSettings(config, ctx.credentials);
   if (!settings) {
-    log.debug({ clientId }, 'metrika counter/goal is not configured for this client');
-    return { ...base, configured: false };
+    if (hasLegacyConfig(ctx.credentials)) {
+      log.warn(
+        { clientId },
+        'metrika counter/goal still lives in the encrypted credential payload: ' +
+          'copy it to Client.metrikaCounterId/metrikaGoalId, conversions are not being updated',
+      );
+    } else {
+      log.debug({ clientId }, 'metrika counter/goal is not configured for this client');
+    }
+    // Проверка нужна и здесь: клиент, у которого Метрику выключили, оставляет в
+    // окне строки обеих моделей, и молчать об этом нельзя.
+    return { ...base, configured: false, attribution: await audit() };
   }
 
   const source = (metrikaFor ?? defaultMetrikaSource)(settings);
@@ -147,10 +211,6 @@ export async function syncMetrikaConversions(
     byCampaign: true,
   });
 
-  const campaigns = await deps.db.campaign.findMany({
-    where: { clientId, provider: PROVIDER },
-    select: { id: true, externalId: true },
-  });
   const byExternalId = new Map(campaigns.map((c) => [c.externalId, c.id]));
 
   // Пустой ответ — почти всегда сбой на той стороне, а не «за три недели не
@@ -158,20 +218,54 @@ export async function syncMetrikaConversions(
   // конверсии Директа и обвалило бы отчёт клиента в ноль.
   if (rows.length === 0) {
     log.warn({ clientId, ...range }, 'metrika returned no rows at all, keeping stored conversions');
-    return { ...base, configured: true };
+    return { ...base, configured: true, attribution: await audit() };
   }
 
   const { totals, unresolved } = groupByCampaignDate(rows, byExternalId);
   const written = await applyConversions(deps.db, totals);
   const zeroed = await zeroUnreported(
     deps.db,
-    campaigns.map((c) => c.id),
+    campaignIds,
     range,
     new Set(totals.map((t) => `${t.entityId} ${t.date}`)),
   );
 
   log.info({ clientId, ...range, written, zeroed, unresolved }, 'metrika conversions applied');
-  return { ...base, configured: true, fetched: rows.length, written, zeroed, unresolved };
+  return {
+    ...base,
+    configured: true,
+    fetched: rows.length,
+    written,
+    zeroed,
+    unresolved,
+    attribution: await audit(),
+  };
+}
+
+async function readClientConfig(db: PrismaClient, clientId: string): Promise<MetrikaClientConfig> {
+  const row = await db.client.findUnique({
+    where: { id: clientId },
+    select: { metrikaCounterId: true, metrikaGoalId: true, metrikaAttribution: true },
+  });
+  return {
+    metrikaCounterId: row?.metrikaCounterId ?? null,
+    metrikaGoalId: row?.metrikaGoalId ?? null,
+    metrikaAttribution: row?.metrikaAttribution ?? null,
+  };
+}
+
+/**
+ * Смешанная атрибуция — это не «странно», это неверные цифры в отчёте и в
+ * оптимизаторе, поэтому она попадает и в лог, и в результат прогона.
+ */
+function reportMixedAttribution(clientId: string, summary: AttributionSummary): AttributionSummary {
+  if (summary.mixed) {
+    log.warn(
+      { clientId, counts: summary.counts },
+      'campaign stats mix attribution models: CPA of these campaigns is not comparable',
+    );
+  }
+  return summary;
 }
 
 function defaultMetrikaSource(settings: MetrikaSettings): MetrikaSource {
@@ -242,6 +336,7 @@ async function applyConversions(db: PrismaClient, totals: ConversionTotal[]): Pr
     const data = {
       conversions,
       cpa: spend > 0 ? ratioOrNull(spend, conversions, SPEND_SCALE) : null,
+      conversionSource: ConversionSource.METRIKA,
     };
     await db.campaignStat.upsert({
       where: {
@@ -272,6 +367,9 @@ async function applyConversions(db: PrismaClient, totals: ConversionTotal[]): Pr
  * атрибуции: у кампаний из ответа — Метрика, у остальных — Директ. Сравнивать
  * такие CPA между собой нельзя, а именно это и делают отчёт и оптимизатор.
  * CPA обнуляемой строки сбрасывается в `null`: делить расход не на что.
+ *
+ * Источник у обнулённой строки — `METRIKA`, а не «источника нет»: ноль здесь
+ * посчитан по модели Метрики ровно так же, как и любая её ненулевая цифра.
  */
 async function zeroUnreported(
   db: PrismaClient,
@@ -286,14 +384,18 @@ async function zeroUnreported(
       entityType: StatEntityType.CAMPAIGN,
       entityId: { in: [...campaignIds] },
       date: { gte: ymdToDateColumn(range.from), lte: ymdToDateColumn(range.to) },
-      conversions: { not: 0 },
     },
-    select: { entityId: true, date: true },
+    select: { entityId: true, date: true, conversions: true, conversionSource: true },
   });
 
   let zeroed = 0;
   for (const row of stale) {
     if (reported.has(`${row.entityId} ${row.date.toISOString().slice(0, 10)}`)) continue;
+    // Уже приведена к ответу Метрики. Отбор по одному лишь `conversions != 0`
+    // оставил бы нулевые строки Директа с площадочной пометкой — то самое
+    // смешение моделей, ради устранения которого этот проход и написан.
+    const consistent = row.conversions === 0 && row.conversionSource === ConversionSource.METRIKA;
+    if (consistent) continue;
     await db.campaignStat.update({
       where: {
         entityType_entityId_date: {
@@ -302,7 +404,7 @@ async function zeroUnreported(
           date: row.date,
         },
       },
-      data: { conversions: 0, cpa: null },
+      data: { conversions: 0, cpa: null, conversionSource: ConversionSource.METRIKA },
       select: { entityId: true },
     });
     zeroed += 1;

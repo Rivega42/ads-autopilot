@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
 import type { AgentRun, RunAgentOptions } from '@/clients/llm/index.js';
+import { emptyAttribution } from '@/ingestion/attribution.js';
 import { FakeDb } from '@/reporter/__tests__/fake-db.js';
 import { fakeMessenger, type FakeMessenger } from '@/reporter/__tests__/fake-messenger.js';
 import { emptyCoverage } from '@/reporter/metrics.js';
@@ -185,6 +186,7 @@ describe('факты для модели', () => {
       campaigns: [],
       byDate: [],
       coverage: emptyCoverage(period),
+      attribution: emptyAttribution(),
     };
     const current = {
       ...empty,

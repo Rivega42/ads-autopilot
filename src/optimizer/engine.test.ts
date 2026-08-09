@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   buildRunId,
+  hasMixedAttribution,
   resolveConflicts,
   runOptimizer,
   toNumber,
@@ -428,5 +429,30 @@ describe('runOptimizer', () => {
     // 30% is above the 20% policy threshold, so a clamped outlier still cannot self-apply.
     expect(run.autoApply).toEqual([]);
     expect(run.approvals[0]?.kind).toBe('BUDGET_CHANGE');
+  });
+});
+
+describe('hasMixedAttribution', () => {
+  const row = (conversionSource?: string | null): CampaignStatRecord => ({
+    ...stat('kw-1', 1, { impressions: 100, clicks: 10, spend: 1000, conversions: 1 }),
+    ...(conversionSource === undefined ? {} : { conversionSource }),
+  });
+
+  it('одна модель на всё окно смесью не считается', () => {
+    expect(hasMixedAttribution([row('METRIKA'), row('METRIKA')])).toBe(false);
+  });
+
+  it('атрибуция площадки рядом с Метрикой — смесь', () => {
+    expect(hasMixedAttribution([row('PLATFORM'), row('METRIKA')])).toBe(true);
+  });
+
+  it('строки без признака не считаются отдельной моделью', () => {
+    // Старые записи и фикстуры тестов признака не несут. Считай их моделью —
+    // и прогон вставал бы на любой не до конца перезалитой истории.
+    expect(hasMixedAttribution([row('PLATFORM'), row(null), row()])).toBe(false);
+  });
+
+  it('пустое окно смесью не считается', () => {
+    expect(hasMixedAttribution([])).toBe(false);
   });
 });

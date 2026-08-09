@@ -94,6 +94,50 @@ describe('buildDailyReport', () => {
     expect(content.body).toContain('дозаезжают');
   });
 
+  it('подписывает, чьей атрибуцией посчитан CPA', async () => {
+    // По умолчанию строки площадочные — так и подписываем: клиент, глядя на CPA,
+    // должен понимать, что это не цифра из его Метрики.
+    const content = await buildDailyReport(
+      RECIPIENT,
+      { from: '2026-08-07', to: '2026-08-07' },
+      deps(),
+    );
+
+    expect(content.body).toContain('по атрибуции рекламного кабинета');
+    // Подпись не лезет в сами цифры: строка «Расход» остаётся однострочной.
+    expect(content.body).toContain('Расход: *10 000 ₽*');
+  });
+
+  it('о смешении моделей предупреждает, а не подписывает мелким шрифтом', async () => {
+    const mixed = new FakeDb();
+    mixed.seedClient({ id: CLIENT, name: 'Ромашка', tgUserId: 555n });
+    mixed.seedCampaign({ id: 'c1', clientId: CLIENT, name: 'Поиск' });
+    mixed.seedCampaign({ id: 'c2', clientId: CLIENT, name: 'РСЯ' });
+    mixed.seedStat({
+      entityId: 'c1',
+      date: '2026-08-07',
+      spend: 6_000,
+      conversions: 3,
+      conversionSource: 'METRIKA',
+    });
+    mixed.seedStat({
+      entityId: 'c2',
+      date: '2026-08-07',
+      spend: 4_000,
+      conversions: 5,
+      conversionSource: 'PLATFORM',
+    });
+
+    const content = await buildDailyReport(
+      RECIPIENT,
+      { from: '2026-08-07', to: '2026-08-07' },
+      { db: mixed.asDb(), messenger: () => messenger, now: () => CRON_TICK },
+    );
+
+    expect(content.body).toContain('⚠️');
+    expect(content.body).toContain('смешаны две модели атрибуции');
+  });
+
   it('экранирует имена кампаний, чтобы MarkdownV2 не развалился', async () => {
     const content = await buildDailyReport(
       RECIPIENT,

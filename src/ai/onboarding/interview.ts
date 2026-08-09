@@ -9,6 +9,7 @@ import {
   type ClientBriefData,
   type ClientBriefDraft,
 } from './brief.schema.js';
+import { saveMetrikaConfig, type ClientConfigStore } from './metrika-config.js';
 import {
   emptyTranscript,
   lastAssistantTurn,
@@ -26,7 +27,7 @@ import { loadPrompt } from '@/ai/prompt-loader.js';
 import type { AgentRun, RunAgentOptions } from '@/clients/llm/index.js';
 import { runAgent } from '@/clients/llm/index.js';
 import { prisma } from '@/db/prisma.js';
-import { AppError } from '@/lib/errors.js';
+import { AppError, describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 
 const log = logger.child({ scope: 'ai:onboarding' });
@@ -63,6 +64,11 @@ export type RunInterviewTurn = (
 
 export interface InterviewDeps {
   db?: BriefStore;
+  /**
+   * Карточка клиента. Отдельно от `db`: бриф и конфигурация — разные строки и
+   * разные владельцы, а хранилище брифа умышленно сужено до одной модели.
+   */
+  clients?: ClientConfigStore;
   /** Подменяется в тестах и в evals; в проде — `runAgent` из LLM-ядра. */
   run?: RunInterviewTurn;
   now?: () => Date;
@@ -173,6 +179,7 @@ export async function startInterview(
     draft: parseDraft(row.data),
     transcript,
     db,
+    clients: deps.clients,
     run: deps.run ?? runAgent,
     now,
   });
@@ -210,6 +217,7 @@ export async function handleAnswer(
     draft: parseDraft(row.data),
     transcript,
     db,
+    clients: deps.clients,
     run: deps.run ?? runAgent,
     now,
   });
@@ -245,6 +253,7 @@ interface AdvanceContext {
   draft: ClientBriefDraft;
   transcript: InterviewTranscript;
   db: BriefStore;
+  clients: ClientConfigStore | undefined;
   run: RunInterviewTurn;
   now: () => Date;
 }
@@ -313,6 +322,7 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
   });
 
   if (parsed?.ok === true) {
+    await persistMetrikaConfig(ctx, parsed.brief);
     const warnings = briefWarnings(parsed.brief);
     log.info(
       { clientId, askedCount: transcript.askedCount, warnings: warnings.length },
@@ -338,6 +348,23 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
     missing,
     resumed: false,
   };
+}
+
+/**
+ * Настройка Метрики из готового брифа.
+ *
+ * Отказ не роняет ход: бриф уже записан, а конфигурацию можно проставить руками
+ * или следующим прогоном. Потерять из-за неё собранное интервью — худший обмен.
+ */
+async function persistMetrikaConfig(ctx: AdvanceContext, brief: ClientBriefData): Promise<void> {
+  try {
+    await saveMetrikaConfig(ctx.clientId, brief, ctx.clients);
+  } catch (err) {
+    log.error(
+      { clientId: ctx.clientId, err: describeError(err) },
+      'cannot save metrika config from the completed brief',
+    );
+  }
 }
 
 interface BriefPatch {

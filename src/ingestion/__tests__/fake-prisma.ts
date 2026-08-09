@@ -50,11 +50,21 @@ const RELATIONS: Partial<Record<ModelName, Record<string, Relation>>> = {
 
 /** Колонки со значением по умолчанию — иначе create отдавал бы undefined там, где схема обещает 0. */
 const DEFAULTS: Partial<Record<ModelName, FakeRow>> = {
+  client: { metrikaCounterId: null, metrikaGoalId: null, metrikaAttribution: null },
   campaign: { status: 'DRAFT' },
   adGroup: { status: 'ACTIVE', targetings: null },
   ad: { moderationStatus: 'PENDING', moderationRetries: 0 },
   keyword: { status: 'ACTIVE', matchType: 'PHRASE', externalId: null, bid: null },
-  campaignStat: { impressions: 0, clicks: 0, spend: 0, conversions: 0, ctr: null, cpc: null },
+  campaignStat: {
+    impressions: 0,
+    clicks: 0,
+    spend: 0,
+    conversions: 0,
+    ctr: null,
+    cpc: null,
+    // Умолчание колонки: строка без явного источника считается площадочной.
+    conversionSource: 'PLATFORM',
+  },
   searchQueryStat: { impressions: 0, clicks: 0, spend: 0, conversions: 0, negated: false },
   errorLog: { context: {} },
 };

@@ -65,6 +65,7 @@ export {
 } from '@/reporter/errors.js';
 export {
   activeCampaigns,
+  attributionNote,
   bySpendDesc,
   collectPeriodMetrics,
   compareTotals,

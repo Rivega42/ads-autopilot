@@ -1,4 +1,4 @@
-import { Provider } from '@prisma/client';
+import { MatchType, Provider } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 
 import { applyPlan, type ApplyStore } from '@/campaigns/apply.js';
@@ -176,23 +176,34 @@ function makeDb(plan: CampaignPlan = PLAN): DbHarness {
       },
     },
     keyword: {
-      // Ровно те три метода, которыми пользуется persistCampaign: поиск по паре
-      // (группа, фраза) вместо апсерта по nullable externalId — см. F11.
-      findFirst: (args: { where: { adGroupId: string; phrase: string } }) =>
-        Promise.resolve(
-          keywords.find(
-            (k) => k['adGroupId'] === args.where.adGroupId && k['phrase'] === args.where.phrase,
-          ) ?? null,
-        ),
-      update: (args: { where: { id: string }; data: Record<string, unknown> }) => {
-        const row = keywords.find((k) => k['id'] === args.where.id);
-        if (row) Object.assign(row, args.data);
-        return Promise.resolve(row ?? null);
-      },
-      create: (args: { data: Record<string, unknown> }) => {
-        const row = { id: `db-keyword-${keywords.length + 1}`, ...args.data };
+      /**
+       * Апсерт по `@@unique([adGroupId, matchType, phrase])`.
+       *
+       * Поиск и вставка — в одном синхронном куске, до первого `await`: именно
+       * так ведёт себя настоящий `INSERT ... ON CONFLICT`, и только так тест
+       * может отличить атомарную запись от «нашли — не нашли — оба создали».
+       */
+      upsert: (args: {
+        where: {
+          adGroupId_matchType_phrase: { adGroupId: string; matchType: string; phrase: string };
+        };
+        create: Record<string, unknown>;
+        update: Record<string, unknown>;
+      }) => {
+        const key = args.where.adGroupId_matchType_phrase;
+        const existing = keywords.find(
+          (k) =>
+            k['adGroupId'] === key.adGroupId &&
+            k['matchType'] === key.matchType &&
+            k['phrase'] === key.phrase,
+        );
+        if (existing) {
+          Object.assign(existing, args.update);
+          return Promise.resolve({ id: existing['id'] });
+        }
+        const row = { id: `db-keyword-${keywords.length + 1}`, ...args.create };
         keywords.push(row);
-        return Promise.resolve(row);
+        return Promise.resolve({ id: row.id });
       },
     },
     idempotencyKey: {},
@@ -322,6 +333,33 @@ describe('applyPlan: создание', () => {
 
     expect(harness.keywords).toHaveLength(1);
     expect(harness.keywords[0]).toMatchObject({ phrase: 'курсы английского' });
+  });
+
+  it('одновременное зеркалирование одной кампании не удваивает фразы', async () => {
+    // Два воркера подхватили один и тот же план (ретрай очереди наложился на
+    // исходный запуск). «Найти и создать» между собой не атомарны: оба не
+    // находят фразу и оба её создают. Ключ идемпотентности здесь не помогает —
+    // он про кабинет, а не про зеркало в БД.
+    const harness = makeDb();
+    const { writer } = makeWriter({
+      createCampaign: () => Promise.resolve({ externalId: 'ext-1' }),
+    });
+
+    const run = (): Promise<unknown> =>
+      applyPlan('plan-1', {
+        db: harness.db,
+        writers: { [Provider.YANDEX_DIRECT]: writer },
+        campaignIndex: 0,
+        ...deps(false, createInMemoryCampaignIdempotency()),
+      });
+
+    await Promise.all([run(), run()]);
+
+    expect(harness.keywords).toHaveLength(1);
+    expect(harness.keywords[0]).toMatchObject({
+      phrase: 'курсы английского',
+      matchType: MatchType.PHRASE,
+    });
   });
 
   it('применяет одну кампанию плана по индексу', async () => {

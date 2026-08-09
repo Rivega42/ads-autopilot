@@ -412,24 +412,29 @@ async function persistCampaign(
       for (const keyword of planned.keywords) {
         const bid = toDecimal(keyword.bidRub, MONEY_SCALE);
         // Апсерт по `@@unique([adGroupId, externalId])` здесь невозможен: externalId
-        // ещё null, а NULL в Postgres не конфликтует сам с собой — повторный проход
-        // (например, после восстановления зеркала) наплодил бы копии каждой фразы.
-        const existing = await db.keyword.findFirst({
-          where: { adGroupId: adGroup.id, phrase: keyword.phrase, externalId: null },
-          select: { id: true },
-        });
-        if (existing) {
-          await db.keyword.update({ where: { id: existing.id }, data: { bid } });
-          continue;
-        }
-        await db.keyword.create({
-          data: {
+        // ещё null, а NULL в Postgres не конфликтует сам с собой. Ключ
+        // `(группа, тип соответствия, фраза)` от этого свободен и делает запись
+        // атомарной: два воркера, зеркалящих одну кампанию, больше не могут оба
+        // не найти фразу и оба её создать.
+        await db.keyword.upsert({
+          where: {
+            adGroupId_matchType_phrase: {
+              adGroupId: adGroup.id,
+              matchType: MatchType.PHRASE,
+              phrase: keyword.phrase,
+            },
+          },
+          create: {
             adGroupId: adGroup.id,
             phrase: keyword.phrase,
             bid,
             matchType: MatchType.PHRASE,
             status: KeywordStatus.ACTIVE,
           },
+          // Только ставка: статус и внешний id — зона ответственности ingestion,
+          // и зеркало плана не должно откатывать то, что он уже узнал из кабинета.
+          update: { bid },
+          select: { id: true },
         });
       }
     }

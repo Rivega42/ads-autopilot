@@ -54,6 +54,8 @@ export interface CampaignStatRecord {
   clicks: number;
   spend: Numeric;
   conversions: number;
+  /** Модель атрибуции строки. Необязательно: старые записи и тесты её не несут. */
+  conversionSource?: string | null;
 }
 
 /**
@@ -110,7 +112,8 @@ export interface OptimizerRunOptions {
   sources?: readonly DecisionSource[];
 }
 
-export type OptimizerSkipReason = 'CAMPAIGN_NOT_FOUND' | 'CAMPAIGN_NOT_ACTIVE' | 'NO_STATISTICS';
+export type OptimizerSkipReason =
+  'CAMPAIGN_NOT_FOUND' | 'CAMPAIGN_NOT_ACTIVE' | 'NO_STATISTICS' | 'MIXED_ATTRIBUTION';
 
 export interface OptimizerRun {
   campaignId: string;
@@ -141,6 +144,19 @@ export function toNumber(value: Numeric | null | undefined): number | null {
  * Deterministic per-campaign-per-day identity. Re-running the same day produces the same runId, so
  * idempotency keys derived from it collapse duplicate applications.
  */
+export /**
+ * Строки без признака (старые записи, тесты) не считаются отдельной моделью:
+ * иначе прогон вставал бы на любой не до конца перезалитой истории.
+ */
+function hasMixedAttribution(stats: readonly CampaignStatRecord[]): boolean {
+  const sources = new Set<string>();
+  for (const row of stats) {
+    if (row.conversionSource) sources.add(row.conversionSource);
+    if (sources.size > 1) return true;
+  }
+  return false;
+}
+
 export function buildRunId(campaignId: string, windowEnd: Date): string {
   return `opt:${campaignId}:${windowEnd.toISOString().slice(0, 10)}`;
 }
@@ -199,6 +215,13 @@ export async function runOptimizer(
     where: { entityId: { in: entityIds }, date: { gte: windowStart, lte: windowEnd } },
   });
   if (stats.length === 0) return empty('NO_STATISTICS');
+
+  // Смешанная атрибуция в одном окне означает, что CPA строк несопоставимы:
+  // часть посчитана по конверсиям площадки, часть — по Метрике. Двигать бюджет
+  // между ними — переливать деньги в кампанию, которой просто не досталось
+  // строки от Метрики. Пропускаем прогон: пусть загрузка сначала выровняет
+  // окно, это заметно в ErrorLog и в аудите атрибуции.
+  if (hasMixedAttribution(stats)) return empty('MIXED_ATTRIBUTION');
 
   const bidByKeywordId = new Map<string, number | null>(
     keywords.map((keyword) => [keyword.id, toNumber(keyword.bid)]),

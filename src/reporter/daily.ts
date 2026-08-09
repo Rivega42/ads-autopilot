@@ -22,6 +22,7 @@ import {
 import { md, mdBold, mdEscape, mdJoin, mdLink, type Markdown } from '@/reporter/markdown.js';
 import {
   activeCampaigns,
+  attributionNote,
   bySpendDesc,
   collectPeriodMetrics,
   compareTotals,
@@ -231,13 +232,23 @@ export function renderDaily(
 
   const chart = chartUrl === null ? null : mdLink(`📈 График за ${CHART_DAYS} дней`, chartUrl);
 
+  // Спокойная подпись живёт в сносках рядом с оговоркой про дозаезд: читателю
+  // достаточно знать её один раз. Смешение моделей — не подпись, а причина не
+  // верить цифрам выше, поэтому оно стоит сразу под ними, как и пробелы в данных.
+  const attribution = attributionNote(current.attribution);
+  const mixed = current.attribution.mixed && attribution !== null;
+
+  const caveats = [
+    ...(gaps === null ? [] : [md``, md`${mdEscape(`⚠️ ${gaps}`)}`]),
+    ...(mixed ? [md``, md`${mdEscape(`⚠️ ${attribution ?? ''}`)}`] : []),
+  ];
+
   return clampMarkdown(
     mdJoin([
       header,
       md``,
       ...totals,
-      gaps === null ? null : md``,
-      gaps === null ? null : md`${mdEscape(`⚠️ ${gaps}`)}`,
+      ...caveats,
       md``,
       ...campaigns,
       md``,
@@ -245,6 +256,7 @@ export function renderDaily(
       chart === null ? null : md``,
       chart,
       md``,
+      attribution === null || mixed ? null : md`${mdEscape(attribution)}`,
       md`${mdEscape(PROVISIONAL_NOTE)}`,
     ]),
   );

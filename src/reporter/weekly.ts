@@ -26,6 +26,7 @@ import {
 import { md, mdBold, mdEscape, mdJoin, mdLink, type Markdown } from '@/reporter/markdown.js';
 import {
   activeCampaigns,
+  attributionNote,
   bySpendDesc,
   collectPeriodMetrics,
   compareTotals,
@@ -210,6 +211,10 @@ export function buildWeeklyFacts(
  */
 function buildNotes(current: PeriodMetrics, previous: PeriodMetrics): string[] {
   const notes = [PROVISIONAL_NOTE];
+  // Модель важна и для разбора: без неё модель сравнит CPA двух недель, посчитанных
+  // по разной атрибуции, и объяснит словами скачок, которого не было.
+  const attribution = attributionNote(current.attribution);
+  if (attribution) notes.push(attribution);
   const currentGaps = coverageNote(current.coverage);
   if (currentGaps) notes.push(`Разбираемая неделя. ${currentGaps}`);
   const previousGaps = coverageNote(previous.coverage);
@@ -352,7 +357,12 @@ export function renderWeekly(
   ];
 
   const gaps = coverageNote(current.coverage);
-  const gapLines = gaps === null ? [] : [md``, md`${mdEscape(`⚠️ ${gaps}`)}`];
+  const attribution = attributionNote(current.attribution);
+  const mixed = current.attribution.mixed && attribution !== null;
+  const gapLines = [
+    ...(gaps === null ? [] : [md``, md`${mdEscape(`⚠️ ${gaps}`)}`]),
+    ...(mixed ? [md``, md`${mdEscape(`⚠️ ${attribution ?? ''}`)}`] : []),
+  ];
 
   const worked =
     review && review.worked.length > 0
@@ -424,6 +434,7 @@ export function renderWeekly(
       md``,
       chartUrl === null ? null : mdLink('📊 График по дням', chartUrl),
       md``,
+      attribution === null || mixed ? null : md`${mdEscape(attribution)}`,
       md`${mdEscape(PROVISIONAL_NOTE)}`,
     ]),
   );

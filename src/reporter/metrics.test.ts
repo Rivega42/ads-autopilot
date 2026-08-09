@@ -5,6 +5,7 @@ vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 import { FakeDb } from '@/reporter/__tests__/fake-db.js';
 import {
   activeCampaigns,
+  attributionNote,
   bySpendDesc,
   collectPeriodMetrics,
   compareTotals,
@@ -178,6 +179,51 @@ describe('collectPeriodMetrics', () => {
 
     expect(db.statQueries).toBe(0);
     expect(metrics.campaigns).toEqual([]);
+  });
+
+  it('доносит до отчёта, чья это атрибуция', async () => {
+    db.seedStat({
+      entityId: 'c1',
+      date: '2026-08-07',
+      spend: 6000,
+      conversions: 4,
+      conversionSource: 'METRIKA',
+    });
+
+    const metrics = await collectPeriodMetrics(db.asDb(), CLIENT, PERIOD);
+
+    expect(metrics.attribution).toMatchObject({ mixed: false, primary: 'METRIKA' });
+    expect(attributionNote(metrics.attribution)).toContain('Метрики');
+  });
+
+  it('две модели в одном периоде — предупреждение, а не подпись', async () => {
+    // Так выглядит клиент, у которого счётчик подключили в середине периода:
+    // цифры до и после посчитаны по разным правилам, а в отчёте они рядом.
+    db.seedStat({
+      entityId: 'c1',
+      date: '2026-08-07',
+      spend: 6000,
+      conversions: 4,
+      conversionSource: 'METRIKA',
+    });
+    db.seedStat({
+      entityId: 'c2',
+      date: '2026-08-07',
+      spend: 4000,
+      conversions: 6,
+      conversionSource: 'PLATFORM',
+    });
+
+    const metrics = await collectPeriodMetrics(db.asDb(), CLIENT, PERIOD);
+
+    expect(metrics.attribution.mixed).toBe(true);
+    expect(attributionNote(metrics.attribution)).toContain('несопоставим');
+  });
+
+  it('без строк статистики про атрибуцию сказать нечего', async () => {
+    const metrics = await collectPeriodMetrics(db.asDb(), CLIENT, PERIOD);
+
+    expect(attributionNote(metrics.attribution)).toBeNull();
   });
 
   it('целевой CPA приезжает из карточки кампании', async () => {

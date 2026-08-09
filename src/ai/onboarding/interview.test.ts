@@ -15,6 +15,7 @@ import {
   MAX_QUESTIONS,
   type RunInterviewTurn,
 } from './interview.js';
+import type { ClientConfigStore } from './metrika-config.js';
 import { parseTranscript } from './state.js';
 import { interviewTurnSchema, type InterviewTurn } from './turn.schema.js';
 
@@ -256,6 +257,64 @@ describe('handleAnswer', () => {
     const row = store.get(CLIENT);
     expect(row?.status).toBe(BriefStatus.COMPLETE);
     expect(row?.completedAt).toBeInstanceOf(Date);
+  });
+
+  it('готовый бриф проставляет цель Метрики в карточке клиента', async () => {
+    // До сих пор эти колонки не заполнял никто, поэтому загрузка конверсий из
+    // Метрики не включалась ни у одного клиента.
+    const updates: Array<Record<string, unknown>> = [];
+    const clients = {
+      client: {
+        update: (args: { where: { id: string }; data: Record<string, unknown> }) => {
+          updates.push({ id: args.where.id, ...args.data });
+          return Promise.resolve({ id: args.where.id });
+        },
+      },
+    } as unknown as ClientConfigStore;
+
+    const { run } = runner([
+      { reply: 'Что продаём?' },
+      {
+        reply: 'Собрал бриф. Стартуем?',
+        updates: {
+          ...FULL_BRIEF,
+          conversionGoals: [{ name: 'заявка на пробный урок', metrikaGoalId: 555 }],
+        },
+        evidence: MONEY_EVIDENCE,
+        done: true,
+      },
+    ]);
+
+    await startInterview(CLIENT, { db: store.db, clients, run });
+    const step = await handleAnswer(CLIENT, MONEY_ANSWER, { db: store.db, clients, run });
+
+    expect(step.kind).toBe('complete');
+    expect(updates).toEqual([{ id: CLIENT, metrikaGoalId: 555 }]);
+  });
+
+  it('сбой записи конфигурации не отменяет собранный бриф', async () => {
+    const clients = {
+      client: { update: () => Promise.reject(new Error('нет такой строки')) },
+    } as unknown as ClientConfigStore;
+
+    const { run } = runner([
+      { reply: 'Что продаём?' },
+      {
+        reply: 'Собрал бриф.',
+        updates: {
+          ...FULL_BRIEF,
+          conversionGoals: [{ name: 'заявка', metrikaGoalId: 555 }],
+        },
+        evidence: MONEY_EVIDENCE,
+        done: true,
+      },
+    ]);
+
+    await startInterview(CLIENT, { db: store.db, clients, run });
+    const step = await handleAnswer(CLIENT, MONEY_ANSWER, { db: store.db, clients, run });
+
+    expect(step.kind).toBe('complete');
+    expect(store.get(CLIENT)?.status).toBe(BriefStatus.COMPLETE);
   });
 
   it('возвращает предупреждения по формально валидному брифу', async () => {

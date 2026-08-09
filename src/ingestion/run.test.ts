@@ -148,6 +148,8 @@ describe('runIngestion', () => {
   });
 
   it('обычная ошибка этапа не отменяет следующие этапы кабинета', async () => {
+    // Счётчик Метрики настроен в карточке клиента, токен — в секретах кабинета.
+    db.store.client[0] = { ...db.store.client[0], metrikaCounterId: 1, metrikaGoalId: 2 };
     const adapter = fakeAdapter('YANDEX_DIRECT', cabinet);
     adapter.getStats = async () => {
       throw new Error('report queue timed out');
@@ -161,7 +163,7 @@ describe('runIngestion', () => {
       adapterFor: () => adapter,
       contextFor: async (clientId): Promise<ChannelContext> => ({
         clientId,
-        credentials: { metrikaCounterId: 1, metrikaGoalId: 2, accessToken: 'y0' },
+        credentials: { accessToken: 'y0' },
         dryRun: true,
       }),
       range: RANGE,

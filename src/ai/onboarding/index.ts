@@ -34,6 +34,12 @@ export {
   type InterviewStep,
   type RunInterviewTurn,
 } from './interview.js';
+export {
+  metrikaConfigFromBrief,
+  saveMetrikaConfig,
+  type ClientConfigStore,
+  type MetrikaBriefConfig,
+} from './metrika-config.js';
 export { interviewTurnSchema, personaReplySchema, type InterviewTurn } from './turn.schema.js';
 export {
   emptyTranscript,
