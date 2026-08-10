@@ -3,24 +3,19 @@ import type { Job, Processor } from 'bullmq';
 import { expireApprovals } from '@/approval/index.js';
 import { env } from '@/env.js';
 import { refreshExpiringTokens, runIngestion, runSearchQueryIngestion } from '@/ingestion/index.js';
+import { runWeeklyKeywordRefresh } from '@/keywords/index.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
+import { runModerationCheck } from '@/moderation/index.js';
 import { runScheduledOptimization } from '@/optimizer/index.js';
 import { runAlertScan, runDailyReports, runWeeklyReports } from '@/reporter/index.js';
 import { QUEUE_NAMES, type QueueName } from '@/scheduler/queues.js';
 
 const log = logger.child({ scope: 'scheduler' });
 
-/**
- * Заглушка на время сборки: заменяется реализацией соответствующего эпика.
- * Логируем на warn, чтобы незакрытая задача была заметна в проде.
- */
-function notImplemented(name: QueueName): Processor {
-  return async (job: Job) => {
-    log.warn({ queue: name, jobId: job.id }, 'handler not implemented yet');
-    return { skipped: true, reason: 'not implemented' };
-  };
-}
+// Заглушки notImplemented больше нет намеренно: тип Record<QueueName, Processor>
+// не даст добавить очередь без обработчика, и компилятор поймает это раньше
+// любого теста. Прежняя заглушка позволяла новой очереди молча ничего не делать.
 
 /** Что вернул обработчик. Уезжает в Redis, поэтому обязано быть JSON-сериализуемым. */
 export type HandlerResult = Record<string, unknown>;
@@ -80,7 +75,9 @@ export const handlers: Record<QueueName, Processor> = {
   [QUEUE_NAMES.fetchStats]: exclusive(QUEUE_NAMES.fetchStats, async () => ({
     ...(await runIngestion()),
   })),
-  [QUEUE_NAMES.checkModeration]: notImplemented(QUEUE_NAMES.checkModeration),
+  [QUEUE_NAMES.checkModeration]: exclusive(QUEUE_NAMES.checkModeration, async () => ({
+    ...(await runModerationCheck()),
+  })),
   [QUEUE_NAMES.optimizeBids]: exclusive(QUEUE_NAMES.optimizeBids, async () => ({
     ...(await runScheduledOptimization({ dryRun: env.DRY_RUN })),
   })),
@@ -89,9 +86,13 @@ export const handlers: Record<QueueName, Processor> = {
   [QUEUE_NAMES.pauseLosers]: exclusive(QUEUE_NAMES.pauseLosers, async () => ({
     ...(await runScheduledOptimization({ dryRun: env.DRY_RUN })),
   })),
-  [QUEUE_NAMES.wordstatMine]: exclusive(QUEUE_NAMES.wordstatMine, async () => ({
-    ...(await runSearchQueryIngestion()),
-  })),
+  [QUEUE_NAMES.wordstatMine]: exclusive(QUEUE_NAMES.wordstatMine, async () => {
+    // Сбор запросов обязан идти первым: пересбор ядра читает SearchQueryStat,
+    // и на устаревших данных он предложит минус-слова по прошлой неделе.
+    const queries = await runSearchQueryIngestion();
+    const core = await runWeeklyKeywordRefresh();
+    return { queries, core };
+  }),
   [QUEUE_NAMES.dailyReport]: exclusive(QUEUE_NAMES.dailyReport, async () => ({
     ...(await runDailyReports()),
   })),

@@ -6,6 +6,8 @@ const h = vi.hoisted(() => ({
   runSearchQueryIngestion: vi.fn(async () => ({ targets: 1, ok: 1, written: 3, failures: [] })),
   refreshExpiringTokens: vi.fn(async () => ({ checked: 2, refreshed: 1, failures: [] })),
   expireApprovals: vi.fn(async () => ({ expired: 1, raced: 0, stuck: 0 })),
+  runWeeklyKeywordRefresh: vi.fn(async () => ({ clients: 1, cores: 1, degraded: 1 })),
+  runModerationCheck: vi.fn(async () => ({ polled: 4, repaired: 1, escalated: 0 })),
 }));
 
 vi.mock('@/ingestion/index.js', () => ({
@@ -14,6 +16,8 @@ vi.mock('@/ingestion/index.js', () => ({
   refreshExpiringTokens: h.refreshExpiringTokens,
 }));
 vi.mock('@/approval/index.js', () => ({ expireApprovals: h.expireApprovals }));
+vi.mock('@/keywords/index.js', () => ({ runWeeklyKeywordRefresh: h.runWeeklyKeywordRefresh }));
+vi.mock('@/moderation/index.js', () => ({ runModerationCheck: h.runModerationCheck }));
 
 const { handlers } = await import('@/scheduler/handlers.js');
 const { QUEUE_NAMES } = await import('@/scheduler/queues.js');
@@ -39,11 +43,23 @@ describe('handlers', () => {
     expect(() => JSON.stringify(result)).not.toThrow();
   });
 
-  it('wordstat-mine грузит поисковые запросы', async () => {
+  it('wordstat-mine грузит запросы, потом пересобирает ядро', async () => {
+    const order: string[] = [];
+    h.runSearchQueryIngestion.mockImplementationOnce(async () => {
+      order.push('queries');
+      return { targets: 1, ok: 1, written: 3, failures: [] };
+    });
+    h.runWeeklyKeywordRefresh.mockImplementationOnce(async () => {
+      order.push('core');
+      return { clients: 1, cores: 1, degraded: 1 };
+    });
+
     const result = await handlers[QUEUE_NAMES.wordstatMine](job(), 'token');
 
-    expect(h.runSearchQueryIngestion).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ written: 3 });
+    // Порядок важен: пересбор ядра читает SearchQueryStat, и на устаревших
+    // данных предложит минус-слова по прошлой неделе.
+    expect(order).toEqual(['queries', 'core']);
+    expect(result).toMatchObject({ queries: { written: 3 }, core: { cores: 1 } });
   });
 
   it('refresh-tokens продлевает токены', async () => {
@@ -92,13 +108,10 @@ describe('handlers', () => {
     expect(h.runIngestion).toHaveBeenCalledTimes(2);
   });
 
-  it('нереализованный обработчик честно сообщает об этом', async () => {
-    // Осталась одна заглушка — модерация (эпик E10). Остальные очереди
-    // подключены к реальным реализациям, и брать их сюда нельзя: они пойдут
-    // в Prisma. Когда модерация будет готова, тест удаляется вместе с
-    // notImplemented, а не переписывается на другую очередь.
+  it('check-moderation опрашивает статусы', async () => {
     const result = await handlers[QUEUE_NAMES.checkModeration](job(), 'token');
 
-    expect(result).toEqual({ skipped: true, reason: 'not implemented' });
+    expect(h.runModerationCheck).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ polled: 4, repaired: 1 });
   });
 });
