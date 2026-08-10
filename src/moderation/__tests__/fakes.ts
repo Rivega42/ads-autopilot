@@ -53,7 +53,7 @@ export function queueRunner<T>(items: readonly (T | Error)[]): FakeRunner<T> {
 export interface FakeAdapterOptions {
   channel: Provider;
   ads?: readonly RemoteAd[];
-  listAds?: () => Promise<RemoteAd[]>;
+  listAds?: ChannelAdapter['listAds'];
   /** undefined — канал не умеет обновлять текст (проверка эскалации). */
   updateAdText?: (
     ctx: ChannelContext,
@@ -80,7 +80,11 @@ export function fakeAdapter(options: FakeAdapterOptions): FakeAdapter {
     verifyAccess: async () => ({ ok: true }),
     listCampaigns: async () => [],
     listAdGroups: async () => [],
-    listAds: options.listAds ?? (async () => [...(options.ads ?? [])]),
+    // По умолчанию отдаём только объявления запрошенных групп — как настоящий кабинет.
+    listAds:
+      options.listAds ??
+      (async (_ctx, adGroupExternalIds) =>
+        (options.ads ?? []).filter((ad) => adGroupExternalIds.includes(ad.adGroupExternalId))),
     listKeywords: async () => [],
     getStats: async () => [],
     setBids: unsupported('setBids'),
