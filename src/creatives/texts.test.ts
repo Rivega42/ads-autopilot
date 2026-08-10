@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { generateTextVariants, NoUsableVariantsError, validateDrafts } from './texts.js';
+import {
+  generateTextVariants,
+  NoUsableVariantsError,
+  validateDrafts,
+  type RunCreativeTextsAgent,
+} from './texts.js';
 import type { CreativeTextsDraft } from './texts.schema.js';
 
 import type { ClientBriefData } from '@/ai/onboarding/brief.schema.js';
-import type { AgentRun } from '@/clients/llm/index.js';
+import type { AgentRun, RunAgentOptions } from '@/clients/llm/index.js';
 import type { CreativeStore } from '@/creatives/store.js';
 
 /**
@@ -46,7 +51,7 @@ function variantsDraft(count: number): CreativeTextsDraft {
 function runOf(
   data: CreativeTextsDraft,
   over: Partial<AgentRun<CreativeTextsDraft>> = {},
-): () => Promise<AgentRun<CreativeTextsDraft>> {
+): RunCreativeTextsAgent {
   return () =>
     Promise.resolve({
       data,
@@ -60,6 +65,20 @@ function runOf(
       aiRunId: '1',
       ...over,
     });
+}
+
+/** Пишущий в журнал мок агента: `vi.fn` здесь потерял бы типы аргументов. */
+function runSpy(
+  data: CreativeTextsDraft,
+  over: Partial<AgentRun<CreativeTextsDraft>> = {},
+): { run: RunCreativeTextsAgent; calls: RunAgentOptions<CreativeTextsDraft>[] } {
+  const calls: RunAgentOptions<CreativeTextsDraft>[] = [];
+  const inner = runOf(data, over);
+  const run: RunCreativeTextsAgent = (opts) => {
+    calls.push(opts);
+    return inner(opts);
+  };
+  return { run, calls };
 }
 
 function storeOf(): { db: CreativeStore; created: () => Record<string, unknown> | undefined } {
@@ -77,7 +96,7 @@ function storeOf(): { db: CreativeStore; created: () => Record<string, unknown> 
 
 describe('generateTextVariants', () => {
   it('возвращает проверенные варианты и просит у модели число из диапазона ТЗ', async () => {
-    const run = vi.fn(runOf(variantsDraft(6)));
+    const { run, calls } = runSpy(variantsDraft(6));
     const set = await generateTextVariants({
       clientId: 'c1',
       brief: BRIEF,
@@ -89,12 +108,12 @@ describe('generateTextVariants', () => {
     expect(set.variants).toHaveLength(6);
     expect(set.rejected).toEqual([]);
     expect(set.promptVersion).toMatch(/^creatives-texts@/u);
-    expect(run.mock.calls[0]?.[0]?.task).toBe('creatives.texts');
-    expect(run.mock.calls[0]?.[0]?.system).toContain('Яндекс Директ');
+    expect(calls[0]?.task).toBe('creatives.texts');
+    expect(calls[0]?.system).toContain('Яндекс Директ');
   });
 
   it('зажимает количество вариантов в 5..10', async () => {
-    const run = vi.fn(runOf(variantsDraft(5)));
+    const { run, calls } = runSpy(variantsDraft(5));
     await generateTextVariants({
       clientId: 'c1',
       brief: BRIEF,
@@ -103,11 +122,11 @@ describe('generateTextVariants', () => {
       run,
       persist: false,
     });
-    expect(run.mock.calls[0]?.[0]?.system).toContain('**10**');
+    expect(calls[0]?.system).toContain('**10**');
   });
 
   it('для VK просит не заполнять второй заголовок и выбрасывает его из результата', async () => {
-    const run = vi.fn(runOf(variantsDraft(5)));
+    const { run, calls } = runSpy(variantsDraft(5));
     const set = await generateTextVariants({
       clientId: 'c1',
       brief: BRIEF,
@@ -117,7 +136,7 @@ describe('generateTextVariants', () => {
       persist: false,
     });
 
-    expect(run.mock.calls[0]?.[0]?.system).toContain('второго заголовка нет');
+    expect(calls[0]?.system).toContain('второго заголовка нет');
     expect(set.variants.every((v) => v.title2 === undefined)).toBe(true);
   });
 
