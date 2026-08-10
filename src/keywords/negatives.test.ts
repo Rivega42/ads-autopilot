@@ -77,8 +77,10 @@ describe('negativeSuggestionSchema', () => {
 describe('suggestNegatives', () => {
   it('уходит в дешёвую задачу keywords.classify и показывает модели ядро', async () => {
     const run = vi
-      .fn<Parameters<RunNegativesAgent>, ReturnType<RunNegativesAgent>>()
-      .mockResolvedValue(agentRun({ negatives: [{ phrase: 'реферат', reason: 'учебная работа' }] }));
+      .fn<RunNegativesAgent>()
+      .mockResolvedValue(
+        agentRun({ negatives: [{ phrase: 'реферат', reason: 'учебная работа' }] }),
+      );
 
     const result = await suggestNegatives({
       clientId: 'c1',
@@ -97,7 +99,7 @@ describe('suggestNegatives', () => {
   });
 
   it('без запросов и без ядра модель не зовётся', async () => {
-    const run = vi.fn<Parameters<RunNegativesAgent>, ReturnType<RunNegativesAgent>>();
+    const run = vi.fn<RunNegativesAgent>();
     await expect(suggestNegatives({ phrases: [], queries: [], run })).resolves.toEqual([]);
     expect(run).not.toHaveBeenCalled();
   });

@@ -196,11 +196,7 @@ function describeRejection(phrase: string, normalised: string): RejectedPhrase {
   const words = normalised === '' ? 0 : normalised.split(' ').length;
   const chars = textLength(normalised);
   const reason: RejectionReason =
-    normalised === ''
-      ? 'empty'
-      : words > DIRECT_KEYWORD_MAX_WORDS
-        ? 'too-many-words'
-        : 'too-long';
+    normalised === '' ? 'empty' : words > DIRECT_KEYWORD_MAX_WORDS ? 'too-many-words' : 'too-long';
   return { phrase, reason, words, chars };
 }
 
@@ -208,9 +204,7 @@ function describeRejection(phrase: string, normalised: string): RejectedPhrase {
  * Единственный вход в подбор частот: сначала сюда, потом в API.
  *
  * Порядок групп — порядок первого появления: модель ставит ядро в начало списка,
- * и сохранённый порядок делает срез «первые N» осмысленным. Представитель при этом
- * от порядка не зависит, чтобы два прогона с переставленными вариантами дали
- * одинаковые фразы.
+ * и сохранённый порядок делает срез «первые N» осмысленным.
  */
 export function dedupePhrases(phrases: Iterable<string>): DedupeResult {
   const order: string[] = [];

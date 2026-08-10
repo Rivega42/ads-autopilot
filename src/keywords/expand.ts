@@ -27,7 +27,13 @@ export const DEFAULT_EXPANSION_TARGET = 200;
  */
 export const keywordExpansionSchema = z.object({
   phrases: z
-    .array(z.string().trim().min(2).max(DIRECT_KEYWORD_MAX_CHARS * 2))
+    .array(
+      z
+        .string()
+        .trim()
+        .min(2)
+        .max(DIRECT_KEYWORD_MAX_CHARS * 2),
+    )
     .min(1)
     .max(600),
 });

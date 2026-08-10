@@ -60,7 +60,9 @@ function store(
       findFirst: vi
         .fn()
         .mockResolvedValue(
-          options.previousSeed ? { id: 'ks0', seed: options.previousSeed, createdAt: new Date() } : null,
+          options.previousSeed
+            ? { id: 'ks0', seed: options.previousSeed, createdAt: new Date() }
+            : null,
         ),
     },
     keyword: { upsert },

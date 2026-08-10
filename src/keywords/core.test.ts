@@ -216,7 +216,7 @@ describe('buildKeywordCore', () => {
   });
 
   it('useModelNegatives:false обходится словарём и не тратит токены', async () => {
-    const run = vi.fn<Parameters<RunNegativesAgent>, ReturnType<RunNegativesAgent>>();
+    const run = vi.fn<RunNegativesAgent>();
 
     await buildKeywordCore({
       seed: 'курсы английского',
@@ -230,7 +230,7 @@ describe('buildKeywordCore', () => {
   });
 
   it('готовые фразы отменяют вызов модели', async () => {
-    const run = vi.fn<Parameters<RunExpandAgent>, ReturnType<RunExpandAgent>>();
+    const run = vi.fn<RunExpandAgent>();
 
     const core = await buildKeywordCore({
       seed: 'курсы английского',

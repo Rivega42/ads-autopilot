@@ -84,7 +84,9 @@ describe('clusterPhrases (эмбеддинги)', () => {
     name: 'stub',
     embed: (texts) =>
       Promise.resolve(
-        texts.map((text) => (text.includes('ремонт') ? [0, 1] : text.includes('репетитор') ? [0.95, 0.31] : [1, 0])),
+        texts.map((text) =>
+          text.includes('ремонт') ? [0, 1] : text.includes('репетитор') ? [0.95, 0.31] : [1, 0],
+        ),
       ),
   };
 
@@ -104,7 +106,10 @@ describe('clusterPhrases (эмбеддинги)', () => {
   });
 
   it('короткий ответ провайдера — фолбэк, а не нулевые векторы', async () => {
-    const broken: EmbeddingProvider = { name: 'broken', embed: vi.fn().mockResolvedValue([[1, 0]]) };
+    const broken: EmbeddingProvider = {
+      name: 'broken',
+      embed: vi.fn().mockResolvedValue([[1, 0]]),
+    };
     const result = await clusterPhrases(PHRASES, { provider: broken });
     expect(result.method).toBe('lexical-fallback');
     expect(result.degraded).toBe(true);

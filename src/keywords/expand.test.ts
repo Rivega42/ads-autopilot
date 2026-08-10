@@ -44,7 +44,7 @@ describe('keywordExpansionSchema', () => {
 describe('expandSeed', () => {
   it('идёт в дешёвую задачу keywords.expand и возвращает только строки', async () => {
     const run = vi
-      .fn<Parameters<RunExpandAgent>, ReturnType<RunExpandAgent>>()
+      .fn<RunExpandAgent>()
       .mockResolvedValue(agentRun({ phrases: ['курсы английского', 'английский с нуля'] }));
 
     const result = await expandSeed({ seed: 'курсы английского', clientId: 'c1', run, target: 50 });
@@ -59,7 +59,7 @@ describe('expandSeed', () => {
 
   it('кладёт seed, объём и лимит слов в системный промпт', async () => {
     const run = vi
-      .fn<Parameters<RunExpandAgent>, ReturnType<RunExpandAgent>>()
+      .fn<RunExpandAgent>()
       .mockResolvedValue(agentRun({ phrases: ['курсы английского'] }));
 
     await expandSeed({ seed: 'курсы английского', run, target: 200 });
@@ -74,7 +74,7 @@ describe('expandSeed', () => {
 
   it('подставляет заглушку, когда контекста клиента нет', async () => {
     const run = vi
-      .fn<Parameters<RunExpandAgent>, ReturnType<RunExpandAgent>>()
+      .fn<RunExpandAgent>()
       .mockResolvedValue(agentRun({ phrases: ['курсы английского'] }));
 
     await expandSeed({ seed: 'курсы английского', run });

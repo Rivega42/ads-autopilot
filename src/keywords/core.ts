@@ -90,9 +90,7 @@ export interface BuildKeywordCoreOptions {
   now?: () => Date;
 }
 
-export async function buildKeywordCore(
-  options: BuildKeywordCoreOptions,
-): Promise<KeywordCore> {
+export async function buildKeywordCore(options: BuildKeywordCoreOptions): Promise<KeywordCore> {
   const now = options.now ?? ((): Date => new Date());
   const seed = options.seed.trim();
   const clientId = options.clientId ?? null;
