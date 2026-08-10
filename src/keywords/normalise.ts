@@ -244,8 +244,8 @@ export function dedupePhrases(phrases: Iterable<string>): DedupeResult {
   }
 
   const groups: PhraseGroup[] = order.map((key) => {
-    const variants = [...(byKey.get(key) ?? [])].sort();
-    return { key, phrase: shortestVariant(variants), variants };
+    const seen = [...(byKey.get(key) ?? [])];
+    return { key, phrase: shortestVariant(seen), variants: [...seen].sort() };
   });
 
   // Экономия считается от того, сколько запросов ушло бы «в лоб», по одному на
