@@ -53,8 +53,8 @@ describe('wilsonInterval', () => {
 
   it('при нуле кликов не схлопывается в точку (в отличие от Вальда)', () => {
     const interval = wilsonInterval({ successes: 0, trials: 500 });
-    expect(interval.low).toBe(0);
-    expect(interval.high).toBeGreaterThan(0);
+    expect(interval.low).toBeCloseTo(0, 12);
+    expect(interval.high).toBeGreaterThan(0.005);
   });
 
   it('сужается с ростом выборки', () => {

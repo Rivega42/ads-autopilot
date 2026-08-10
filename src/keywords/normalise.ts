@@ -254,7 +254,14 @@ export function dedupePhrases(phrases: Iterable<string>): DedupeResult {
   return { groups, rejected, duplicates: accepted - groups.length, input };
 }
 
-/** Самая короткая формулировка: сначала по числу слов, затем по длине, затем по алфавиту. */
+/**
+ * Самая короткая формулировка; при равной длине побеждает встреченная первой.
+ *
+ * Алфавитный тай-брейк был бы «чище», но именно он выбрал бы представителем
+ * «английского курсы» вместо «курсы английского»: канонический ключ сортирует
+ * слова, и переставленный вариант всегда оказывается раньше по алфавиту. В API и
+ * в отчёт должна уходить человеческая формулировка, а не отсортированный набор слов.
+ */
 function shortestVariant(variants: readonly string[]): string {
   let best = variants[0] ?? '';
   for (const candidate of variants) {
@@ -266,7 +273,5 @@ function shortestVariant(variants: readonly string[]): string {
 function compareVariants(a: string, b: string): number {
   const wordsDiff = a.split(' ').length - b.split(' ').length;
   if (wordsDiff !== 0) return wordsDiff;
-  const lengthDiff = textLength(a) - textLength(b);
-  if (lengthDiff !== 0) return lengthDiff;
-  return a < b ? -1 : a > b ? 1 : 0;
+  return textLength(a) - textLength(b);
 }
