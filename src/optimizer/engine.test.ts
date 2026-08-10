@@ -438,18 +438,45 @@ describe('hasMixedAttribution', () => {
     ...(conversionSource === undefined ? {} : { conversionSource }),
   });
 
+  /** Смесь ищется только среди строк кампании — фикстуры должны быть на этом уровне. */
+  const campaignRow = (conversionSource?: string | null): CampaignStatRecord => ({
+    ...stat('camp-1', 1, { impressions: 500, clicks: 50, spend: 5000, conversions: 3 }, 'CAMPAIGN'),
+    ...(conversionSource === undefined ? {} : { conversionSource }),
+  });
+
   it('одна модель на всё окно смесью не считается', () => {
-    expect(hasMixedAttribution([row('METRIKA'), row('METRIKA')])).toBe(false);
+    expect(hasMixedAttribution([campaignRow('METRIKA'), campaignRow('METRIKA')])).toBe(false);
   });
 
   it('атрибуция площадки рядом с Метрикой — смесь', () => {
-    expect(hasMixedAttribution([row('PLATFORM'), row('METRIKA')])).toBe(true);
+    expect(hasMixedAttribution([campaignRow('PLATFORM'), campaignRow('METRIKA')])).toBe(true);
+  });
+
+  it('площадочные строки ключей рядом с метрикой на кампании — не смесь', () => {
+    // Метрика перезаписывает конверсии только на уровне кампании. Проверка по
+    // всем уровням выключала бы оптимизацию каждому клиенту с Метрикой.
+    expect(
+      hasMixedAttribution([
+        {
+          ...stat(
+            'camp-1',
+            1,
+            { impressions: 500, clicks: 50, spend: 5000, conversions: 3 },
+            'CAMPAIGN',
+          ),
+          conversionSource: 'METRIKA',
+        },
+        { ...row('PLATFORM') },
+      ]),
+    ).toBe(false);
   });
 
   it('строки без признака не считаются отдельной моделью', () => {
     // Старые записи и фикстуры тестов признака не несут. Считай их моделью —
     // и прогон вставал бы на любой не до конца перезалитой истории.
-    expect(hasMixedAttribution([row('PLATFORM'), row(null), row()])).toBe(false);
+    expect(hasMixedAttribution([campaignRow('PLATFORM'), campaignRow(null), campaignRow()])).toBe(
+      false,
+    );
   });
 
   it('пустое окно смесью не считается', () => {

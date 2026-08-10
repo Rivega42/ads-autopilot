@@ -141,22 +141,31 @@ export function toNumber(value: Numeric | null | undefined): number | null {
 }
 
 /**
- * Deterministic per-campaign-per-day identity. Re-running the same day produces the same runId, so
- * idempotency keys derived from it collapse duplicate applications.
- */
-export /**
- * Строки без признака (старые записи, тесты) не считаются отдельной моделью:
+ * Смесь моделей атрибуции в окне — только по строкам уровня кампании.
+ *
+ * Метрика перезаписывает конверсии именно на этом уровне; у групп, объявлений
+ * и фраз они остаются площадочными всегда. Проверка по всем уровням давала бы
+ * смесь у каждого клиента с настроенной Метрикой и навсегда выключала бы ему
+ * оптимизацию. В ingestion/attribution.ts ограничение по уровню есть — сюда
+ * проверку скопировали без него.
+ *
+ * Строки без признака (старые записи, фикстуры) отдельной моделью не считаются:
  * иначе прогон вставал бы на любой не до конца перезалитой истории.
  */
-function hasMixedAttribution(stats: readonly CampaignStatRecord[]): boolean {
+export function hasMixedAttribution(stats: readonly CampaignStatRecord[]): boolean {
   const sources = new Set<string>();
   for (const row of stats) {
+    if (row.entityType !== 'CAMPAIGN') continue;
     if (row.conversionSource) sources.add(row.conversionSource);
     if (sources.size > 1) return true;
   }
   return false;
 }
 
+/**
+ * Deterministic per-campaign-per-day identity. Re-running the same day produces the same runId, so
+ * idempotency keys derived from it collapse duplicate applications.
+ */
 export function buildRunId(campaignId: string, windowEnd: Date): string {
   return `opt:${campaignId}:${windowEnd.toISOString().slice(0, 10)}`;
 }
