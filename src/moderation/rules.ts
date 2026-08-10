@@ -311,8 +311,7 @@ export const MODERATION_RULES: readonly ModerationRule[] = [
     id: 'landing-available',
     category: 'landing_mismatch',
     channels: ALL,
-    requirement:
-      'Сайт должен открываться, не отдавать ошибку и не перенаправлять на другой домен.',
+    requirement: 'Сайт должен открываться, не отдавать ошибку и не перенаправлять на другой домен.',
     fix:
       'Правкой текста не решается: сначала чинится сайт. Объявление до этого остаётся ' +
       'остановленным, иначе площадка отклонит его снова.',
@@ -468,7 +467,8 @@ export const MODERATION_RULES: readonly ModerationRule[] = [
     id: 'alcohol-online-ban',
     category: 'alcohol_tobacco',
     channels: ALL,
-    requirement: 'Реклама алкогольной продукции в информационно-телекоммуникационной сети ' +
+    requirement:
+      'Реклама алкогольной продукции в информационно-телекоммуникационной сети ' +
       '«Интернет» не допускается.',
     fix:
       'Убрать упоминание алкоголя целиком. Если это основной товар — размещение ' +

@@ -7,8 +7,8 @@ import { setMessenger } from '@/approval/index.js';
 import { env } from '@/env.js';
 import { fakeMessenger } from '@/moderation/__tests__/fakes.js';
 import { renderEscalation, sendEscalation } from '@/moderation/escalate.js';
-import { rulesFor } from '@/moderation/rules.js';
 import type { ModerationEscalation } from '@/moderation/escalate.js';
+import { rulesFor } from '@/moderation/rules.js';
 
 function escalation(over: Partial<ModerationEscalation> = {}): ModerationEscalation {
   return {

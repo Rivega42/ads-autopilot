@@ -19,10 +19,7 @@ import { CATEGORY_TITLE, type AdText, type ClassifiedRejection } from '@/moderat
 
 /** Почему автоматика прекратила попытки. */
 export type EscalationCause =
-  | 'retries_exhausted'
-  | 'rewrite_failed'
-  | 'channel_unsupported'
-  | 'apply_failed';
+  'retries_exhausted' | 'rewrite_failed' | 'channel_unsupported' | 'apply_failed';
 
 const CAUSE_TITLE: Readonly<Record<EscalationCause, string>> = {
   retries_exhausted: 'три переписанных варианта подряд получили отказ',
@@ -97,10 +94,7 @@ export function renderEscalation(e: ModerationEscalation): string {
     for (const problem of e.problems) lines.push(`• ${problem}`);
   }
 
-  lines.push(
-    '',
-    `База правил: ${RULES_COUNT} шт. Объявление остановлено до решения человека.`,
-  );
+  lines.push('', `База правил: ${RULES_COUNT} шт. Объявление остановлено до решения человека.`);
 
   const text = lines.join('\n');
   return text.length <= MESSAGE_LIMIT ? text : `${text.slice(0, MESSAGE_LIMIT - 1)}…`;

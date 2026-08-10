@@ -5,9 +5,9 @@ vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
 import { DIRECT_TEXT_MAX } from '@/campaigns/limits.js';
 import { queueRunner } from '@/moderation/__tests__/fakes.js';
+import { rewriteRejectedAd, validateRewrite, REWRITE_CALLS } from '@/moderation/rewrite.js';
 import { rulesFor } from '@/moderation/rules.js';
 import type { AdRewriteDraft } from '@/moderation/schema.js';
-import { rewriteRejectedAd, validateRewrite, REWRITE_CALLS } from '@/moderation/rewrite.js';
 import type { ClassifiedRejection } from '@/moderation/types.js';
 
 const ORIGINAL = {

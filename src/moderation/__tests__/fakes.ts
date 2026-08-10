@@ -1,12 +1,7 @@
 import type { Provider } from '@prisma/client';
 import { vi } from 'vitest';
 
-import type {
-  ChannelAdapter,
-  ChannelContext,
-  RemoteAd,
-  WriteResult,
-} from '@/channels/types.js';
+import type { ChannelAdapter, ChannelContext, RemoteAd, WriteResult } from '@/channels/types.js';
 import type { AgentRun, RunAgentOptions } from '@/clients/llm/index.js';
 import type { AdText } from '@/moderation/types.js';
 

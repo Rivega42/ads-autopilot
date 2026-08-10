@@ -66,11 +66,7 @@ export type RewriteResult =
 
 /** Сравнение «то же самое»: регистр и лишние пробелы объявление не меняют. */
 function normalise(ad: AdText): string {
-  return [ad.title, ad.title2 ?? '', ad.text]
-    .join(' ')
-    .toLowerCase()
-    .replace(/\s+/gu, ' ')
-    .trim();
+  return [ad.title, ad.title2 ?? '', ad.text].join(' ').toLowerCase().replace(/\s+/gu, ' ').trim();
 }
 
 function toAdText(draft: AdRewriteDraft): AdText {

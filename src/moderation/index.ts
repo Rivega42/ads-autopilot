@@ -21,11 +21,7 @@ export {
   type EscalationSink,
   type ModerationEscalation,
 } from '@/moderation/escalate.js';
-export {
-  describeFailure,
-  recordFailure,
-  type ModerationFailure,
-} from '@/moderation/errors.js';
+export { describeFailure, recordFailure, type ModerationFailure } from '@/moderation/errors.js';
 export {
   pollAdModeration,
   type ModerationTarget,
