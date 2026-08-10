@@ -239,19 +239,19 @@ export class FusionBrainProvider implements ImageProvider {
         return { images: result?.files ?? [], censored: result?.censored ?? false };
       }
       if (status === 'FAIL' || status === 'DISABLED_BY_QUEUE') {
-        throw new ImageProviderError(this.name, `generation failed: ${errorDescription ?? status}`, {
-          context: { uuid, status },
-        });
+        throw new ImageProviderError(
+          this.name,
+          `generation failed: ${errorDescription ?? status}`,
+          {
+            context: { uuid, status },
+          },
+        );
       }
 
       if (attempt < this.pollAttempts) await this.sleepImpl(this.pollIntervalMs, signal);
     }
 
-    throw new ImageGenerationTimeoutError(
-      this.name,
-      uuid,
-      this.pollAttempts * this.pollIntervalMs,
-    );
+    throw new ImageGenerationTimeoutError(this.name, uuid, this.pollAttempts * this.pollIntervalMs);
   }
 
   /**
@@ -272,7 +272,10 @@ export class FusionBrainProvider implements ImageProvider {
     return new Uint8Array(Buffer.from(file, 'base64'));
   }
 
-  private async call(path: string, init: RequestInit & { signal?: AbortSignal }): Promise<Response> {
+  private async call(
+    path: string,
+    init: RequestInit & { signal?: AbortSignal },
+  ): Promise<Response> {
     const url = `${this.baseUrl}${path}`;
     const res = await this.fetchImpl(url, { ...init, headers: this.headers() });
     if (!res.ok) {

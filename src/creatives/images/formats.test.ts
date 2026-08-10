@@ -11,10 +11,7 @@ describe('IMAGE_FORMATS', () => {
       'wide_1200x628',
       'story_9x16',
     ]);
-    expect(IMAGE_FORMATS.story_9x16.width / IMAGE_FORMATS.story_9x16.height).toBeCloseTo(
-      9 / 16,
-      6,
-    );
+    expect(IMAGE_FORMATS.story_9x16.width / IMAGE_FORMATS.story_9x16.height).toBeCloseTo(9 / 16, 6);
   });
 });
 
@@ -24,7 +21,9 @@ describe('fitGenerationSize под ограничения Kandinsky', () => {
       const size = fitGenerationSize(IMAGE_FORMATS[name], FUSIONBRAIN_SIZE_LIMITS);
       expect(size.width % FUSIONBRAIN_SIZE_LIMITS.step).toBe(0);
       expect(size.height % FUSIONBRAIN_SIZE_LIMITS.step).toBe(0);
-      expect(Math.max(size.width, size.height)).toBeLessThanOrEqual(FUSIONBRAIN_SIZE_LIMITS.maxSide);
+      expect(Math.max(size.width, size.height)).toBeLessThanOrEqual(
+        FUSIONBRAIN_SIZE_LIMITS.maxSide,
+      );
     }
   });
 

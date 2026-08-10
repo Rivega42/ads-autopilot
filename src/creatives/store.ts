@@ -1,4 +1,4 @@
-import { CreativeKind, type PrismaClient } from '@prisma/client';
+import type { CreativeKind, PrismaClient } from '@prisma/client';
 
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';

@@ -14,7 +14,10 @@ interface StatRow {
   clicks: number;
 }
 
-function storeOf(ads: AdRow[], stats: StatRow[]): { db: ExperimentStore; statWhere: () => unknown } {
+function storeOf(
+  ads: AdRow[],
+  stats: StatRow[],
+): { db: ExperimentStore; statWhere: () => unknown } {
   let captured: unknown;
   const db = {
     ad: { findMany: vi.fn(() => Promise.resolve(ads)) },

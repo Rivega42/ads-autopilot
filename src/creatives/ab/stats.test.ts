@@ -77,7 +77,10 @@ describe('twoProportionZTest', () => {
   });
 
   it('видит различие 5% против 1% на 1000 показов', () => {
-    const test = twoProportionZTest({ successes: 50, trials: 1000 }, { successes: 10, trials: 1000 });
+    const test = twoProportionZTest(
+      { successes: 50, trials: 1000 },
+      { successes: 10, trials: 1000 },
+    );
     expect(test?.pValue).toBeLessThan(0.0001);
   });
 
@@ -87,7 +90,9 @@ describe('twoProportionZTest', () => {
   });
 
   it('возвращает null, когда одной группы фактически нет', () => {
-    expect(twoProportionZTest({ successes: 0, trials: 0 }, { successes: 5, trials: 500 })).toBeNull();
+    expect(
+      twoProportionZTest({ successes: 0, trials: 0 }, { successes: 5, trials: 500 }),
+    ).toBeNull();
   });
 
   it('без кликов вообще различия нет по построению', () => {

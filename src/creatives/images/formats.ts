@@ -48,7 +48,10 @@ export interface GenerationSize {
  * выдаст не то. Перебор по всем допустимым парам дешевле любой формулы и не врёт:
  * вариантов ровно (maxSide/step)², то есть 256 при 1024/64.
  */
-export function fitGenerationSize(format: ImageFormat, limits: GenerationSizeLimits): GenerationSize {
+export function fitGenerationSize(
+  format: ImageFormat,
+  limits: GenerationSizeLimits,
+): GenerationSize {
   const target = format.width / format.height;
   const steps = Math.floor(limits.maxSide / limits.step);
 

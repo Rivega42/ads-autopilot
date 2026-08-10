@@ -217,7 +217,10 @@ describe('validateDrafts', () => {
       title: 'Английский для IT',
       text: 'Разговорный курс с IT-лексикой.',
     };
-    const { variants, rejected } = validateDrafts({ variants: [one, { ...one, angle: 'срок' }] }, 'yandex_direct');
+    const { variants, rejected } = validateDrafts(
+      { variants: [one, { ...one, angle: 'срок' }] },
+      'yandex_direct',
+    );
     expect(variants).toHaveLength(1);
     expect(rejected[0]?.reason).toContain('дубликат');
   });

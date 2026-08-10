@@ -25,7 +25,10 @@ describe('минимум наблюдений', () => {
   });
 
   it('порог настраиваемый и проверяется по каждому варианту отдельно', () => {
-    const decision = selectWinner([variant('a', 200, 20), variant('b', 300, 2)], config({ minImpressionsPerVariant: 100 }));
+    const decision = selectWinner(
+      [variant('a', 200, 20), variant('b', 300, 2)],
+      config({ minImpressionsPerVariant: 100 }),
+    );
     expect(decision.status).toBe('winner');
   });
 

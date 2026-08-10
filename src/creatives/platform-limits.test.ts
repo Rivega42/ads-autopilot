@@ -26,7 +26,10 @@ describe('лимиты Директа на границе', () => {
   it('принимает ровно 33 символа в первом заголовке и отклоняет 34', () => {
     expect(isPlatformValid(draft({ title: ru(DIRECT_TITLE_MAX) }), 'yandex_direct')).toBe(true);
 
-    const violations = findTextViolations(draft({ title: ru(DIRECT_TITLE_MAX + 1) }), 'yandex_direct');
+    const violations = findTextViolations(
+      draft({ title: ru(DIRECT_TITLE_MAX + 1) }),
+      'yandex_direct',
+    );
     expect(violations).toHaveLength(1);
     expect(violations[0]).toMatchObject({
       field: 'title',
@@ -59,9 +62,7 @@ describe('лимиты Директа на границе', () => {
 
   it('пустое обязательное поле — тоже нарушение', () => {
     const violations = findTextViolations({ title: '   ', text: 'Текст' }, 'yandex_direct');
-    expect(violations).toEqual([
-      expect.objectContaining({ field: 'title', kind: 'empty' }),
-    ]);
+    expect(violations).toEqual([expect.objectContaining({ field: 'title', kind: 'empty' })]);
   });
 });
 
