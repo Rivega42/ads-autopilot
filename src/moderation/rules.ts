@@ -391,7 +391,7 @@ export const MODERATION_RULES: readonly ModerationRule[] = [
     source: { authority: YANDEX, ref: 'Требования к текстам объявлений: контактная информация' },
     triggers: [/контактн\p{L}* информац/iu, /телефон/iu, /адрес\p{L}* в тексте/iu],
     forbidden: [
-      /(?:\+7|\b8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}/u,
+      /(?:\+7|(?<![\p{L}\p{N}])8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}/u,
       /[\w.-]+@[\w-]+\.[a-zа-я]{2,}/iu,
     ],
   },
@@ -404,7 +404,10 @@ export const MODERATION_RULES: readonly ModerationRule[] = [
     fix: 'Убрать домен из текста, освободившиеся символы отдать под выгоду.',
     source: { authority: YANDEX, ref: 'Требования к текстам объявлений: адрес сайта' },
     triggers: [/адрес сайта/iu, /url в тексте/iu],
-    forbidden: [/\b(?:https?:\/\/|www\.)\S+/iu, /\b[\w-]+\.(?:ru|рф|com|net|org)\b/iu],
+    forbidden: [
+      /(?:https?:\/\/|www\.)\S+/iu,
+      /[\p{L}\p{N}-]+\.(?:ru|рф|com|net|org)(?![\p{L}\p{N}])/iu,
+    ],
   },
 
   // ── личные характеристики пользователя ─────────────────────────────────────
