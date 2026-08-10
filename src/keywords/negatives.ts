@@ -4,7 +4,12 @@ import { loadPrompt } from '@/ai/prompt-loader.js';
 import { DIRECT_KEYWORD_MAX_WORDS, isValidKeyword } from '@/campaigns/limits.js';
 import { runAgent, type AgentRun, type RunAgentOptions } from '@/clients/llm/index.js';
 import { KEYWORDS_AGENT } from '@/keywords/expand.js';
-import { canonicalKey, normalisePhrase, significantWords } from '@/keywords/normalise.js';
+import {
+  canonicalKey,
+  crudeStem,
+  normalisePhrase,
+  significantWords,
+} from '@/keywords/normalise.js';
 import { logger } from '@/logger.js';
 
 const log = logger.child({ scope: 'keywords:negatives' });
@@ -201,7 +206,11 @@ export interface SelectedNegatives {
  */
 export function selectNegatives(options: SelectNegativesOptions): SelectedNegatives {
   const limit = options.limit ?? MAX_NEGATIVES_PER_GROUP;
-  const protectedSets = options.protectedPhrases.map((phrase) => new Set(significantWords(phrase)));
+  // Сравнение по основам, а не по словоформам: Директ минусует по лемме, и
+  // минус-слово «английский» выключит ключ «курсы английского» ровно так же.
+  const protectedSets = options.protectedPhrases.map(
+    (phrase) => new Set(significantWords(phrase).map(crudeStem)),
+  );
 
   const negatives: NegativeCandidate[] = [];
   const dropped: SelectedNegatives['dropped'] = [];
@@ -220,7 +229,7 @@ export function selectNegatives(options: SelectNegativesOptions): SelectedNegati
       continue;
     }
 
-    const words = significantWords(phrase);
+    const words = significantWords(phrase).map(crudeStem);
     if (protectedSets.some((set) => words.every((word) => set.has(word)))) {
       dropped.push({ phrase: candidate.phrase, reason: 'self-harm' });
       continue;

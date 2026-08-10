@@ -14,7 +14,11 @@ export const rejectionClassificationSchema = z.object({
   category: z.enum(REJECTION_CATEGORIES),
   confidence: z.number().min(0).max(1),
   explanation: z.string().min(1).max(600),
-  fragments: z.array(z.string().min(1)).max(10).default([]),
+  /**
+   * Необязательное, а не `.default([])`: у схемы с дефолтом вход и выход разной
+   * формы, и она перестаёт подходить под `RunAgentOptions.schema`.
+   */
+  fragments: z.array(z.string().min(1)).max(10).optional(),
 });
 
 export type RejectionClassificationDraft = z.infer<typeof rejectionClassificationSchema>;

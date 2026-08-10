@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   canonicalKey,
+  crudeStem,
   dedupePhrases,
   normalisePhrase,
   significantWords,
@@ -38,6 +39,22 @@ describe('canonicalKey', () => {
   it('не схлопывает фразу целиком из предлогов в пустой ключ', () => {
     expect(significantWords('для на')).toEqual(['для', 'на']);
     expect(canonicalKey('для на')).not.toBe('');
+  });
+});
+
+describe('crudeStem', () => {
+  it('сводит словоформы к одной основе', () => {
+    expect(crudeStem('английского')).toBe(crudeStem('английский'));
+    expect(crudeStem('курсы')).toBe(crudeStem('курсов'));
+  });
+
+  it('не режет короткие слова до неузнаваемости', () => {
+    expect(crudeStem('дом')).toBe('дом');
+    expect(crudeStem('чай')).toBe('чай');
+  });
+
+  it('в ключ дедупликации не попадает: словоформы — разные частоты в Wordstat', () => {
+    expect(canonicalKey('курс английского')).not.toBe(canonicalKey('курсы английского'));
   });
 });
 

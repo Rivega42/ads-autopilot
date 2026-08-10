@@ -84,7 +84,7 @@ export async function classifyRejection(
     category: run.data.category,
     confidence: run.data.confidence,
     explanation: run.data.explanation,
-    fragments: run.data.fragments,
+    fragments: run.data.fragments ?? [],
     rules: rulesForRejection(run.data.category, input.channel, reason),
     promptVersion: `${prompt.name}@${prompt.version}`,
   };
