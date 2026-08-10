@@ -28,6 +28,11 @@ export const PROMPT_VERSION = {
   'onboarding-eval-persona': '1.0.0',
   'campaign-structure': '1.0.0',
   'campaign-texts': '1.0.0',
+  'creatives-texts': '1.0.0',
+  'keywords-expand': '1.0.0',
+  'keywords-negatives': '1.0.0',
+  'moderation-classify': '1.0.0',
+  'moderation-rewrite': '1.0.0',
 } as const;
 
 export type PromptName = keyof typeof PROMPT_VERSION;

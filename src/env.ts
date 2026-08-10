@@ -55,6 +55,11 @@ const envSchema = z.object({
   VK_ADS_CLIENT_ID: optionalStr,
   VK_ADS_CLIENT_SECRET: optionalStr,
 
+  // Генерация изображений (TZ §13.3). FusionBrain/Kandinsky авторизуется парой
+  // «ключ + секрет» (заголовки X-Key и X-Secret), одного ключа ему мало.
+  KANDINSKY_API_KEY: optionalStr,
+  KANDINSKY_SECRET_KEY: optionalStr,
+
   ANTHROPIC_API_KEY: optionalStr,
   OPENAI_API_KEY: optionalStr,
   DEEPSEEK_API_KEY: optionalStr,
