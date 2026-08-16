@@ -99,6 +99,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Тесты дашборда тянут значения из @prisma/client (enum ConversionSource),
+      # а `test` в отличие от `build` генерацию не запускает.
+      - run: pnpm --filter web db:generate
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
       - run: pnpm --filter web test
         env:
           DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
