@@ -12,6 +12,7 @@
 | [03-launch-checklist.md](./03-launch-checklist.md)           | Пошаговая настройка в интерфейсе Директа                         |
 | [04-optimization-playbook.md](./04-optimization-playbook.md) | Что делать в 1-ю, 2-ю, 4-ю и 8-ю неделю                          |
 | [structure.md](./structure.md)                               | Полная структура: все группы, фразы, заголовки, тексты           |
+| [creatives/](./creatives/README.md)                          | 15 изображений для РСЯ + разбор фотобазы клиента                 |
 | [export/](./export/)                                         | Файлы для загрузки: TSV, списки ключей и минус-слов              |
 
 ## Файлы для загрузки
