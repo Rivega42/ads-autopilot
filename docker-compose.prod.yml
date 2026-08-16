@@ -69,6 +69,10 @@ services:
 
   worker:
     <<: *app-base
+    # HEALTHCHECK образа стучится в HTTP-порт, которого у воркера нет: с ним
+    # сервис через минуту становится unhealthy, и `up --wait` в deploy.sh ждёт
+    # его до таймаута. Живость процесса и так держит restart-политика.
+    healthcheck: { disable: true }
     environment:
       <<: *app-env
       ROLE: worker
@@ -81,6 +85,8 @@ services:
 
   bot:
     <<: *app-base
+    # То же, что у воркера: long polling не слушает HTTP.
+    healthcheck: { disable: true }
     environment:
       <<: *app-env
       ROLE: bot
