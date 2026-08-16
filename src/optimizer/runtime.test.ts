@@ -226,8 +226,8 @@ describe('createPrismaIdempotencyStore', () => {
 describe('createApplyDb', () => {
   it('writes a ChangeLog row through the narrow port', async () => {
     h.prisma.changeLog.create.mockResolvedValue({ id: 'cl-1' });
-    const db = createApplyDb(db);
-    const row = await db.changeLog.create({
+    const applyDb = createApplyDb(db);
+    const row = await applyDb.changeLog.create({
       data: {
         campaignId: 'c-1',
         entityType: 'KEYWORD',
