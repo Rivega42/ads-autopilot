@@ -81,6 +81,10 @@
   `docker/entrypoint.sh`: api | worker | bot) и `web`, `docker-compose.prod.yml`,
   шаблон nginx с TLS и security-заголовками, `scripts/deploy.sh`,
   `scripts/backup-db.sh`, `docs/DEPLOY.md` и `docs/RUNBOOK.md`.
+- Команды CLI `creatives` и `backfill-metrika`. Обе точки входа существовали, но
+  их никто не звал: генерация текстов и перенос настроек Метрики из брифов были
+  доступны только из кода. Картинки из CLI не заказываются — набор баннеров стоит
+  до $0.15, и такое решение не принимают флагом по умолчанию.
 - CI собирает оба образа и проверяет дашборд отдельной job'ой. Корневой vitest не
   видит `web/lib/**/*.test.ts`, а корневой typecheck не знает про JSX — правки в
   `web/` до сих пор не проверялись ничем.

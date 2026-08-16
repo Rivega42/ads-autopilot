@@ -1,7 +1,9 @@
 import { parseArgs } from 'node:util';
 
+import { backfillMetrikaConfig, clientBriefSchema } from '@/ai/onboarding/index.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { registeredChannels } from '@/channels/registry.js';
+import { generateCreativeSetOnDemand } from '@/creatives/index.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import { runIngestion, runSearchQueryIngestion } from '@/ingestion/index.js';
@@ -27,10 +29,13 @@ function printUsage(): void {
       '  ingest              загрузить сущности и статистику из кабинетов',
       '  search-queries      загрузить поисковые запросы',
       '  optimize            показать решения оптимизатора',
+      '  creatives           сгенерировать тексты объявлений для клиента',
+      '  backfill-metrika    проставить настройки Метрики из готовых брифов',
       '',
       'Опции:',
       '  --client <id>       ограничить одним клиентом',
       '  --apply             применить решения (по умолчанию — только показать)',
+      '  --segment <имя>     сегмент для creatives (по умолчанию — горячий спрос)',
       '  --help',
       '',
       'Без --apply ни одна команда ничего не пишет в рекламные кабинеты.',
@@ -185,12 +190,78 @@ function emptyAggregate(adGroupId: string, query: string) {
   return { adGroupId, query, impressions: 0, clicks: 0, spend: 0, conversions: 0, days: 0 };
 }
 
+/**
+ * Генерация текстов объявлений вручную.
+ *
+ * Картинки отсюда не заказываются: провайдер и форматы выбирает вызывающий, а
+ * набор баннеров стоит до $0.15 — такое решение не принимают флагом по умолчанию.
+ */
+async function cmdCreatives(clientId: string | undefined, segmentName: string | undefined) {
+  if (!clientId) {
+    process.stdout.write('Нужен --client <id>: сегмент генерируется под конкретный бриф.\n');
+    process.exitCode = 1;
+    return;
+  }
+
+  const brief = await prisma.clientBrief.findUnique({
+    where: { clientId },
+    select: { data: true, status: true },
+  });
+  if (!brief) {
+    process.stdout.write(`У клиента ${clientId} нет брифа — сначала онбординг.\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const parsed = clientBriefSchema.safeParse(brief.data);
+  if (!parsed.success) {
+    // Незавершённый бриф — не ошибка данных, а нормальное состояние на середине
+    // интервью: генерировать по нему тексты бессмысленно, а не опасно.
+    process.stdout.write(
+      `Бриф не готов (статус ${brief.status}): ${parsed.error.issues[0]?.message ?? 'не проходит валидацию'}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const name = segmentName ?? 'Горячий спрос';
+  const set = await generateCreativeSetOnDemand({
+    clientId,
+    brief: parsed.data,
+    segment: { name, intent: 'прямой коммерческий запрос' },
+  });
+
+  process.stdout.write(`Сегмент «${name}», вариантов: ${set.texts.variants.length}\n`);
+  for (const v of set.texts.variants) {
+    process.stdout.write(`  • ${v.title}\n    ${v.text}\n`);
+  }
+  for (const r of set.texts.rejected) {
+    process.stdout.write(`  ✗ отклонён: ${r.reason}\n`);
+  }
+  for (const w of set.warnings) process.stdout.write(`  ! ${w}\n`);
+  process.stdout.write(`Стоимость: $${set.totalCostUsd.toFixed(4)}, dryRun=${set.dryRun}\n`);
+}
+
+async function cmdBackfillMetrika(): Promise<void> {
+  const result = await backfillMetrikaConfig();
+  process.stdout.write(
+    `Просмотрено: ${result.scanned}, обновлено: ${result.updated}, пропущено: ${result.skipped}\n`,
+  );
+  if (result.ambiguous.length > 0) {
+    process.stdout.write(
+      `Неоднозначная цель у ${result.ambiguous.length} клиентов — заполнить руками:\n`,
+    );
+    for (const id of result.ambiguous) process.stdout.write(`  • ${id}\n`);
+  }
+}
+
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
       client: { type: 'string' },
       apply: { type: 'boolean', default: false },
+      segment: { type: 'string' },
       help: { type: 'boolean', default: false },
     },
   });
@@ -218,6 +289,12 @@ async function main(): Promise<void> {
       break;
     case 'optimize':
       await cmdOptimize(values.client, values.apply);
+      break;
+    case 'creatives':
+      await cmdCreatives(values.client, values.segment);
+      break;
+    case 'backfill-metrika':
+      await cmdBackfillMetrika();
       break;
     default:
       process.stdout.write(`Неизвестная команда: ${command}\n\n`);
