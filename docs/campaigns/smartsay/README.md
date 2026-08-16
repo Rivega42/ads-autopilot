@@ -13,6 +13,7 @@
 | [04-optimization-playbook.md](./04-optimization-playbook.md) | Что делать в 1-ю, 2-ю, 4-ю и 8-ю неделю                          |
 | [structure.md](./structure.md)                               | Полная структура: все группы, фразы, заголовки, тексты           |
 | [creatives/](./creatives/README.md)                          | 15 изображений для РСЯ + разбор фотобазы клиента                 |
+| [metrika/](./metrika/README.md)                              | Готовый код счётчика и целей для передачи разработчику сайта     |
 | [export/](./export/)                                         | Файлы для загрузки: TSV, списки ключей и минус-слов              |
 
 ## Файлы для загрузки
@@ -33,7 +34,10 @@ export/
 затем перегенерируем:
 
 ```bash
-pnpm campaign:smartsay
+pnpm campaign:smartsay          # файлы для ручной загрузки
+pnpm campaign:deploy            # холостой прогон заливки через API
+pnpm campaign:deploy --apply --counter <id>   # боевая заливка, кампании остановлены
+pnpm yd:check                   # есть ли доступ к API
 ```
 
 Все объявления автоматически проверяются на лимиты Директа (длина заголовков,

@@ -13,6 +13,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { adVariants } from './ad-variants.js';
 import { SMARTSAY_ACCOUNT, UTM_TEMPLATE } from './blueprint.js';
 import { CALLOUTS, SITELINKS } from './extensions.js';
 import type { AdGroupBlueprint, CampaignBlueprint } from './types.js';
@@ -22,9 +23,6 @@ const OUT_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
   '../../../docs/campaigns/smartsay/export',
 );
-
-/** Максимум объявлений на группу: три варианта дают Директу что тестировать. */
-const ADS_PER_GROUP = 3;
 
 const AD_COLUMNS = [
   'Название кампании',
@@ -92,24 +90,6 @@ function slug(value: string): string {
 function landingUrl(group: AdGroupBlueprint): string {
   const separator = group.ad.landingPath.includes('?') ? '&' : '?';
   return `${SMARTSAY_ACCOUNT.site}${group.ad.landingPath}${separator}${UTM_TEMPLATE}`;
-}
-
-interface AdVariant {
-  readonly title: string;
-  readonly title2: string;
-  readonly text: string;
-}
-
-/** Из набора заголовков и текстов собираем несколько непохожих объявлений. */
-function adVariants(group: AdGroupBlueprint): AdVariant[] {
-  const { titles, title2s, texts } = group.ad;
-  const count = Math.min(ADS_PER_GROUP, titles.length, texts.length);
-
-  return Array.from({ length: count }, (_, i) => ({
-    title: titles[i] ?? '',
-    title2: title2s[i % title2s.length] ?? '',
-    text: texts[i] ?? '',
-  }));
 }
 
 function tsv(rows: readonly (readonly string[])[]): string {
