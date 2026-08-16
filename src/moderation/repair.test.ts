@@ -7,6 +7,7 @@ import type { ChannelContext } from '@/channels/types.js';
 import { VkAdsAdapter } from '@/clients/vk-ads/adapter.js';
 import { VK_PATHS } from '@/clients/vk-ads/entities.js';
 import { RateLimitGovernor, type VkTransport } from '@/clients/vk-ads/http.js';
+import { textVariantId } from '@/creatives/types.js';
 import { FakeDb } from '@/moderation/__tests__/fake-db.js';
 import { channelContext, fakeAdapter, queueRunner } from '@/moderation/__tests__/fakes.js';
 import { resolveDeps, type ModerationDeps } from '@/moderation/deps.js';
@@ -143,7 +144,14 @@ describe('repairRejectedAd: штатное переписывание', () => {
     expect(ad.moderationStatus).toBe(ModerationStatus.PENDING);
     expect(ad.moderationReason).toBeNull();
     expect(ad.moderationRetries).toBe(1);
-    expect(ad.llmVariant).toBe('superlative:1');
+    // Отпечаток нового текста, а не метка категории: по этому полю A/B-отчёт
+    // складывает показы и клики, и два разных текста не должны слиться в один вариант.
+    expect(ad.llmVariant).toBe(
+      textVariantId({ title: REWRITE.title, title2: REWRITE.title2, text: REWRITE.text }),
+    );
+    expect(ad.llmVariant).not.toBe(
+      textVariantId({ title: 'Другой заголовок', text: 'Совсем другой текст объявления.' }),
+    );
   });
 
   it('пишет в ChangeLog, чем и по каким правилам заменён текст', async () => {
@@ -236,6 +244,54 @@ describe('repairRejectedAd: эскалация', () => {
     expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.REJECTED);
   });
 
+  it('второй прогон по тому же объявлению не стоит ни одного вызова модели', async () => {
+    const tooLong: AdRewriteDraft = {
+      ...REWRITE,
+      text: 'Мастер приедет с деталями в день обращения, проведёт диагностику, оформит договор и даст чек на работы.',
+    };
+    const h = harness({ rewrites: [tooLong] });
+
+    // Крон ходит каждые полчаса; между прогонами объявление читается из БД заново,
+    // поэтому счётчик попыток берётся оттуда — ровно как это делает pollAdModeration.
+    const outcomes = [];
+    for (let tick = 0; tick < 3; tick += 1) {
+      outcomes.push(await repairRejectedAd(h.rc, rejected({ retries: db.adOf('ad1').moderationRetries })));
+    }
+
+    expect(outcomes).toEqual([
+      { status: 'escalated', cause: 'rewrite_failed' },
+      { status: 'skipped', reason: 'already escalated' },
+      { status: 'skipped', reason: 'already escalated' },
+    ]);
+    // Платит только первый прогон: классификация и три переписывания.
+    expect(h.classifyCalls).toHaveLength(1);
+    expect(h.rewriteCalls).toHaveLength(3);
+    // Человек получает одно письмо, а не по письму каждые полчаса.
+    expect(escalations).toHaveLength(1);
+    // Объявление запарковано на потолке — именно это и делает следующие прогоны бесплатными.
+    expect(db.adOf('ad1').moderationRetries).toBe(3);
+    expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.REJECTED);
+  });
+
+  it('зовёт человека, когда отправка в кабинет упала на полпути', async () => {
+    const h = harness({
+      adapter: fakeAdapter({
+        channel: Provider.YANDEX_DIRECT,
+        updateAdText: () => {
+          throw new Error('VK 500');
+        },
+      }),
+    });
+
+    await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow('VK 500');
+
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]).toMatchObject({ adId: 'ad1', cause: 'apply_failed' });
+    expect(escalations[0]?.problems.join(' ')).toContain('VK 500');
+    // Попытка потрачена, но остаток попыток сохранён: отказ мог быть сетевым.
+    expect(db.adOf('ad1').moderationRetries).toBe(1);
+  });
+
   it('эскалирует канал, который не умеет обновлять текст, до вызова модели', async () => {
     const h = harness({
       adapter: fakeAdapter({ channel: Provider.TIKTOK_ADS }),
@@ -286,10 +342,20 @@ function vkHarness(): { adapter: VkAdsAdapter; calls: { method: string; url: str
   return { adapter, calls };
 }
 
+/**
+ * Ответ модели, годный для VK: заголовок в 25 символов и без второго заголовка,
+ * которого у площадки нет.
+ */
+const VK_REWRITE: AdRewriteDraft = {
+  title: 'Ремонт стиральных машин',
+  text: 'Мастер приедет с деталями. Диагностика перед ремонтом, договор и чек.',
+  changes: 'Убрал превосходную степень.',
+};
+
 describe('repairRejectedAd в VK', () => {
   it('идёт настоящим путём адаптера: создать замену, удалить отклонённый баннер', async () => {
     const vk = vkHarness();
-    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS });
+    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, rewrites: [VK_REWRITE] });
 
     const outcome = await repairRejectedAd(h.rc, rejected());
 
@@ -304,7 +370,12 @@ describe('repairRejectedAd в VK', () => {
 
   it('при dryRun не отправляет ни одной записи и ничего не пишет в БД', async () => {
     const vk = vkHarness();
-    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, ctx: channelContext(true) });
+    const h = harness({
+      adapter: vk.adapter,
+      channel: Provider.VK_ADS,
+      ctx: channelContext(true),
+      rewrites: [VK_REWRITE],
+    });
 
     const outcome = await repairRejectedAd(h.rc, rejected());
 

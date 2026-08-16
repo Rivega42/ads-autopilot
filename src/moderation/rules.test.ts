@@ -85,6 +85,43 @@ describe('лексические детекторы', () => {
     expect(findForbidden(clean, Provider.YANDEX_DIRECT)).toEqual([]);
   });
 
+  it('пропускают общепринятые аббревиатуры, а капслок ловят', () => {
+    for (const clean of ['Оформим ОСАГО и КАСКО', 'Считаем НДФЛ', 'Курсы IELTS и TOEFL', 'СДЭК']) {
+      expect(findForbidden(clean, Provider.YANDEX_DIRECT), clean).toEqual([]);
+    }
+    for (const shouting of ['СКИДКИ до конца недели', 'ДЁШЕВО и быстро']) {
+      expect(
+        findForbidden(shouting, Provider.YANDEX_DIRECT).map((hit) => hit.ruleId),
+        shouting,
+      ).toContain('no-caps-words');
+    }
+  });
+
+  it('считают восклицательные знаки в пределах строки, а не всего объявления', () => {
+    // Склейка полей объявления: заголовок, второй заголовок, текст.
+    const oneEach = 'Ремонт сегодня!\nВыезд мастера\nПриедем и починим!';
+    expect(findForbidden(oneEach, Provider.YANDEX_DIRECT)).toEqual([]);
+    expect(
+      findForbidden('Скидки только сегодня! Успей!', Provider.YANDEX_DIRECT).map((h) => h.ruleId),
+    ).toContain('no-punctuation-spam');
+  });
+
+  it('«100%» ловится как обещание результата, а не как состав товара', () => {
+    expect(findForbidden('Постельное бельё 100% хлопок', Provider.YANDEX_DIRECT)).toEqual([]);
+    expect(
+      findForbidden('100% результат за месяц', Provider.YANDEX_DIRECT).map((h) => h.ruleId),
+    ).toContain('no-absolute-guarantee');
+  });
+
+  it('ловят почту на кириллице, а не только латиницей', () => {
+    for (const withEmail of ['Пишите иван@почта.рф', 'Пишите ivan@example.com']) {
+      expect(
+        findForbidden(withEmail, Provider.YANDEX_DIRECT).map((hit) => hit.ruleId),
+        withEmail,
+      ).toContain('no-contacts-in-text');
+    }
+  });
+
   it('не применяют правила чужого канала', () => {
     const withUrl = 'Подробности на example.ru';
     expect(findForbidden(withUrl, Provider.YANDEX_DIRECT).length).toBeGreaterThan(0);

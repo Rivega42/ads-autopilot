@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
 import { DIRECT_TEXT_MAX } from '@/campaigns/limits.js';
+import { VK_TEXT_MAX, VK_TITLE_MAX } from '@/creatives/platform-limits.js';
 import { queueRunner } from '@/moderation/__tests__/fakes.js';
 import { rewriteRejectedAd, validateRewrite, REWRITE_CALLS } from '@/moderation/rewrite.js';
 import { rulesFor } from '@/moderation/rules.js';
@@ -77,7 +78,84 @@ describe('validateRewrite', () => {
   });
 });
 
+describe('validateRewrite в VK', () => {
+  const vkInput = { ...ORIGINAL, title: 'Лучший ремонт стиралок' };
+
+  it('заголовок в 33 символа Директа для VK слишком длинный', () => {
+    const problems = validateRewrite(
+      vkInput,
+      { title: 'Ремонт стиральных машин на дому', text: 'Мастер приедет с деталями.' },
+      Provider.VK_ADS,
+    );
+    expect(problems.join(' ')).toMatch(new RegExp(`поле title: \\d+ символов при лимите ${VK_TITLE_MAX}`, 'u'));
+  });
+
+  it('текст в 85 символов для VK законный, хотя в Директ он не влезает', () => {
+    const text =
+      'Мастер приедет с деталями в день обращения, проведёт диагностику и оформит договор.';
+    expect(text.length).toBeGreaterThan(DIRECT_TEXT_MAX);
+    expect(text.length).toBeLessThanOrEqual(VK_TEXT_MAX);
+
+    expect(validateRewrite(vkInput, { title: 'Ремонт стиралок', text }, Provider.VK_ADS)).toEqual(
+      [],
+    );
+  });
+
+  it('второй заголовок для VK — нарушение: такого поля у площадки нет', () => {
+    const problems = validateRewrite(
+      vkInput,
+      { title: 'Ремонт стиралок', title2: 'Выезд сегодня', text: 'Мастер приедет с деталями.' },
+      Provider.VK_ADS,
+    );
+    expect(problems.join(' ')).toContain('поле title2');
+  });
+});
+
 describe('rewriteRejectedAd', () => {
+  it('в промпт для VK уезжают лимиты VK, а не Директа', async () => {
+    const runner = queueRunner<AdRewriteDraft>([
+      { title: 'Ремонт стиралок', text: 'Мастер приедет с деталями.', changes: 'Убрал «лучший».' },
+    ]);
+
+    const result = await rewriteRejectedAd(
+      { ...input(), channel: Provider.VK_ADS },
+      { run: runner.run },
+    );
+
+    expect(result.ok).toBe(true);
+    const system = runner.calls[0]?.system ?? '';
+    expect(system).toContain(`не больше **${VK_TITLE_MAX}**`);
+    expect(system).toContain(`не больше **${VK_TEXT_MAX}**`);
+    expect(system).not.toContain(`не больше **${DIRECT_TEXT_MAX}**`);
+    expect(system).toContain('второго заголовка у этой площадки нет');
+  });
+
+  it('для VK переписывает вариант с директовским заголовком, а не отправляет его', async () => {
+    const tooLongForVk: AdRewriteDraft = {
+      title: 'Ремонт стиральных машин на дому',
+      text: 'Мастер приедет с деталями.',
+      changes: 'Убрал «лучший».',
+    };
+    const fits: AdRewriteDraft = {
+      title: 'Ремонт стиралок',
+      text: 'Мастер приедет с деталями. Диагностика и договор.',
+      changes: 'Сократил заголовок.',
+    };
+    const runner = queueRunner<AdRewriteDraft>([tooLongForVk, fits]);
+
+    const result = await rewriteRejectedAd(
+      { ...input(), channel: Provider.VK_ADS },
+      { run: runner.run },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.ad.title).toBe(fits.title);
+    expect(runner.calls[1]?.system).toMatch(
+      new RegExp(`поле title: \\d+ символов при лимите ${VK_TITLE_MAX}`, 'u'),
+    );
+  });
+
   it('возвращает годный вариант с первой попытки', async () => {
     const runner = queueRunner<AdRewriteDraft>([GOOD]);
 

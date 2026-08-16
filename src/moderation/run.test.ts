@@ -219,6 +219,58 @@ describe('runModerationCheck', () => {
     expect(summary.statusUpdated).toBe(2);
   });
 
+  it('запаркованные объявления не съедают потолок переписываний', async () => {
+    // Объявление, уже отданное человеку: счётчик на потолке, письмо отправлено.
+    db.seedAd({
+      id: 'ad0',
+      adGroupId: 'g-cl1',
+      externalId: 'a0',
+      moderationStatus: ModerationStatus.REJECTED,
+      moderationReason: 'Превосходная степень без подтверждения',
+      moderationRetries: 3,
+    });
+    await db.changeLog.create({
+      data: {
+        campaignId: 'c-cl1',
+        entityType: 'AD',
+        entityId: 'ad0',
+        action: 'moderation_escalated',
+        prevValue: {},
+        newValue: { retries: 3, parkedAt: 3, cause: 'rewrite_failed' },
+        reason: 'Модерация: rewrite_failed',
+        actor: 'AI',
+        provider: Provider.YANDEX_DIRECT,
+      },
+    });
+
+    const zombie = remoteAd({
+      externalId: 'a0',
+      adGroupExternalId: 'ext-cl1',
+      moderationStatus: 'REJECTED',
+      moderationReason: 'Превосходная степень без подтверждения',
+    });
+    const adapter = fakeAdapter({
+      channel: Provider.YANDEX_DIRECT,
+      // Порядок кабинета стабилен: зомби всегда идёт первым.
+      ads: [zombie, REJECTED_REMOTE, APPROVED_REMOTE],
+      updateAdText: () => ({ applied: true, plan: {} }),
+    });
+    const { opts } = options();
+
+    const summary = await runModerationCheck({
+      ...opts,
+      adapterFor: () => adapter,
+      maxRepairs: 1,
+    });
+
+    expect(summary.skipped).toBe(1);
+    // Потолок в одну починку достался живому отказу, а не запаркованному объявлению.
+    expect(summary.rewritten).toBe(1);
+    expect(summary.deferred).toBe(0);
+    expect(escalations).toEqual([]);
+    expect(db.adOf('ad1').title).toBe(REWRITE.title);
+  });
+
   it('не трогает объявления, которые прямо сейчас переписывает другой прогон', async () => {
     db.adOf('ad1').moderationStatus = ModerationStatus.REWRITING;
     const { adapter, opts } = options();

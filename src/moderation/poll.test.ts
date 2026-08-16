@@ -35,7 +35,7 @@ describe('pollAdModeration', () => {
     });
 
     const result = await pollAdModeration(empty.asDb(), TARGET, channelContext(false), adapter);
-    expect(result).toEqual({ polled: 0, updated: 0, orphaned: 0, rejected: [] });
+    expect(result).toEqual({ polled: 0, updated: 0, orphaned: 0, reclaimed: 0, rejected: [] });
   });
 
   it('считает чужие объявления сиротами, а не своими', async () => {
@@ -103,6 +103,61 @@ describe('pollAdModeration', () => {
     ]);
 
     expect(result).toMatchObject({ polled: 1, updated: 0, rejected: [] });
+  });
+
+  it('свежий REWRITING не трогает: там работает соседний прогон', async () => {
+    db.seedAd({
+      id: 'ad1',
+      adGroupId: 'g1',
+      externalId: 'a1',
+      moderationStatus: ModerationStatus.REWRITING,
+      moderationRetries: 1,
+    });
+
+    const result = await poll([remoteAd({ externalId: 'a1', adGroupExternalId: 'ext-1' })]);
+
+    expect(result).toMatchObject({ polled: 1, reclaimed: 0, updated: 0, rejected: [] });
+    expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.REWRITING);
+  });
+
+  it('зависший REWRITING возвращает в работу: иначе объявление выключено навсегда', async () => {
+    db.seedAd({
+      id: 'ad1',
+      adGroupId: 'g1',
+      externalId: 'a1',
+      moderationStatus: ModerationStatus.REWRITING,
+      moderationRetries: 1,
+      // Процесс убит между захватом строки и отправкой текста час назад.
+      updatedAt: new Date(Date.now() - 60 * 60 * 1_000),
+    });
+
+    const result = await poll([remoteAd({ externalId: 'a1', adGroupExternalId: 'ext-1' })]);
+
+    expect(result.reclaimed).toBe(1);
+    expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.REJECTED);
+    // Попытка остаётся потраченной: текст мог уйти в кабинет прямо перед падением.
+    expect(db.adOf('ad1').moderationRetries).toBe(1);
+    expect(result.rejected).toHaveLength(1);
+  });
+
+  it('зависший REWRITING на принятом объявлении просто выравнивается по кабинету', async () => {
+    db.seedAd({
+      id: 'ad1',
+      adGroupId: 'g1',
+      externalId: 'a1',
+      moderationStatus: ModerationStatus.REWRITING,
+      moderationRetries: 1,
+      updatedAt: new Date(Date.now() - 60 * 60 * 1_000),
+    });
+
+    const result = await poll([
+      remoteAd({ externalId: 'a1', adGroupExternalId: 'ext-1', moderationStatus: 'ACCEPTED' }),
+    ]);
+
+    expect(result.reclaimed).toBe(1);
+    expect(result.rejected).toEqual([]);
+    expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.APPROVED);
+    expect(db.adOf('ad1').moderationRetries).toBe(0);
   });
 
   it('берёт тексты с площадки, а не из нашей БД', async () => {
