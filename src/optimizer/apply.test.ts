@@ -227,6 +227,47 @@ describe('applyDecisions', () => {
     expect(deps.db.changeLog.create).not.toHaveBeenCalled();
   });
 
+  it('records a platform no-op as such, never as an applied change', async () => {
+    // Минус-слово, уже стоящее в кампании: строка в ChangeLog утверждала бы изменение,
+    // которого не было, и аудит копил бы по 200 ложных записей в день.
+    const deps = createDeps({
+      writeToPlatform: vi.fn(
+        async () => ({ status: 'noop', reason: 'площадке нечего было менять' }) as PlatformWriteResult,
+      ),
+    });
+    const report = await applyDecisions(
+      deps,
+      params([
+        decision({
+          action: 'ADD_NEGATIVE_KEYWORD',
+          entityType: 'ADGROUP',
+          entityId: 'ag-1',
+          prevValue: { kind: 'absent' },
+          nextValue: { kind: 'negativeKeyword', phrase: 'даром' },
+        }),
+      ]),
+    );
+
+    expect(report.noop[0]?.reason).toBe('площадке нечего было менять');
+    expect(report.applied).toEqual([]);
+    expect(report.skipped).toEqual([]);
+    expect(deps.db.changeLog.create).not.toHaveBeenCalled();
+  });
+
+  it('frees the key after a no-op, so the phrase can still be sent later', async () => {
+    const idempotency = createInMemoryIdempotencyStore();
+    const noop = createDeps({
+      idempotency,
+      writeToPlatform: vi.fn(
+        async () => ({ status: 'noop', reason: 'площадке нечего было менять' }) as PlatformWriteResult,
+      ),
+    });
+    await applyDecisions(noop, params([decision()]));
+
+    const retry = createDeps({ idempotency });
+    expect((await applyDecisions(retry, params([decision()]))).applied).toHaveLength(1);
+  });
+
   it('flags an applied change whose ChangeLog row could not be written', async () => {
     const db = createDb();
     vi.mocked(db.changeLog.create).mockRejectedValueOnce(new Error('connection reset'));

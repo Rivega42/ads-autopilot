@@ -364,6 +364,78 @@ describe('runOptimizer', () => {
 
     expect(run.proposed).toEqual([]);
     expect(run.allowed).toEqual([]);
+    // Пустой результат обязан быть отличим от «правила отработали и ничего не нашли».
+    expect(run.targetCpaSource).toBeNull();
+  });
+
+  it('optimizes an imported campaign on the target CPA from the client brief', async () => {
+    const db = createDb({
+      // Импорт не проставляет targetCpa: его пишет только планировщик своих кампаний.
+      campaign: campaignRecord({ targetCpa: null, handoverMode: 'FULL' }),
+      stats: statsOver('kw-1', 3, { impressions: 600, clicks: 30, spend: 6000, conversions: 0 }),
+    });
+    const run = await runOptimizer(db, {
+      campaignId: 'c-1',
+      now: NOW,
+      fallbackTargetCpa: 500,
+    });
+
+    expect(run.targetCpaSource).toBe('brief');
+    expect(run.targets?.targetCpa).toBe(500);
+    expect(run.allowed.map((d) => d.action)).toEqual(['PAUSE']);
+  });
+
+  it('prefers the campaign target over the brief when both exist', async () => {
+    const db = createDb({
+      stats: statsOver('kw-1', 3, { impressions: 600, clicks: 30, spend: 6000, conversions: 0 }),
+    });
+    const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW, fallbackTargetCpa: 99 });
+
+    expect(run.targetCpaSource).toBe('campaign');
+    expect(run.targets?.targetCpa).toBe(500);
+  });
+
+  it('treats a non-positive brief target as no target at all', async () => {
+    const db = createDb({
+      campaign: campaignRecord({ targetCpa: null }),
+      stats: statsOver('kw-1', 3, { impressions: 600, clicks: 30, spend: 6000, conversions: 0 }),
+    });
+    const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW, fallbackTargetCpa: 0 });
+
+    expect(run.targetCpaSource).toBeNull();
+    expect(run.allowed).toEqual([]);
+  });
+
+  it('carries the phrase of a keyword into the decision, not just its cuid', async () => {
+    const db = createDb({
+      keywords: [
+        { id: 'clx8f2k9a0001qz', phrase: 'купить слона дёшево', bid: '10.00', status: 'ACTIVE' },
+      ],
+      stats: statsOver('clx8f2k9a0001qz', 3, {
+        impressions: 600,
+        clicks: 30,
+        spend: 6000,
+        conversions: 0,
+      }),
+    });
+    const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW });
+
+    expect(run.allowed[0]?.label).toBe('купить слона дёшево');
+  });
+
+  it('carries the title of an ad into the decision', async () => {
+    const db = createDb({
+      ads: [{ id: 'ad-1', title: 'Ремонт под ключ за 30 дней' }],
+      stats: statsOver(
+        'ad-1',
+        3,
+        { impressions: 600, clicks: 30, spend: 6000, conversions: 0 },
+        'AD',
+      ),
+    });
+    const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW });
+
+    expect(run.allowed[0]?.label).toBe('Ремонт под ключ за 30 дней');
   });
 
   it('skips the child lookups when the campaign has no ad groups', async () => {

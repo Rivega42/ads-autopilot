@@ -65,11 +65,7 @@ const h = vi.hoisted(() => {
       },
       adGroup: { findMany: vi.fn(async () => []) },
       ad: { findMany: vi.fn(async () => []) },
-      keyword: {
-        findMany: vi.fn(async ({ where }: { where: { id: { in: string[] } } }) =>
-          where.id.in.map((id) => ({ id, externalId: `ext-${id}` })),
-        ),
-      },
+      keyword: { findMany: vi.fn() },
     },
     runtime: {
       createApplyDb: vi.fn(() => ({})),
@@ -196,6 +192,12 @@ beforeEach(() => {
   h.state.reservations = new Set<string>();
   h.runOptimizer.mockResolvedValue(run());
   h.applyDecisions.mockResolvedValue(report());
+  // Реализацию возвращаем каждый раз: clearAllMocks чистит вызовы, но не поведение,
+  // и mockResolvedValue из одного теста иначе протекает в следующий.
+  h.prisma.keyword.findMany.mockImplementation(
+    async ({ where }: { where: { id: { in: string[] } } }) =>
+      where.id.in.map((id) => ({ id, externalId: `ext-${id}` })),
+  );
 });
 
 describe('runScheduledOptimization: IMPORT_HANDOVER', () => {
@@ -243,7 +245,7 @@ describe('runScheduledOptimization: IMPORT_HANDOVER', () => {
   });
 
   it('counts an unbuildable request instead of reporting success', async () => {
-    h.prisma.keyword.findMany.mockResolvedValue([]);
+    h.prisma.keyword.findMany.mockImplementation(async () => []);
     h.runOptimizer.mockResolvedValue(
       run({ approvals: [{ kind: 'IMPORT_HANDOVER', decisions: [pause('kw-1')], summary: 'x' }] }),
     );
