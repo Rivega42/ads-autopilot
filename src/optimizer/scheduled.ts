@@ -1,14 +1,17 @@
+import { createHash } from 'node:crypto';
+
 import type { Provider } from '@prisma/client';
 
-import { applyDecisions } from './apply.js';
+import { applyDecisions, type ApplyReport, type IdempotencyStore } from './apply.js';
 import { runOptimizer } from './engine.js';
 import type { OptimizerRun } from './engine.js';
 import type { ApprovalRequest } from './policy.js';
 import { createApplyDb, createPlatformWriter, createPrismaIdempotencyStore } from './runtime.js';
-import { toApprovalAction, type ApprovalTarget } from './to-approval.js';
+import { toApprovalActions, type ApprovalTarget } from './to-approval.js';
 import type { SearchQueryMetrics } from './types.js';
 
 import { createApproval } from '@/approval/index.js';
+import type { ApprovalAction } from '@/approval/index.js';
 import { prisma } from '@/db/prisma.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
@@ -30,15 +33,38 @@ export interface ScheduledOptimizationSummary {
   autoApply: number;
   /** Посчитано, но не записано из-за dry-run. */
   plannedOnly: number;
+  /** Дошло до площадки, но менять было нечего (минус-слово уже стояло). */
+  noop: number;
   applyFailed: number;
   approvals: number;
   approvalsFailed: number;
+  /** Карточка уже создана этим же прогоном — повтор задачи BullMQ второй не шлёт. */
+  approvalsDuplicate: number;
   rejected: number;
   clamped: number;
+  /**
+   * Кампании без цели по CPA — ни своей, ни в брифе. Три правила из четырёх для них
+   * не работают в принципе, и это должно быть видно в сводке, а не только в пустом результате.
+   */
+  noTargetCpa: number;
   skipped: Record<string, number>;
   failed: number;
 }
 
+/**
+ * Статистика поисковых запросов для правила минус-слов.
+ *
+ * Агрегируем по фразе на всю кампанию, а не по группе, хотя строки лежат по
+ * группам. Причина в том, куда уходит запись: `ChannelAdapter.addNegativeKeywords`
+ * умеет только уровень кампании, то есть блокировка всё равно накроет все группы.
+ * Считая по группе, мы запрещали бы фразу по всей кампании на основании того, что
+ * она слила деньги в одной из них, — даже если в соседней она приносит конверсии.
+ * Радиус решения обязан совпадать с радиусом записи.
+ *
+ * `adGroupId` в агрегате остаётся адресом (по нему runtime находит кампанию, а
+ * предохранители — наблюдения): берём группу с наибольшим расходом, при равенстве
+ * меньший id, чтобы прогон был детерминированным.
+ */
 async function loadSearchQueries(campaignId: string, now: Date): Promise<SearchQueryMetrics[]> {
   const since = new Date(now.getTime() - SEARCH_QUERY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const rows = await prisma.searchQueryStat.findMany({
@@ -46,6 +72,7 @@ async function loadSearchQueries(campaignId: string, now: Date): Promise<SearchQ
     select: {
       adGroupId: true,
       query: true,
+      date: true,
       impressions: true,
       clicks: true,
       spend: true,
@@ -53,12 +80,14 @@ async function loadSearchQueries(campaignId: string, now: Date): Promise<SearchQ
     },
   });
 
-  // Разделитель — NUL: он не может встретиться ни в id, ни в поисковом запросе,
-  // поэтому склейка ключа однозначна.
-  const byKey = new Map<string, SearchQueryMetrics>();
+  interface Aggregate extends SearchQueryMetrics {
+    dates: Set<string>;
+    spendByAdGroup: Map<string, number>;
+  }
+
+  const byQuery = new Map<string, Aggregate>();
   for (const row of rows) {
-    const key = `${row.adGroupId}\u0000${row.query}`;
-    const agg = byKey.get(key) ?? {
+    const agg = byQuery.get(row.query) ?? {
       adGroupId: row.adGroupId,
       query: row.query,
       impressions: 0,
@@ -66,15 +95,56 @@ async function loadSearchQueries(campaignId: string, now: Date): Promise<SearchQ
       spend: 0,
       conversions: 0,
       days: 0,
+      dates: new Set<string>(),
+      spendByAdGroup: new Map<string, number>(),
     };
+    const spend = Number(row.spend);
     agg.impressions += row.impressions;
     agg.clicks += row.clicks;
-    agg.spend += Number(row.spend);
+    agg.spend += spend;
     agg.conversions += row.conversions;
-    agg.days += 1;
-    byKey.set(key, agg);
+    // Дни считаем по датам: одна дата в трёх группах — это один день, а не три.
+    agg.dates.add(row.date.toISOString().slice(0, 10));
+    agg.days = agg.dates.size;
+    agg.spendByAdGroup.set(row.adGroupId, (agg.spendByAdGroup.get(row.adGroupId) ?? 0) + spend);
+    byQuery.set(row.query, agg);
   }
-  return [...byKey.values()];
+
+  return [...byQuery.values()].map(({ dates: _dates, spendByAdGroup, ...metrics }) => ({
+    ...metrics,
+    adGroupId: pickAdGroup(spendByAdGroup, metrics.adGroupId),
+  }));
+}
+
+function pickAdGroup(spendByAdGroup: ReadonlyMap<string, number>, fallback: string): string {
+  let best: { id: string; spend: number } | null = null;
+  for (const [id, spend] of spendByAdGroup) {
+    if (best === null || spend > best.spend || (spend === best.spend && id < best.id)) {
+      best = { id, spend };
+    }
+  }
+  return best?.id ?? fallback;
+}
+
+/**
+ * Целевой CPA из брифа клиента.
+ *
+ * `Campaign.targetCpa` заполняет только планировщик собственных кампаний
+ * (`src/campaigns/apply.ts`), у импортированных он всегда null — а без цели три
+ * правила из четырёх молча возвращают пустой список.
+ */
+async function loadBriefTargetCpa(clientId: string): Promise<number | null> {
+  const brief = await prisma.clientBrief.findUnique({
+    where: { clientId },
+    select: { data: true },
+  });
+  return readTargetCpaRub(brief?.data);
+}
+
+export function readTargetCpaRub(data: unknown): number | null {
+  if (typeof data !== 'object' || data === null) return null;
+  const value = (data as Record<string, unknown>)['targetCpaRub'];
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 /**
@@ -105,23 +175,33 @@ export async function runScheduledOptimization(
     campaigns: campaigns.length,
     autoApply: 0,
     plannedOnly: 0,
+    noop: 0,
     applyFailed: 0,
     approvals: 0,
     approvalsFailed: 0,
+    approvalsDuplicate: 0,
     rejected: 0,
     clamped: 0,
+    noTargetCpa: 0,
     skipped: {},
     failed: 0,
   };
 
+  // Бриф один на клиента, а кампаний у него много: читаем по разу за прогон.
+  const briefTargetCpa = new Map<string, number | null>();
+
   for (const campaign of campaigns) {
     let run: OptimizerRun;
     try {
+      if (!briefTargetCpa.has(campaign.clientId)) {
+        briefTargetCpa.set(campaign.clientId, await loadBriefTargetCpa(campaign.clientId));
+      }
       run = await runOptimizer(prisma, {
         campaignId: campaign.id,
         dryRun: options.dryRun,
         now,
         searchQueries: await loadSearchQueries(campaign.id, now),
+        fallbackTargetCpa: briefTargetCpa.get(campaign.clientId) ?? null,
       });
     } catch (err) {
       summary.failed += 1;
@@ -140,6 +220,14 @@ export async function runScheduledOptimization(
     summary.rejected += run.rejected.length;
     summary.clamped += run.clamped.length;
 
+    if (run.targetCpaSource === null) {
+      summary.noTargetCpa += 1;
+      log.warn(
+        { campaignId: campaign.id, clientId: campaign.clientId },
+        'no target CPA: rules by CPA cannot run for this campaign',
+      );
+    }
+
     // Раньше здесь решения только считались. Прогон читал базу, писал число в
     // лог и заканчивался: ни одна ставка не двигалась, ни одна карточка не
     // уходила человеку. Применение и апрувы — ниже, и это единственное место,
@@ -156,7 +244,9 @@ export async function runScheduledOptimization(
       );
       summary.autoApply += report.applied.length;
       summary.plannedOnly += report.planned.length;
+      summary.noop += report.noop.length;
       summary.applyFailed += report.failed.length;
+      await markNegated(campaign.id, report);
     } catch (err) {
       summary.failed += 1;
       log.error({ campaignId: campaign.id, err: describeError(err) }, 'apply failed');
@@ -164,9 +254,14 @@ export async function runScheduledOptimization(
 
     for (const request of run.approvals) {
       try {
-        const created = await createApprovalCard(request, campaign, options.dryRun);
-        if (created) summary.approvals += 1;
-        else summary.approvalsFailed += 1;
+        const outcome = await createApprovalCards(request, campaign, {
+          dryRun: options.dryRun,
+          runId: run.runId,
+          idempotency,
+        });
+        summary.approvals += outcome.created;
+        summary.approvalsDuplicate += outcome.duplicate;
+        summary.approvalsFailed += outcome.unbuildable;
       } catch (err) {
         summary.approvalsFailed += 1;
         log.error(
@@ -190,17 +285,73 @@ interface CampaignRow {
 }
 
 /**
- * Карточка апрува по решению оптимизатора.
+ * Минус-слова, дошедшие до площадки, помечаются в `SearchQueryStat.negated`.
  *
- * Внешние идентификаторы читаются одним запросом на решение: их знает только
+ * Без этой пометки завтрашний прогон получит новый runId (ключ идемпотентности —
+ * посуточный), увидит те же строки и отправит те же фразы заново: 10 units на
+ * `Campaigns.get` за фразу и запись в ChangeLog об изменении, которого не было.
+ *
+ * Помечаем всю кампанию, а не одну группу: минус-слово добавляется на уровне
+ * кампании, значит и «уже сделано» верно для всех её групп. `noop` — тоже
+ * пометка: фраза уже в кабинете, возвращать её в работу незачем.
+ */
+async function markNegated(campaignId: string, report: ApplyReport): Promise<void> {
+  const phrases = [...report.applied.map((a) => a.decision), ...report.noop.map((n) => n.decision)]
+    .filter((decision) => decision.action === 'ADD_NEGATIVE_KEYWORD')
+    .flatMap((decision) =>
+      decision.nextValue.kind === 'negativeKeyword' ? [decision.nextValue.phrase] : [],
+    );
+  if (phrases.length === 0) return;
+
+  await prisma.searchQueryStat.updateMany({
+    where: { adGroup: { campaignId }, query: { in: [...new Set(phrases)] }, negated: false },
+    data: { negated: true },
+  });
+}
+
+export interface ApprovalCardsOutcome {
+  created: number;
+  duplicate: number;
+  /** Заявка не превратилась ни в одну карточку — человек не увидит ничего. */
+  unbuildable: number;
+}
+
+interface ApprovalCardsDeps {
+  dryRun: boolean;
+  runId: string;
+  idempotency: IdempotencyStore;
+}
+
+/**
+ * Ключ карточки: прогон + содержимое действия.
+ *
+ * `attempts: 3` в DEFAULT_JOB_OPTIONS означает, что упавшая после отправки задача
+ * будет повторена целиком. `runId` детерминирован в пределах суток, действие
+ * собирается из тех же данных — значит повтор получит тот же ключ и не пришлёт
+ * человеку вторую такую же карточку.
+ */
+export function approvalIdempotencyKey(runId: string, action: ApprovalAction): string {
+  const digest = createHash('sha1').update(JSON.stringify(action)).digest('hex').slice(0, 16);
+  return `approval:${runId}:${action.kind}:${digest}`;
+}
+
+/**
+ * Карточки апрува по заявке оптимизатора.
+ *
+ * Одна заявка может дать несколько карточек: `pauseEntities` работает с одним
+ * уровнем за вызов, а режим передачи управления (TZ §15.7) складывает в один
+ * bucket и паузы, и ставки, и минус-слова. Раньше такая заявка возвращала null
+ * и тихо исчезала — безопасный режим выглядел как сломанная система.
+ *
+ * Внешние идентификаторы читаются одним запросом на тип сущности: их знает только
  * наша БД, а апрув применяется через час-другой другим процессом, которому
  * внутренние id бесполезны.
  */
-async function createApprovalCard(
+async function createApprovalCards(
   request: ApprovalRequest,
   campaign: CampaignRow,
-  dryRun: boolean,
-): Promise<boolean> {
+  deps: ApprovalCardsDeps,
+): Promise<ApprovalCardsOutcome> {
   const externalIds = await loadExternalIds(request);
 
   const target: ApprovalTarget = {
@@ -211,17 +362,34 @@ async function createApprovalCard(
     externalIdOf: (entityId) => externalIds.get(entityId) ?? null,
   };
 
-  const action = toApprovalAction(request, target);
-  if (!action) {
+  const actions = toApprovalActions(request, target);
+  if (actions.length === 0) {
     log.warn(
-      { campaignId: campaign.id, kind: request.kind },
+      { campaignId: campaign.id, kind: request.kind, decisions: request.decisions.length },
       'approval card skipped: no external ids or unsupported kind',
     );
-    return false;
+    return { created: 0, duplicate: 0, unbuildable: 1 };
   }
 
-  await createApproval(action, { dryRun });
-  return true;
+  const outcome: ApprovalCardsOutcome = { created: 0, duplicate: 0, unbuildable: 0 };
+  for (const action of actions) {
+    const key = approvalIdempotencyKey(deps.runId, action);
+    if ((await deps.idempotency.reserve(key)) === 'duplicate') {
+      outcome.duplicate += 1;
+      log.info({ campaignId: campaign.id, kind: action.kind, key }, 'approval card already sent');
+      continue;
+    }
+    try {
+      await createApproval(action, { dryRun: deps.dryRun });
+      outcome.created += 1;
+    } catch (err) {
+      // Заявки нет — держать ключ занятым нельзя, иначе повтор задачи не пришлёт
+      // карточку вообще и человек так ничего и не увидит.
+      await deps.idempotency.release(key);
+      throw err;
+    }
+  }
+  return outcome;
 }
 
 async function loadExternalIds(request: ApprovalRequest): Promise<Map<string, string>> {

@@ -82,6 +82,7 @@ export function pauseHighCpaEntities(input: RuleInput, targets: OptimizationTarg
         action: 'PAUSE',
         entityType: entity.entityType,
         entityId: entity.entityId,
+        label: entity.label,
         prevValue: { kind: 'status', status: 'ACTIVE' },
         nextValue: { kind: 'status', status: 'PAUSED' },
         reason:
@@ -119,6 +120,7 @@ export function decreaseBidOnHighCpa(input: RuleInput, targets: OptimizationTarg
         action: 'BID_DECREASE',
         entityType: entity.entityType,
         entityId: entity.entityId,
+        label: entity.label,
         prevValue: { kind: 'bid', amount: bid },
         nextValue: { kind: 'bid', amount: nextBid },
         reason:
@@ -163,6 +165,7 @@ export function increaseBidOnLowCpa(input: RuleInput, targets: OptimizationTarge
         action: 'BID_INCREASE',
         entityType: entity.entityType,
         entityId: entity.entityId,
+        label: entity.label,
         prevValue: { kind: 'bid', amount: bid },
         nextValue: { kind: 'bid', amount: nextBid },
         reason:
@@ -193,6 +196,7 @@ export function addNegativeKeywords(input: RuleInput, _targets: OptimizationTarg
         action: 'ADD_NEGATIVE_KEYWORD',
         entityType: 'ADGROUP',
         entityId: query.adGroupId,
+        label: `«${query.query}»`,
         prevValue: { kind: 'absent' },
         nextValue: { kind: 'negativeKeyword', phrase: query.query },
         reason:

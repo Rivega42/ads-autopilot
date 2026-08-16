@@ -52,6 +52,12 @@ export interface PlatformWriteRequest {
 
 export type PlatformWriteResult =
   | { status: 'applied' }
+  /**
+   * Площадка ответила, что менять нечего (минус-слово уже в списке кампании).
+   * Отдельный статус, а не `applied`: строка в ChangeLog утверждала бы изменение,
+   * которого не было, — и аудит наполнялся бы сотнями ложных записей в день.
+   */
+  | { status: 'noop'; reason: string }
   | { status: 'skipped'; reason: string }
   | { status: 'failed'; reason: string };
 
@@ -124,6 +130,8 @@ export interface ApplyReport {
   campaignId: string;
   dryRun: boolean;
   applied: AppliedChange[];
+  /** Дошло до площадки, но менять было нечего. Изменением не считается, ошибкой — тоже. */
+  noop: SkippedChange[];
   skipped: SkippedChange[];
   failed: FailedChange[];
   /** Populated only in dry-run: what would have been applied. */
@@ -147,6 +155,7 @@ export async function applyDecisions(deps: ApplyDeps, params: ApplyParams): Prom
     campaignId: params.campaignId,
     dryRun: params.dryRun,
     applied: [],
+    noop: [],
     skipped: [],
     failed: [],
     planned: [],
@@ -192,6 +201,8 @@ export async function applyDecisions(deps: ApplyDeps, params: ApplyParams): Prom
       await deps.idempotency.release(key);
       if (result.status === 'skipped') {
         report.skipped.push({ decision, reason: result.reason });
+      } else if (result.status === 'noop') {
+        report.noop.push({ decision, reason: result.reason });
       } else {
         report.failed.push({ decision, reason: result.reason, platformApplied: false });
       }

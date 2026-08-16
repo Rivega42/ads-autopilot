@@ -75,9 +75,9 @@ describe('approval threshold for money changes', () => {
     expect(approvalKindFor(budget(next), context(), false)).toBe(approval ? 'BUDGET_CHANGE' : null);
   });
 
-  it('routes an oversized bid change through the budget gate, for want of a BID_CHANGE kind', () => {
+  it('routes an oversized bid change to BID_CHANGE, which builds a card', () => {
     const oversized = decision({ nextValue: { kind: 'bid', amount: 75 } });
-    expect(approvalKindFor(oversized, context(), false)).toBe('BUDGET_CHANGE');
+    expect(approvalKindFor(oversized, context(), false)).toBe('BID_CHANGE');
   });
 
   it('auto-applies the MVP bid steps, which sit under the threshold', () => {
@@ -91,7 +91,7 @@ describe('approval threshold for money changes', () => {
 
   it('demands approval when the baseline is unknown', () => {
     const unmeasurable = decision({ prevValue: { kind: 'bid', amount: 0 } });
-    expect(approvalKindFor(unmeasurable, context(), false)).toBe('BUDGET_CHANGE');
+    expect(approvalKindFor(unmeasurable, context(), false)).toBe('BID_CHANGE');
   });
 
   it('keeps the documented threshold at 20%', () => {

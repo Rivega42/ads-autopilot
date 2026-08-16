@@ -428,7 +428,7 @@ describe('runOptimizer', () => {
     expect(run.clamped[0]?.rail).toBe('MAX_BID_CHANGE');
     // 30% is above the 20% policy threshold, so a clamped outlier still cannot self-apply.
     expect(run.autoApply).toEqual([]);
-    expect(run.approvals[0]?.kind).toBe('BUDGET_CHANGE');
+    expect(run.approvals[0]?.kind).toBe('BID_CHANGE');
   });
 });
 

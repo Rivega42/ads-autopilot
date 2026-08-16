@@ -27,6 +27,7 @@ const APPROVAL_KIND_ORDER: readonly ApprovalKindName[] = [
   'IMPORT_HANDOVER',
   'MASS_PAUSE',
   'BUDGET_CHANGE',
+  'BID_CHANGE',
   'STRATEGY_CHANGE',
   'NEW_CAMPAIGN',
 ];
@@ -60,7 +61,7 @@ export function classifyDecisions(
   for (const kind of APPROVAL_KIND_ORDER) {
     const bucket = grouped.get(kind);
     if (bucket === undefined || bucket.length === 0) continue;
-    approvals.push({ kind, decisions: bucket, summary: summarize(kind, bucket) });
+    approvals.push({ kind, decisions: bucket, summary: summarizeDecisions(kind, bucket) });
   }
 
   return { autoApply, approvals };
@@ -92,9 +93,10 @@ export function approvalKindFor(
       return exceedsThreshold(decision) ? 'BUDGET_CHANGE' : null;
     case 'BID_DECREASE':
     case 'BID_INCREASE':
-      // ApprovalKind has no BID_CHANGE member on main; a bid above the threshold is still a money
-      // decision, so it rides the BUDGET_CHANGE gate until a dedicated kind exists.
-      return exceedsThreshold(decision) ? 'BUDGET_CHANGE' : null;
+      // Раньше ставки ехали на BUDGET_CHANGE, которого нет ни в APPROVAL_KIND_ORDER
+      // как ставочного, ни в ветке сборки карточки: заявка проваливала проверку
+      // «значение — бюджет» и исчезала. У ApprovalKind есть свой BID_CHANGE.
+      return exceedsThreshold(decision) ? 'BID_CHANGE' : null;
     case 'ADD_NEGATIVE_KEYWORD':
       return null;
     default:
@@ -130,7 +132,18 @@ function isSurgery(decision: Decision): boolean {
   return decision.action === 'ADD_NEGATIVE_KEYWORD' || decision.action === 'PAUSE';
 }
 
-function summarize(kind: ApprovalKindName, decisions: readonly Decision[]): string {
+/**
+ * Текст карточки для набора решений.
+ *
+ * Экспортируется, потому что один bucket политики может разъехаться на несколько
+ * карточек (разные уровни паузы, ставки и бюджет в одном режиме передачи), и текст
+ * обязан описывать ровно те решения, которые попали в эту карточку, — иначе
+ * «Отключить 4 фразы» соседствует со списком из одиннадцати строк.
+ */
+export function summarizeDecisions(
+  kind: ApprovalKindName,
+  decisions: readonly Decision[],
+): string {
   if (decisions.length === 0) return '';
 
   switch (kind) {
@@ -139,7 +152,7 @@ function summarize(kind: ApprovalKindName, decisions: readonly Decision[]): stri
         `Массовое отключение: ${decisions.length} сущностей\n` +
         decisions
           .slice(0, MASS_PAUSE_THRESHOLD)
-          .map((decision) => `• ${decision.entityType} ${decision.entityId}: ${decision.reason}`)
+          .map((decision) => `• ${entityLabel(decision)}: ${decision.reason}`)
           .join('\n') +
         (decisions.length > MASS_PAUSE_THRESHOLD
           ? `\n…и ещё ${decisions.length - MASS_PAUSE_THRESHOLD}`
@@ -150,8 +163,11 @@ function summarize(kind: ApprovalKindName, decisions: readonly Decision[]): stri
         `Режим передачи управления: ${decisions.length} изменений ждут подтверждения\n` +
         decisions
           .slice(0, MASS_PAUSE_THRESHOLD)
-          .map((decision) => `• ${decision.reason}`)
-          .join('\n')
+          .map((decision) => `• ${entityLabel(decision)}: ${decision.reason}`)
+          .join('\n') +
+        (decisions.length > MASS_PAUSE_THRESHOLD
+          ? `\n…и ещё ${decisions.length - MASS_PAUSE_THRESHOLD}`
+          : '')
       );
     default:
       return decisions.map((decision) => `• ${describeChange(decision)}`).join('\n');
@@ -165,7 +181,15 @@ function describeChange(decision: Decision): string {
   const to = amountOf(decision.nextValue);
   const values =
     from === null || to === null ? '' : `: ${formatMoney(from)} → ${formatMoney(to)}${delta}`;
-  return `${decision.entityType} ${decision.entityId}${values}. ${decision.reason}`;
+  return `${entityLabel(decision)}${values}. ${decision.reason}`;
+}
+
+/**
+ * Подпись сущности для человека. Внутренний cuid показываем только когда имени
+ * нет вовсе: по «KEYWORD clx8f2k9a0001qz» невозможно понять, какую фразу убивают.
+ */
+export function entityLabel(decision: Decision): string {
+  return decision.label ?? `${decision.entityType} ${decision.entityId}`;
 }
 
 function amountOf(value: Decision['prevValue']): number | null {

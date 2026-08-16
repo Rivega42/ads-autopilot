@@ -360,7 +360,13 @@ export class YandexDirectAdapter implements ChannelAdapter {
       phrases,
       current,
     );
-    return { applied: true, plan: { ...plan, added, total: total.length }, result: summary };
+    // Все фразы уже в списке кампании — запроса на изменение не было. `applied: true`
+    // здесь врал бы вызывающему, и оптимизатор писал бы в ChangeLog пустое изменение.
+    return {
+      applied: added.length > 0,
+      plan: { ...plan, added, total: total.length },
+      result: summary,
+    };
   }
 
   async updateAdText(

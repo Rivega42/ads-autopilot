@@ -50,6 +50,12 @@ export interface Decision {
   action: DecisionAction;
   entityType: OptimizerEntityType;
   entityId: string;
+  /**
+   * Человекочитаемое имя сущности: фраза ключа, заголовок объявления, имя кампании.
+   * Без него карточка апрува показывает человеку внутренний cuid, по которому
+   * невозможно понять, что именно отключают.
+   */
+  label?: string | null;
   prevValue: DecisionValue;
   nextValue: DecisionValue;
   reason: string;

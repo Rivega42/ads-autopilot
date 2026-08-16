@@ -44,6 +44,8 @@ export interface KeywordRecord {
 
 export interface AdRecord {
   id: string;
+  /** Заголовок объявления — подпись для карточки апрува. Необязателен: фикстуры его не несут. */
+  title?: string | null;
 }
 
 export interface CampaignStatRecord {
@@ -110,10 +112,19 @@ export interface OptimizerRunOptions {
    */
   searchQueries?: SearchQueryMetrics[];
   sources?: readonly DecisionSource[];
+  /**
+   * Целевой CPA клиента из брифа. Импортированным кампаниям (TZ §15) его никто не
+   * проставляет: `Campaign.targetCpa` пишет только планировщик собственных кампаний.
+   * Без этого числа три правила из четырёх молча ничего не возвращают.
+   */
+  fallbackTargetCpa?: number | null;
 }
 
 export type OptimizerSkipReason =
   'CAMPAIGN_NOT_FOUND' | 'CAMPAIGN_NOT_ACTIVE' | 'NO_STATISTICS' | 'MIXED_ATTRIBUTION';
+
+/** Откуда взялась цель по CPA. `null` — цели нет, и правила по CPA работать не будут. */
+export type TargetCpaSource = 'campaign' | 'brief' | null;
 
 export interface OptimizerRun {
   campaignId: string;
@@ -122,6 +133,7 @@ export interface OptimizerRun {
   windowEnd: Date;
   dryRun: boolean;
   targets: OptimizationTargets | null;
+  targetCpaSource: TargetCpaSource;
   proposed: Decision[];
   allowed: Decision[];
   clamped: ClampedDecision[];
@@ -189,6 +201,7 @@ export async function runOptimizer(
     windowEnd,
     dryRun,
     targets: null,
+    targetCpaSource: null,
     proposed: [],
     allowed: [],
     clamped: [],
@@ -235,12 +248,18 @@ export async function runOptimizer(
   const bidByKeywordId = new Map<string, number | null>(
     keywords.map((keyword) => [keyword.id, toNumber(keyword.bid)]),
   );
-  const aggregates = aggregateStats(stats, bidByKeywordId);
+  const labelByEntityId = new Map<string, string>([[campaign.id, campaign.name]]);
+  for (const keyword of keywords) labelByEntityId.set(keyword.id, keyword.phrase);
+  for (const ad of ads) if (ad.title) labelByEntityId.set(ad.id, ad.title);
+
+  const aggregates = aggregateStats(stats, bidByKeywordId, labelByEntityId);
   const entities = aggregates.filter((entity) => entity.entityId !== campaign.id);
 
+  const targetCpaSource = resolveTargetCpaSource(campaign, options.fallbackTargetCpa ?? null);
   const targets = buildTargets(
     campaign,
     aggregates.find((e) => e.entityId === campaign.id) ?? null,
+    options.fallbackTargetCpa ?? null,
   );
   const searchQueries = options.searchQueries ?? [];
   const input: RuleInput = { entities, searchQueries };
@@ -265,6 +284,7 @@ export async function runOptimizer(
     windowEnd,
     dryRun,
     targets,
+    targetCpaSource,
     proposed: deduped,
     allowed: guarded.allowed,
     clamped: guarded.clamped,
@@ -300,9 +320,30 @@ export function resolveConflicts(decisions: readonly Decision[]): Decision[] {
   return result;
 }
 
+/**
+ * Цель по CPA: своя у кампании, иначе — из брифа клиента.
+ *
+ * Ноль и отрицательное значение целью не считаются: правила делят на цель, а
+ * «цель 0» означала бы «любой расход хуже цели» и выключила бы всю кампанию.
+ */
+export function resolveTargetCpa(
+  campaignTargetCpa: Numeric | null,
+  fallback: number | null,
+): { value: number | null; source: TargetCpaSource } {
+  const own = toNumber(campaignTargetCpa);
+  if (own !== null && own > 0) return { value: own, source: 'campaign' };
+  if (fallback !== null && fallback > 0) return { value: fallback, source: 'brief' };
+  return { value: null, source: null };
+}
+
+function resolveTargetCpaSource(campaign: CampaignRecord, fallback: number | null): TargetCpaSource {
+  return resolveTargetCpa(campaign.targetCpa, fallback).source;
+}
+
 function buildTargets(
   campaign: CampaignRecord,
   campaignMetrics: EntityMetrics | null,
+  fallbackTargetCpa: number | null,
 ): OptimizationTargets {
   const dailyBudget = toNumber(campaign.dailyBudget) ?? 0;
   const days = campaignMetrics !== null && campaignMetrics.days > 0 ? campaignMetrics.days : 0;
@@ -312,7 +353,7 @@ function buildTargets(
 
   return {
     campaignId: campaign.id,
-    targetCpa: toNumber(campaign.targetCpa),
+    targetCpa: resolveTargetCpa(campaign.targetCpa, fallbackTargetCpa).value,
     dailyBudget,
     dailySpend,
     handoverMode: campaign.handoverMode,
@@ -348,6 +389,7 @@ function buildGuardrailContext(
 function aggregateStats(
   stats: readonly CampaignStatRecord[],
   bidByKeywordId: ReadonlyMap<string, number | null>,
+  labelByEntityId: ReadonlyMap<string, string>,
 ): EntityMetrics[] {
   const byEntity = new Map<string, EntityMetrics & { dates: Set<string> }>();
 
@@ -356,7 +398,7 @@ function aggregateStats(
     const existing = byEntity.get(key) ?? {
       entityType: row.entityType,
       entityId: row.entityId,
-      label: null,
+      label: labelByEntityId.get(row.entityId) ?? null,
       impressions: 0,
       clicks: 0,
       spend: 0,

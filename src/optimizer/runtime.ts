@@ -9,7 +9,7 @@ import type {
 import type { OptimizerEntityType } from './types.js';
 
 import { buildContext, getAdapter } from '@/channels/registry.js';
-import type { StatLevel } from '@/channels/types.js';
+import type { ChannelContext, StatLevel, WriteResult } from '@/channels/types.js';
 import { prisma } from '@/db/prisma.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
@@ -56,6 +56,19 @@ export function createPrismaIdempotencyStore(
   };
 }
 
+/**
+ * Ответ адаптера в терминах apply.ts.
+ *
+ * `applied: false` вне dry-run — это не «пропущено», а «менять было нечего»:
+ * так отвечает, например, добавление минус-слова, которое уже есть в кампании.
+ * Считать это применением значило бы писать в ChangeLog изменение, которого не было.
+ */
+export function fromWriteResult(res: WriteResult, ctx: ChannelContext): PlatformWriteResult {
+  if (res.applied) return { status: 'applied' };
+  if (ctx.dryRun) return { status: 'skipped', reason: 'dry-run' };
+  return { status: 'noop', reason: 'площадке нечего было менять' };
+}
+
 const LEVEL_BY_ENTITY: Record<OptimizerEntityType, StatLevel> = {
   CAMPAIGN: 'campaign',
   ADGROUP: 'adgroup',
@@ -87,8 +100,7 @@ export function createPlatformWriter(): (
     try {
       switch (req.action) {
         case 'PAUSE': {
-          const res = await adapter.pauseEntities(ctx, level, [target.externalId]);
-          return res.applied ? { status: 'applied' } : { status: 'skipped', reason: 'dry-run' };
+          return fromWriteResult(await adapter.pauseEntities(ctx, level, [target.externalId]), ctx);
         }
         case 'BID_DECREASE':
         case 'BID_INCREASE': {
@@ -98,7 +110,7 @@ export function createPlatformWriter(): (
           const res = await adapter.setBids(ctx, [
             { keywordExternalId: target.externalId, bid: req.nextValue.amount },
           ]);
-          return res.applied ? { status: 'applied' } : { status: 'skipped', reason: 'dry-run' };
+          return fromWriteResult(res, ctx);
         }
         case 'BUDGET_CHANGE': {
           if (req.nextValue.kind !== 'budget') {
@@ -107,7 +119,7 @@ export function createPlatformWriter(): (
           const res = await adapter.setBudgets(ctx, [
             { campaignExternalId: target.externalId, dailyBudget: req.nextValue.amount },
           ]);
-          return res.applied ? { status: 'applied' } : { status: 'skipped', reason: 'dry-run' };
+          return fromWriteResult(res, ctx);
         }
         case 'ADD_NEGATIVE_KEYWORD': {
           if (!adapter.addNegativeKeywords) {
@@ -119,7 +131,7 @@ export function createPlatformWriter(): (
           const campaign = await campaignExternalIdForAdGroup(req.entityId);
           if (!campaign) return { status: 'skipped', reason: 'кампания без внешнего id' };
           const res = await adapter.addNegativeKeywords(ctx, campaign, [req.nextValue.phrase]);
-          return res.applied ? { status: 'applied' } : { status: 'skipped', reason: 'dry-run' };
+          return fromWriteResult(res, ctx);
         }
         default:
           return { status: 'skipped', reason: `действие ${req.action} не поддержано площадкой` };
