@@ -21,6 +21,7 @@ export {
   type AbReasonCode,
   type AbStatus,
   type AbTestConfig,
+  type SelectWinnerOptions,
   type VariantComparison,
   type VariantCounts,
   type VariantReport,
@@ -63,6 +64,7 @@ export {
   type CreativeImage,
   type GenerateImagesOptions,
   type ImageFailure,
+  type ImageFailureKind,
   type ImageSetResult,
 } from './images/generate.js';
 export {

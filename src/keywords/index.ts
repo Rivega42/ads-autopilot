@@ -55,8 +55,10 @@ export {
 export {
   findDictionaryNegatives,
   negativeSuggestionSchema,
+  protectedStems,
   selectNegatives,
   suggestNegatives,
+  suppressesProtected,
   MAX_NEGATIVES_PER_GROUP,
   NEGATIVE_MARKERS,
   type NegativeCandidate,

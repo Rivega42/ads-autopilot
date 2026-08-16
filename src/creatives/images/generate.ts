@@ -2,7 +2,7 @@ import { CreativeKind } from '@prisma/client';
 
 import { imageCache, imageCacheKey, type ImageCache } from './cache.js';
 import { fitGenerationSize, IMAGE_FORMATS, type ImageFormatName } from './formats.js';
-import { checkSetCost, imageCostUsd, type SetCostCheck } from './pricing.js';
+import { checkSetCost, imageCostUsd, IMAGE_SET_BUDGET_USD, type SetCostCheck } from './pricing.js';
 import {
   buildImagePrompt,
   buildNegativePrompt,
@@ -29,8 +29,11 @@ const log = logger.child({ scope: 'creatives:images' });
  *  1. `ctx.dryRun` — ничего не генерируем и ничего не заливаем. Генерация стоит денег,
  *     заливка меняет кабинет; и то и другое при включённом предохранителе запрещено.
  *  2. Каждая генерация пишет строку `Creative` со стоимостью — включая ту, результат
- *     которой мы не станем использовать (цензура): деньги списаны, значит учтены.
+ *     которой мы не станем использовать (цензура) или не получили вовсе (ошибка после
+ *     старта задачи): деньги списаны, значит учтены.
  *  3. Ошибка одного формата не роняет набор. Три баннера из четырёх лучше, чем ноль.
+ *  4. Бюджет набора — потолок ДО расхода, а не отчёт после. Генерация, которая его
+ *     пробивает, не запускается.
  */
 
 /** TZ §13.3: «3-5 вариантов на объявление». */
@@ -48,6 +51,11 @@ export interface GenerateImagesOptions {
   variantsPerFormat?: number;
   /** Готовый промпт вместо собранного из брифа (например, написанный моделью). */
   prompt?: string;
+  /**
+   * Потолок расхода на набор в USD. По умолчанию — бюджет из ТЗ ($0.15 на 3 картинки).
+   * Генерация, после которой сумма вышла бы за потолок, не запускается.
+   */
+  budgetUsd?: number;
   uploader?: ImageUploader;
   db?: CreativeStore;
   cache?: ImageCache;
@@ -75,10 +83,20 @@ export interface CreativeImage {
   image: GeneratedImage | null;
 }
 
+export type ImageFailureKind = 'provider_error' | 'over_budget';
+
 export interface ImageFailure {
   format: ImageFormatName;
   variantIndex: number;
+  kind: ImageFailureKind;
   reason: string;
+  /**
+   * Что списал провайдер за неудачную попытку. 0 — до расхода не дошло (потолок
+   * бюджета), null — цена провайдера неизвестна.
+   */
+  costUsd: number | null;
+  /** Строка учёта на оплаченную неудачу; null — писать было некуда или не за что. */
+  creativeId: string | null;
 }
 
 export interface ImageSetResult {
@@ -105,9 +123,13 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Image
   const variants = clampVariants(opts.variantsPerFormat ?? MIN_IMAGE_VARIANTS);
   const unitCost = imageCostUsd(opts.provider.name, opts.provider.model);
 
+  const budgetUsd = opts.budgetUsd ?? IMAGE_SET_BUDGET_USD;
+
   const images: CreativeImage[] = [];
   const failures: ImageFailure[] = [];
   const warnings: string[] = [];
+  /** Списано провайдером к этому моменту — включая неудачные попытки. */
+  let spentUsd = 0;
 
   for (const format of opts.formats) {
     for (let variantIndex = 0; variantIndex < variants; variantIndex += 1) {
@@ -160,17 +182,61 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Image
         image = cached;
         status = 'cached';
       } else {
+        // Потолок проверяется до вызова, а не после набора: узнать о перерасходе из
+        // отчёта — значит уже его совершить. Неизвестная цена потолком не ограничивается:
+        // остановить набор по выдуманному числу хуже, чем сгенерировать его.
+        if (unitCost !== null && round6(spentUsd + unitCost) > budgetUsd) {
+          failures.push({
+            format,
+            variantIndex,
+            kind: 'over_budget',
+            reason:
+              `бюджет набора исчерпан: потрачено $${spentUsd}, следующая картинка стоит ` +
+              `$${unitCost} при потолке $${budgetUsd}`,
+            costUsd: 0,
+            creativeId: null,
+          });
+          continue;
+        }
+
         try {
           image = await opts.provider.generate(
             request,
             opts.signal ? { signal: opts.signal } : undefined,
           );
           status = 'generated';
+          spentUsd = round6(spentUsd + (unitCost ?? 0));
           cache.set(key, image);
         } catch (err) {
           // Ретрая здесь нет намеренно: генерация платная и не идемпотентная,
-          // а провайдер уже мог начать (и списать) задачу.
-          failures.push({ format, variantIndex, reason: describeError(err) });
+          // а провайдер уже мог начать (и списать) задачу. Раз мог списать — расход
+          // учитывается: неудачная генерация, стоившая ноль, занижает месячный итог
+          // ровно на те деньги, которые труднее всего объяснить.
+          spentUsd = round6(spentUsd + (unitCost ?? 0));
+          failures.push({
+            format,
+            variantIndex,
+            kind: 'provider_error',
+            reason: describeError(err),
+            costUsd: unitCost,
+            creativeId: opts.db
+              ? await saveCreative(opts.db, {
+                  clientId: opts.clientId,
+                  kind: CreativeKind.IMAGE,
+                  provider: `${opts.provider.name}:${opts.provider.model}`,
+                  prompt,
+                  payload: {
+                    format,
+                    variantIndex,
+                    seed: request.seed,
+                    cacheKey: key,
+                    status: 'failed',
+                    error: describeError(err),
+                  },
+                  costUsd: unitCost,
+                })
+              : null,
+          });
           continue;
         }
       }
@@ -238,9 +304,21 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Image
     }
   }
 
-  const totalCostUsd = sum(images.map((i) => i.costUsd));
-  const estimatedCostUsd = unitCost === null ? 0 : round6(unitCost * images.length);
-  const budget = checkSetCost(images.map(() => unitCost));
+  // Оплаченные неудачи входят в итог наравне с картинками: иначе «потрачено» в отчёте
+  // и «списано» у провайдера расходятся ровно на самые обидные деньги.
+  const spent: Array<number | null> = [
+    ...images.map((i) => i.costUsd),
+    ...failures.map((f) => f.costUsd),
+  ];
+  const totalCostUsd = sum(spent);
+  const estimatedCostUsd =
+    unitCost === null ? 0 : round6(unitCost * (images.length + failures.length));
+  const budget = checkSetCost(spent, budgetUsd);
+  if (!budget.withinBudget) {
+    warnings.push(
+      `Набор стоил $${budget.totalUsd} при бюджете $${budget.budgetUsd} — проверьте прайс провайдера.`,
+    );
+  }
 
   log.info(
     {
@@ -250,6 +328,8 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Image
       images: images.length,
       failures: failures.length,
       totalCostUsd,
+      budgetUsd,
+      withinBudget: budget.withinBudget,
     },
     'creative images processed',
   );

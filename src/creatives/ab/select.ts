@@ -44,6 +44,15 @@ export interface AbTestConfig {
   minRelativeLift: number;
   /** Мощность, под которую считается рекомендация «сколько показов ещё нужно». */
   power: number;
+  /**
+   * Сколько дней эксперимент имеет право оставаться в статусе «данные набираются».
+   *
+   * Без срока «набираем данные» — это вечный ответ: вариант, остановленный на двенадцати
+   * показах, никогда не доберёт свои 500, а решение по остальным так и не будет принято.
+   * По истечении срока статус становится «неубедительно» — это уже повод действовать
+   * (оставить всё как есть, выключить эксперимент, переписать креативы), а не ждать.
+   */
+  maxCollectingDays: number;
 }
 
 export const DEFAULT_AB_TEST: AbTestConfig = {
@@ -52,6 +61,7 @@ export const DEFAULT_AB_TEST: AbTestConfig = {
   alpha: 0.05,
   minRelativeLift: 0.1,
   power: 0.8,
+  maxCollectingDays: 14,
 };
 
 export type AbStatus = 'collecting' | 'inconclusive' | 'winner';
@@ -63,7 +73,13 @@ export type AbReasonCode =
   | 'TIE'
   | 'NOT_SIGNIFICANT'
   | 'LIFT_TOO_SMALL'
+  | 'COLLECTION_TIMEOUT'
   | 'WINNER';
+
+export interface SelectWinnerOptions {
+  /** Возраст эксперимента в днях. Не задан — срок не проверяется. */
+  elapsedDays?: number;
+}
 
 export interface VariantReport {
   variantId: string;
@@ -124,6 +140,7 @@ function formatCtr(value: number): string {
 export function selectWinner(
   input: readonly VariantCounts[],
   config: AbTestConfig = DEFAULT_AB_TEST,
+  options: SelectWinnerOptions = {},
 ): AbDecision {
   const variants: VariantReport[] = input.map((variant) => ({
     variantId: variant.variantId,
@@ -155,22 +172,30 @@ export function selectWinner(
     };
   }
 
+  /**
+   * Сравниваем только набравшие минимум.
+   *
+   * Раньше один недобравший вариант останавливал весь набор: объявление, снятое с
+   * показа на двенадцатом показе, замораживало эксперимент, где между лидерами уже
+   * пропасть. Недобравший вариант остаётся в отчёте с пометкой `eligible: false` —
+   * он не исчезает, он просто не участвует в сравнении, пока не наберёт данных.
+   */
+  const ready = variants.filter((v) => v.eligible);
   const notReady = variants.filter((v) => !v.eligible);
-  if (notReady.length > 0) {
-    const worst = Math.min(...notReady.map((v) => v.impressions));
-    return {
-      ...base,
-      status: 'collecting',
-      winner: null,
-      reasonCode: 'MIN_IMPRESSIONS',
-      reason:
-        `Данные ещё набираются: ${notReady.length} из ${variants.length} вариантов не добрали ` +
+  if (ready.length < 2) {
+    const worst = notReady.length > 0 ? Math.min(...notReady.map((v) => v.impressions)) : 0;
+    return collecting(
+      base,
+      'MIN_IMPRESSIONS',
+      `Данные ещё набираются: ${notReady.length} из ${variants.length} вариантов не добрали ` +
         `${config.minImpressionsPerVariant} показов (минимум по набору — ${worst}).`,
-      requiredImpressionsPerVariant: required,
-    };
+      required,
+      config,
+      options,
+    );
   }
 
-  const sorted = [...variants].sort((a, b) => b.ctr - a.ctr);
+  const sorted = [...ready].sort((a, b) => b.ctr - a.ctr);
   const leader = sorted[0];
   const runnerUp = sorted[1];
   if (leader === undefined || runnerUp === undefined) {
@@ -197,7 +222,9 @@ export function selectWinner(
   }
 
   const rivals = sorted.slice(1);
-  const alphaAdjusted = adjustedAlpha(config.alpha, input.length);
+  // Поправка считается по числу реально сделанных сравнений, а не по размеру набора:
+  // варианты, не добравшие показов, ни с кем не сравнивались.
+  const alphaAdjusted = adjustedAlpha(config.alpha, ready.length);
   const comparisons: VariantComparison[] = [];
 
   for (const rival of rivals) {
@@ -221,17 +248,16 @@ export function selectWinner(
 
   const shaky = comparisons.filter((c) => !c.approximationValid);
   if (shaky.length > 0) {
-    const totalClicks = input.reduce((acc, v) => acc + v.clicks, 0);
-    return {
-      ...withDecision,
-      status: 'collecting',
-      winner: null,
-      reasonCode: 'TOO_FEW_CLICKS',
-      reason:
-        `Кликов слишком мало для проверки: всего ${totalClicks} на ${variants.length} вариантов. ` +
+    const totalClicks = ready.reduce((acc, v) => acc + v.clicks, 0);
+    return collecting(
+      withDecision,
+      'TOO_FEW_CLICKS',
+      `Кликов слишком мало для проверки: всего ${totalClicks} на ${ready.length} вариантов. ` +
         `Нужно не меньше ${config.minExpectedCount} ожидаемых кликов и непокликов в каждой группе.`,
-      requiredImpressionsPerVariant: required,
-    };
+      required,
+      config,
+      options,
+    );
   }
 
   const insignificant = comparisons.filter((c) => !c.significant);
@@ -278,6 +304,45 @@ export function selectWinner(
       `против ${formatCtr(runnerUp.ctr)} у ближайшего соперника, ` +
       `p = ${maxPValue(comparisons).toFixed(4)} при пороге ${alphaAdjusted.toFixed(3)}.`,
     requiredImpressionsPerVariant: null,
+  };
+}
+
+type DecisionBase = Pick<AbDecision, 'variants' | 'comparisons' | 'config'>;
+
+/**
+ * Ответ «данные набираются» — либо срок вышел, и тогда это уже «неубедительно».
+ *
+ * Разница не косметическая: `collecting` означает «вернись позже», и вызывающий имеет
+ * право ничего не делать. Просроченный эксперимент такого права не даёт.
+ */
+function collecting(
+  base: DecisionBase,
+  reasonCode: AbReasonCode,
+  reason: string,
+  required: number | null,
+  config: AbTestConfig,
+  options: SelectWinnerOptions,
+): AbDecision {
+  const elapsed = options.elapsedDays;
+  if (elapsed !== undefined && Number.isFinite(elapsed) && elapsed >= config.maxCollectingDays) {
+    return {
+      ...base,
+      status: 'inconclusive',
+      winner: null,
+      reasonCode: 'COLLECTION_TIMEOUT',
+      reason:
+        `Эксперимент идёт ${Math.round(elapsed)} дн. при сроке ${config.maxCollectingDays} — ` +
+        `данных так и не набралось. ${reason} Ждать дальше смысла нет: решает человек.`,
+      requiredImpressionsPerVariant: required,
+    };
+  }
+  return {
+    ...base,
+    status: 'collecting',
+    winner: null,
+    reasonCode,
+    reason,
+    requiredImpressionsPerVariant: required,
   };
 }
 

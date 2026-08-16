@@ -6,6 +6,7 @@ import { evaluateAdExperiment, type ExperimentStore } from './experiment.js';
 interface AdRow {
   id: string;
   llmVariant: string | null;
+  createdAt?: Date;
 }
 
 interface StatRow {
@@ -89,6 +90,43 @@ describe('evaluateAdExperiment', () => {
     expect(result.adsWithoutStats).toEqual(['ad-2']);
     // У «v-b» ноль показов — до порога не добрали, победителя нет.
     expect(result.decision.status).toBe('collecting');
+  });
+
+  it('разные тексты — разные варианты: их статистику нельзя складывать', async () => {
+    // Тот самый случай, ради которого llmVariant хранит отпечаток текста, а не метку:
+    // переписанное модерацией объявление с CTR 10% и слабое с CTR 1%.
+    const { db } = storeOf(
+      [
+        { id: 'ad-1', llmVariant: 't-aaaaaaaaaaaa' },
+        { id: 'ad-2', llmVariant: 't-bbbbbbbbbbbb' },
+      ],
+      [
+        { entityId: 'ad-1', impressions: 1000, clicks: 100 },
+        { entityId: 'ad-2', impressions: 1000, clicks: 10 },
+      ],
+    );
+
+    const result = await evaluateAdExperiment('ag-1', { from: FROM, to: TO, db });
+
+    expect(result.decision.variants).toHaveLength(2);
+    expect(result.decision.winner).toBe('t-aaaaaaaaaaaa');
+    expect(result.decision.reasonCode).not.toBe('NOT_ENOUGH_VARIANTS');
+  });
+
+  it('возраст эксперимента считается по самому старому объявлению группы', async () => {
+    const { db } = storeOf(
+      [
+        { id: 'ad-1', llmVariant: 'v-a', createdAt: new Date('2026-05-01T00:00:00.000Z') },
+        { id: 'ad-2', llmVariant: 'v-b', createdAt: new Date('2026-07-30T00:00:00.000Z') },
+      ],
+      [{ entityId: 'ad-1', impressions: 600, clicks: 30 }],
+    );
+
+    const result = await evaluateAdExperiment('ag-1', { from: FROM, to: TO, db });
+
+    // «v-b» показов не набрал, но тест идёт третий месяц — ждать больше нечего.
+    expect(result.decision.status).toBe('inconclusive');
+    expect(result.decision.reasonCode).toBe('COLLECTION_TIMEOUT');
   });
 
   it('спрашивает статистику по нужному типу сущности и окну', async () => {

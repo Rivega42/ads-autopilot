@@ -17,6 +17,21 @@ const log = logger.child({ scope: 'creatives:ab' });
 
 export type ExperimentStore = Pick<PrismaClient, 'ad' | 'campaignStat'>;
 
+const DAY_MS = 24 * 60 * 60 * 1_000;
+
+function experimentAgeDays(
+  ads: ReadonlyArray<{ createdAt?: Date | null }>,
+  to: Date,
+): number | null {
+  let oldest: number | null = null;
+  for (const ad of ads) {
+    const created = ad.createdAt?.getTime();
+    if (created === undefined || Number.isNaN(created)) continue;
+    if (oldest === null || created < oldest) oldest = created;
+  }
+  return oldest === null ? null : Math.max(0, (to.getTime() - oldest) / DAY_MS);
+}
+
 export interface AdExperimentOptions {
   /** Окно наблюдения включительно. */
   from: Date;
@@ -47,7 +62,7 @@ export async function evaluateAdExperiment(
 ): Promise<AdExperiment> {
   const ads = await opts.db.ad.findMany({
     where: { adGroupId },
-    select: { id: true, llmVariant: true },
+    select: { id: true, llmVariant: true, createdAt: true },
   });
 
   const adsByVariant = new Map<string, string[]>();
@@ -88,7 +103,16 @@ export async function evaluateAdExperiment(
     bucket.clicks += row.clicks;
   }
 
-  const decision = selectWinner([...totals.values()], opts.config);
+  // Возраст эксперимента — от самого старого объявления группы: тест начался тогда,
+  // когда появился первый вариант. Окно наблюдения для этого не годится: его выбирает
+  // вызывающий, и «последние 7 дней» ничего не говорят о том, сколько тест уже идёт.
+  const elapsedDays = experimentAgeDays(ads, opts.to);
+
+  const decision = selectWinner(
+    [...totals.values()],
+    opts.config,
+    elapsedDays === null ? {} : { elapsedDays },
+  );
 
   log.info(
     {

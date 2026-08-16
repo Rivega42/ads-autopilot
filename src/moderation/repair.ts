@@ -64,7 +64,11 @@ function toJson(value: Record<string, unknown>): Prisma.InputJsonObject {
  * ровно одно из них. Счётчик обнуляется, когда площадка объявление принимает
  * (см. `pollAdModeration`), — следующий цикл отказов снова достучится.
  */
-async function alreadyEscalated(db: ModerationDb, adId: string, parkedAt: number): Promise<boolean> {
+async function alreadyEscalated(
+  db: ModerationDb,
+  adId: string,
+  parkedAt: number,
+): Promise<boolean> {
   const rows = await db.changeLog.findMany({
     where: { entityType: 'AD', entityId: adId, action: ESCALATION_ACTION },
     select: { newValue: true },

@@ -183,6 +183,29 @@ export async function suggestNegatives(
   }));
 }
 
+/**
+ * Основы слов защищаемых фраз — по одному набору на фразу.
+ *
+ * Сравнение по основам, а не по словоформам: Директ минусует по лемме, и минус-слово
+ * «английский» выключит ключ «курсы английского» ровно так же, как «английского».
+ */
+export function protectedStems(phrases: readonly string[]): Array<Set<string>> {
+  return phrases.map((phrase) => new Set(significantWords(phrase).map(crudeStem)));
+}
+
+/**
+ * Минус-слово выключит одну из защищаемых фраз?
+ *
+ * Самая дорогая ошибка модуля: все слова минус-фразы лежат внутри ключевой фразы
+ * клиента — Директ просто перестанет показывать объявление по собственному ключу,
+ * и найти причину падения трафика будет нечем.
+ */
+export function suppressesProtected(phrase: string, stems: ReadonlyArray<Set<string>>): boolean {
+  const words = significantWords(phrase).map(crudeStem);
+  if (words.length === 0) return false;
+  return stems.some((set) => words.every((word) => set.has(word)));
+}
+
 export interface SelectNegativesOptions {
   candidates: readonly NegativeCandidate[];
   /** Ключевые фразы ядра. Минус-слово, попадающее в них, отбрасывается. */
@@ -206,11 +229,7 @@ export interface SelectedNegatives {
  */
 export function selectNegatives(options: SelectNegativesOptions): SelectedNegatives {
   const limit = options.limit ?? MAX_NEGATIVES_PER_GROUP;
-  // Сравнение по основам, а не по словоформам: Директ минусует по лемме, и
-  // минус-слово «английский» выключит ключ «курсы английского» ровно так же.
-  const protectedSets = options.protectedPhrases.map(
-    (phrase) => new Set(significantWords(phrase).map(crudeStem)),
-  );
+  const protectedSets = protectedStems(options.protectedPhrases);
 
   const negatives: NegativeCandidate[] = [];
   const dropped: SelectedNegatives['dropped'] = [];
@@ -229,8 +248,7 @@ export function selectNegatives(options: SelectNegativesOptions): SelectedNegati
       continue;
     }
 
-    const words = significantWords(phrase).map(crudeStem);
-    if (protectedSets.some((set) => words.every((word) => set.has(word)))) {
+    if (suppressesProtected(phrase, protectedSets)) {
       dropped.push({ phrase: candidate.phrase, reason: 'self-harm' });
       continue;
     }

@@ -87,7 +87,9 @@ describe('validateRewrite в VK', () => {
       { title: 'Ремонт стиральных машин на дому', text: 'Мастер приедет с деталями.' },
       Provider.VK_ADS,
     );
-    expect(problems.join(' ')).toMatch(new RegExp(`поле title: \\d+ символов при лимите ${VK_TITLE_MAX}`, 'u'));
+    expect(problems.join(' ')).toMatch(
+      new RegExp(`поле title: \\d+ символов при лимите ${VK_TITLE_MAX}`, 'u'),
+    );
   });
 
   it('текст в 85 символов для VK законный, хотя в Директ он не влезает', () => {

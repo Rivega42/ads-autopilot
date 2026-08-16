@@ -32,6 +32,7 @@ interface StoreMocks {
   upsert: ReturnType<typeof vi.fn>;
   createSet: ReturnType<typeof vi.fn>;
   findQueries: ReturnType<typeof vi.fn>;
+  findKeywords: ReturnType<typeof vi.fn>;
 }
 
 function store(
@@ -40,11 +41,14 @@ function store(
     previousSeed?: string | null;
     brief?: { data: unknown; status: string } | null;
     queries?: Array<{ adGroupId: string; query: string }>;
+    /** Живые ключевые фразы кабинета: то, за что клиент платит прямо сейчас. */
+    keywords?: Array<{ adGroupId: string; phrase: string }>;
   } = {},
 ): StoreMocks {
   const upsert = vi.fn().mockResolvedValue({ id: 'k1' });
   const createSet = vi.fn().mockResolvedValue({ id: 'ks1' });
   const findQueries = vi.fn().mockResolvedValue(options.queries ?? []);
+  const findKeywords = vi.fn().mockResolvedValue(options.keywords ?? []);
 
   const db = {
     client: { findMany: vi.fn().mockResolvedValue(options.clients ?? [{ id: 'c1' }]) },
@@ -65,11 +69,11 @@ function store(
             : null,
         ),
     },
-    keyword: { upsert },
+    keyword: { upsert, findMany: findKeywords },
     searchQueryStat: { findMany: findQueries },
   } as unknown as KeywordRefreshStore;
 
-  return { db, upsert, createSet, findQueries };
+  return { db, upsert, createSet, findQueries, findKeywords };
 }
 
 const runExpand: RunExpandAgent = () =>
@@ -172,6 +176,68 @@ describe('runWeeklyKeywordRefresh', () => {
     });
     expect(summary.negativesWritten).toBe(1);
     expect(summary.results[0]?.adGroups).toBe(1);
+  });
+
+  it('предсказание модели не уходит в группу, чей живой ключ оно выключит', async () => {
+    const { db, upsert } = store({
+      queries: [
+        { adGroupId: 'ag1', query: 'курсы английского онлайн' },
+        { adGroupId: 'ag2', query: 'курсы английского цена' },
+      ],
+      keywords: [
+        { adGroupId: 'ag1', phrase: 'скачать разговорник английского' },
+        { adGroupId: 'ag2', phrase: 'курсы английского для программистов' },
+      ],
+    });
+    const predictive: RunNegativesAgent = () =>
+      Promise.resolve({
+        data: { negatives: [{ phrase: 'скачать', reason: 'ищут файл, а не услугу' }] },
+        text: '',
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        usage: { tokensIn: 1, tokensOut: 1 },
+        costUsd: 0,
+        latencyMs: 1,
+        cached: false,
+        aiRunId: '3',
+      } satisfies AgentRun<NegativeSuggestion>);
+
+    const summary = await runWeeklyKeywordRefresh({ db, ...BASE, runNegatives: predictive });
+
+    const groups = upsert.mock.calls.map(
+      (call) =>
+        (call[0] as { where: { adGroupId_matchType_phrase: { adGroupId: string } } }).where
+          .adGroupId_matchType_phrase.adGroupId,
+    );
+    expect(groups).toEqual(['ag2']);
+    expect(summary.results[0]?.negativesSuppressed).toBe(1);
+  });
+
+  it('предсказание без живых ключей никуда не пишется: проверить его не обо что', async () => {
+    const { db, upsert } = store({
+      queries: [
+        { adGroupId: 'ag1', query: 'курсы английского онлайн' },
+        { adGroupId: 'ag2', query: 'курсы английского цена' },
+      ],
+      keywords: [],
+    });
+    const predictive: RunNegativesAgent = () =>
+      Promise.resolve({
+        data: { negatives: [{ phrase: 'скачать', reason: 'ищут файл, а не услугу' }] },
+        text: '',
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        usage: { tokensIn: 1, tokensOut: 1 },
+        costUsd: 0,
+        latencyMs: 1,
+        cached: false,
+        aiRunId: '3',
+      } satisfies AgentRun<NegativeSuggestion>);
+
+    const summary = await runWeeklyKeywordRefresh({ db, ...BASE, runNegatives: predictive });
+
+    expect(upsert).not.toHaveBeenCalled();
+    expect(summary.negativesWritten).toBe(0);
   });
 
   it('в dry run ничего не пишет, но считает', async () => {

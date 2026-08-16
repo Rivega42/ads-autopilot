@@ -255,7 +255,9 @@ describe('repairRejectedAd: эскалация', () => {
     // поэтому счётчик попыток берётся оттуда — ровно как это делает pollAdModeration.
     const outcomes = [];
     for (let tick = 0; tick < 3; tick += 1) {
-      outcomes.push(await repairRejectedAd(h.rc, rejected({ retries: db.adOf('ad1').moderationRetries })));
+      outcomes.push(
+        await repairRejectedAd(h.rc, rejected({ retries: db.adOf('ad1').moderationRetries })),
+      );
     }
 
     expect(outcomes).toEqual([

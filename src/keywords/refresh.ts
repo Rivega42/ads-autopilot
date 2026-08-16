@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import { MatchType, type PrismaClient } from '@prisma/client';
 
 import { parseCompleteBrief, type ClientBriefData } from '@/ai/onboarding/brief.schema.js';
 import { prisma } from '@/db/prisma.js';
@@ -8,7 +8,11 @@ import type { EmbeddingProvider } from '@/keywords/cluster.js';
 import { buildKeywordCore, type KeywordCore } from '@/keywords/core.js';
 import type { RunExpandAgent } from '@/keywords/expand.js';
 import { unavailableFrequencySource, type FrequencySource } from '@/keywords/frequency.js';
-import type { RunNegativesAgent } from '@/keywords/negatives.js';
+import {
+  protectedStems,
+  suppressesProtected,
+  type RunNegativesAgent,
+} from '@/keywords/negatives.js';
 import { latestKeywordSet, writeNegativeKeywords } from '@/keywords/store.js';
 import { logger } from '@/logger.js';
 
@@ -44,6 +48,8 @@ export interface ClientRefreshResult {
   clusters: number;
   negatives: number;
   negativesWritten: number;
+  /** Пар «группа × фраза», отброшенных из-за живых ключей этой группы. */
+  negativesSuppressed: number;
   adGroups: number;
   /** true — кластеризация лексическая, а не по эмбеддингам. */
   degradedClustering: boolean;
@@ -177,7 +183,7 @@ export async function runWeeklyKeywordRefresh(
     try {
       const rows = await loadSearchQueries(db, target.clientId, window.from, window.to);
       const core = await buildCore(target, rows, options, db, now);
-      const written = await persistNegatives(db, core, rows, dryRun);
+      const written = await persistNegatives(db, target.clientId, core, rows, dryRun);
 
       results.push({
         clientId: target.clientId,
@@ -186,6 +192,7 @@ export async function runWeeklyKeywordRefresh(
         clusters: core.clusters.length,
         negatives: core.negatives.length,
         negativesWritten: written.written,
+        negativesSuppressed: written.suppressed,
         adGroups: written.adGroups,
         degradedClustering: core.clustering.degraded,
         frequenciesAvailable: core.frequencies.available,
@@ -237,36 +244,93 @@ async function buildCore(
 }
 
 /**
+ * Живые ключевые фразы клиента по группам.
+ *
+ * Минус-слова обязаны сверяться именно с ними, а не с только что собранным ядром:
+ * ядро — это предложение на будущее, а в кабинете прямо сейчас крутятся фразы, за
+ * которые клиент платит. Совпадения между ними может не быть вовсе — например, если
+ * группу заводили руками.
+ */
+async function loadLiveKeywords(
+  db: KeywordRefreshStore,
+  clientId: string,
+): Promise<Map<string, string[]>> {
+  const rows = await db.keyword.findMany({
+    where: {
+      adGroup: { campaign: { clientId } },
+      // Статус не фильтруем: остановленную фразу включают обратно, а минус-слово
+      // к тому моменту уже стоит и молча выключает её снова.
+      matchType: { not: MatchType.NEGATIVE },
+    },
+    select: { adGroupId: true, phrase: true },
+  });
+
+  const byGroup = new Map<string, string[]>();
+  for (const row of rows) {
+    const bucket = byGroup.get(row.adGroupId);
+    if (bucket === undefined) byGroup.set(row.adGroupId, [row.phrase]);
+    else bucket.push(row.phrase);
+  }
+  return byGroup;
+}
+
+/**
  * Минус-слово вешается на группу, а не на клиента: ключ `Keyword` — `adGroupId`,
- * и правило 4 оптимизатора адресует их так же. Пишем в те группы, чьи запросы
- * и породили кандидатов; предложения модели без привязки к запросу уходят во все
- * группы, где вообще была статистика, — иначе они не попадут никуда.
+ * и правило 4 оптимизатора адресует их так же.
+ *
+ * Адресация зависит от того, чем кандидат подтверждён:
+ *
+ *  • есть запросы — пишем в те группы, чьи запросы его и породили: доказательство
+ *    привязано к группе, туда же едет и минус-слово;
+ *  • запросов нет (чистое предсказание модели) — пишем только в группы, у которых
+ *    есть живые ключевые фразы. Раньше такие предложения уходили во все группы со
+ *    статистикой: самый широкий охват при самом слабом основании, и проверить их там
+ *    было не обо что.
+ *
+ * Поверх обоих путей — сверка с живыми фразами группы: минус-слово, целиком лежащее
+ * внутри собственного ключа клиента, выключает его показы. `selectNegatives` такую
+ * проверку делает только против ядра, а ядро и кабинет — разные списки.
  */
 async function persistNegatives(
   db: KeywordRefreshStore,
+  clientId: string,
   core: KeywordCore,
   rows: readonly QueryRow[],
   dryRun: boolean,
-): Promise<{ written: number; adGroups: number }> {
-  if (core.negatives.length === 0 || rows.length === 0) return { written: 0, adGroups: 0 };
+): Promise<{ written: number; adGroups: number; suppressed: number }> {
+  if (core.negatives.length === 0 || rows.length === 0) {
+    return { written: 0, adGroups: 0, suppressed: 0 };
+  }
 
   const groupsByQuery = new Map<string, Set<string>>();
-  const allGroups = new Set<string>();
   for (const row of rows) {
-    allGroups.add(row.adGroupId);
     const bucket = groupsByQuery.get(row.query);
     if (bucket === undefined) groupsByQuery.set(row.query, new Set([row.adGroupId]));
     else bucket.add(row.adGroupId);
   }
 
+  const live = await loadLiveKeywords(db, clientId);
+  const stemsByGroup = new Map<string, Array<Set<string>>>();
+  for (const [adGroupId, phrases] of live) stemsByGroup.set(adGroupId, protectedStems(phrases));
+
   const perGroup = new Map<string, Set<string>>();
+  let suppressed = 0;
   for (const negative of core.negatives) {
     const targets =
       negative.queries.length === 0
-        ? allGroups
+        ? new Set(live.keys())
         : new Set(negative.queries.flatMap((query) => [...(groupsByQuery.get(query) ?? [])]));
 
     for (const adGroupId of targets) {
+      const stems = stemsByGroup.get(adGroupId) ?? [];
+      if (suppressesProtected(negative.phrase, stems)) {
+        suppressed += 1;
+        log.info(
+          { clientId, adGroupId, phrase: negative.phrase, source: negative.source },
+          'negative skipped: it would suppress a live keyword of this ad group',
+        );
+        continue;
+      }
       const bucket = perGroup.get(adGroupId);
       if (bucket === undefined) perGroup.set(adGroupId, new Set([negative.phrase]));
       else bucket.add(negative.phrase);
@@ -279,5 +343,5 @@ async function persistNegatives(
     written += result.written;
   }
 
-  return { written, adGroups: perGroup.size };
+  return { written, adGroups: perGroup.size, suppressed };
 }

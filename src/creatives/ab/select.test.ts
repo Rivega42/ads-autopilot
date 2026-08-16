@@ -36,6 +36,55 @@ describe('минимум наблюдений', () => {
     const decision = selectWinner([variant('a', 100, 5), variant('b', 900, 20)]);
     expect(decision.variants.map((v) => v.eligible)).toEqual([false, true]);
   });
+
+  it('один недобравший вариант не замораживает решение по остальным', () => {
+    // «c» сняли с показа на двенадцатом показе. «a» и «b» набрали по 1000 —
+    // между ними пропасть, и ждать «c» незачем.
+    const decision = selectWinner([
+      variant('a', 1000, 50),
+      variant('b', 1000, 10),
+      variant('c', 12, 0),
+    ]);
+
+    expect(decision.status).toBe('winner');
+    expect(decision.winner).toBe('a');
+    // Недобравший вариант из отчёта не исчез — он просто не участвовал в сравнении.
+    expect(decision.variants).toHaveLength(3);
+    expect(decision.comparisons.map((c) => c.variantId)).toEqual(['b']);
+  });
+
+  it('меньше двух готовых вариантов — данные всё ещё набираются', () => {
+    const decision = selectWinner([variant('a', 1000, 50), variant('b', 12, 0)]);
+    expect(decision.status).toBe('collecting');
+    expect(decision.reasonCode).toBe('MIN_IMPRESSIONS');
+  });
+});
+
+describe('срок эксперимента', () => {
+  it('через две недели «данные набираются» превращается в «неубедительно»', () => {
+    const counts = [variant('a', 1000, 50), variant('b', 12, 0)];
+
+    expect(selectWinner(counts, DEFAULT_AB_TEST, { elapsedDays: 13 }).status).toBe('collecting');
+
+    const expired = selectWinner(counts, DEFAULT_AB_TEST, { elapsedDays: 21 });
+    expect(expired.status).toBe('inconclusive');
+    expect(expired.reasonCode).toBe('COLLECTION_TIMEOUT');
+    expect(expired.reason).toContain('21 дн.');
+  });
+
+  it('срок не отменяет победителя: данных хватило — решение есть', () => {
+    const decision = selectWinner(
+      [variant('a', 1000, 50), variant('b', 1000, 10)],
+      DEFAULT_AB_TEST,
+      { elapsedDays: 90 },
+    );
+    expect(decision.status).toBe('winner');
+  });
+
+  it('без возраста эксперимента срок не проверяется', () => {
+    const decision = selectWinner([variant('a', 1000, 50), variant('b', 12, 0)]);
+    expect(decision.status).toBe('collecting');
+  });
 });
 
 describe('отказ выбирать победителя на шуме', () => {

@@ -199,6 +199,107 @@ describe('генерация', () => {
   });
 });
 
+/** Платный провайдер: $0.04 за картинку по прайсу. */
+function paidProviderOf(): { provider: ImageProvider; generate: ReturnType<typeof vi.fn> } {
+  const generate = vi.fn(() =>
+    Promise.resolve(image({ provider: 'openai', model: 'dall-e-3', width: 1024, height: 1024 })),
+  );
+  const provider: ImageProvider = {
+    name: 'openai',
+    model: 'dall-e-3',
+    sizeLimits: { maxSide: 1024, step: 64 },
+    isConfigured: () => true,
+    generate,
+  };
+  return { provider, generate };
+}
+
+describe('учёт расхода', () => {
+  it('упавшая генерация записывается как расход: провайдер её уже мог списать', async () => {
+    const { provider, generate } = paidProviderOf();
+    const { db, rows } = storeOf();
+    generate.mockRejectedValueOnce(new Error('провайдер лёг'));
+
+    const result = await generateImages({
+      clientId: 'c1',
+      brief: BRIEF,
+      formats: ['square_1080'],
+      variantsPerFormat: 3,
+      provider,
+      db,
+      ctx: { dryRun: false },
+      cache: new ImageCache(),
+    });
+
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toMatchObject({ kind: 'provider_error', costUsd: 0.04 });
+    expect(result.failures[0]?.creativeId).not.toBeNull();
+    // Три платных вызова: два удачных плюс один упавший.
+    expect(result.totalCostUsd).toBeCloseTo(0.12, 6);
+    expect(rows()).toHaveLength(3);
+    expect(
+      rows().filter((row) => (row.payload as { status: string }).status === 'failed'),
+    ).toHaveLength(1);
+  });
+
+  it('бюджет останавливает набор ДО расхода, а не после', async () => {
+    const { provider, generate } = paidProviderOf();
+
+    const result = await generateImages({
+      clientId: 'c1',
+      brief: BRIEF,
+      formats: ['square_1080', 'story_9x16'],
+      variantsPerFormat: 5,
+      provider,
+      ctx: { dryRun: false },
+      cache: new ImageCache(),
+      // Бюджет ТЗ: $0.15 на набор, то есть три картинки по $0.04 и не больше.
+    });
+
+    expect(generate).toHaveBeenCalledTimes(3);
+    expect(result.images).toHaveLength(3);
+    expect(result.totalCostUsd).toBeCloseTo(0.12, 6);
+    expect(result.budget.withinBudget).toBe(true);
+    expect(result.failures.every((f) => f.kind === 'over_budget')).toBe(true);
+    expect(result.failures).toHaveLength(7);
+  });
+
+  it('потолок настраивается: под него влезает ровно столько картинок, сколько оплачено', async () => {
+    const { provider, generate } = paidProviderOf();
+
+    const result = await generateImages({
+      clientId: 'c1',
+      brief: BRIEF,
+      formats: ['square_1080'],
+      variantsPerFormat: 5,
+      provider,
+      budgetUsd: 0.08,
+      ctx: { dryRun: false },
+      cache: new ImageCache(),
+    });
+
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(result.images).toHaveLength(2);
+  });
+
+  it('бесплатный провайдер потолком не ограничен', async () => {
+    const { provider, generate } = providerOf();
+
+    const result = await generateImages({
+      clientId: 'c1',
+      brief: BRIEF,
+      formats: ['square_1080'],
+      variantsPerFormat: 5,
+      provider,
+      ctx: { dryRun: false },
+      cache: new ImageCache(),
+    });
+
+    expect(generate).toHaveBeenCalledTimes(5);
+    expect(result.failures).toEqual([]);
+  });
+});
+
 describe('кеш', () => {
   it('второй прогон с тем же промптом не платит повторно', async () => {
     const { provider, generate } = providerOf();
