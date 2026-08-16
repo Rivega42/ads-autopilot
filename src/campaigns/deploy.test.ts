@@ -166,14 +166,74 @@ describe('deployAccount', () => {
     }
   });
 
-  it('сохраняет порядок вызовов: кампания → группы → фразы → объявления', async () => {
+  it('создаёт кампанию, визитку, группы, фразы и объявления в этом порядке', async () => {
     const result = await deploy([1]);
-    const order = result.calls.filter((c) => c.service !== 'dictionaries').map((c) => c.service);
+    const order = result.calls.map((c) => c.service);
 
-    const firstCampaign = order.indexOf('campaigns');
-    expect(order[firstCampaign]).toBe('campaigns');
-    expect(order[firstCampaign + 1]).toBe('adgroups');
-    expect(order[firstCampaign + 2]).toBe('keywords');
-    expect(order[firstCampaign + 3]).toBe('ads');
+    const first = order.indexOf('campaigns');
+    expect(order.slice(first, first + 5)).toEqual([
+      'campaigns',
+      'vcards',
+      'adgroups',
+      'keywords',
+      'ads',
+    ]);
+  });
+
+  it('создаёт набор быстрых ссылок и уточнения один раз на аккаунт', async () => {
+    const result = await deploy();
+    expect(result.calls.filter((c) => c.service === 'sitelinks')).toHaveLength(1);
+    expect(result.calls.filter((c) => c.service === 'adextensions')).toHaveLength(1);
+  });
+
+  it('прикрепляет к каждому объявлению визитку, быстрые ссылки и уточнения', async () => {
+    const result = await deploy([1]);
+
+    for (const call of result.calls.filter((c) => c.service === 'ads')) {
+      for (const ad of call.params.Ads as {
+        TextAd: { VCardId?: number; SitelinkSetId?: number; AdExtensionIds?: number[] };
+      }[]) {
+        expect(ad.TextAd.VCardId).toBeGreaterThan(0);
+        expect(ad.TextAd.SitelinkSetId).toBeGreaterThan(0);
+        expect(ad.TextAd.AdExtensionIds?.length).toBe(SMARTSAY_ACCOUNT.callouts.length);
+      }
+    }
+  });
+
+  it('не загружает один и тот же файл дважды для разных кампаний', async () => {
+    const transport = new DryRunTransport(GEO);
+    const shared = [{ name: 'adults-1x1.jpg', base64: 'AAA' }];
+    const names = SMARTSAY_ACCOUNT.campaigns.slice(0, 3).map((c) => c.name);
+
+    await deployAccount(transport, SMARTSAY_ACCOUNT, {
+      ...OPTIONS,
+      imagesByCampaign: Object.fromEntries(names.map((name) => [name, shared])),
+    });
+
+    expect(transport.calls.filter((c) => c.service === 'adimages')).toHaveLength(1);
+  });
+
+  it('раздаёт вариантам объявлений разные картинки, если они переданы', async () => {
+    const transport = new DryRunTransport(GEO);
+    const campaign = SMARTSAY_ACCOUNT.campaigns.find((c) => c.priority === 1);
+    const result = await deployAccount(transport, SMARTSAY_ACCOUNT, {
+      ...OPTIONS,
+      onlyPriority: [1],
+      imagesByCampaign: {
+        [campaign?.name ?? '']: [
+          { name: 'a', base64: 'AAA' },
+          { name: 'b', base64: 'BBB' },
+          { name: 'c', base64: 'CCC' },
+        ],
+      },
+    });
+
+    const adCall = result.calls.find(
+      (c) => c.service === 'ads' && JSON.stringify(c.params).includes('AdImageHash'),
+    );
+    const hashes = (adCall?.params.Ads as { TextAd: { AdImageHash?: string } }[])
+      .slice(0, 3)
+      .map((ad) => ad.TextAd.AdImageHash);
+    expect(new Set(hashes).size).toBe(3);
   });
 });

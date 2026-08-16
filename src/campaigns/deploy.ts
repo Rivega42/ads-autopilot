@@ -6,6 +6,12 @@ import type {
 } from '../clients/yandex-direct/deploy-types.js';
 import { resolveRegionIds } from '../clients/yandex-direct/geo.js';
 
+import {
+  createCallouts,
+  createSitelinkSet,
+  createVCard,
+  uploadImages,
+} from './extensions-deploy.js';
 import { adVariants } from './smartsay/ad-variants.js';
 import type { AccountBlueprint, CampaignBlueprint, StrategyType } from './smartsay/types.js';
 
@@ -73,6 +79,10 @@ export interface DeployOptions {
   /** UTM-шаблон в поле «Параметры URL». */
   readonly urlParams?: string;
   readonly onlyPriority?: readonly (1 | 2 | 3)[];
+  /** Картинки для РСЯ по имени кампании: base64 файлов из creatives/out. */
+  readonly imagesByCampaign?: Readonly<
+    Record<string, readonly { readonly name: string; readonly base64: string }[]>
+  >;
   readonly log?: (line: string) => void;
 }
 
@@ -143,7 +153,14 @@ export async function deployAccount(
   const regionIds = await resolveRegionIds(transport, regionNames);
   log(`Регионы разрешены: ${regionNames.length}`);
 
+  const sitelinkSetId = await createSitelinkSet(transport, account.sitelinks);
+  log(`sitelinks.add  набор из ${account.sitelinks.length} ссылок → ${sitelinkSetId}`);
+
+  const calloutIds = await createCallouts(transport, account.callouts);
+  log(`adextensions.add  уточнений ${calloutIds.length}`);
+
   const deployed: DeployedCampaign[] = [];
+  const imageHashByName = new Map<string, string>();
   let keywordCount = 0;
   let adCount = 0;
 
@@ -153,6 +170,21 @@ export async function deployAccount(
     });
     const campaignId = collectIds(created, `кампанию «${campaign.name}»`)[0] as number;
     log(`campaigns.add  ${campaign.name} → ${campaignId}`);
+
+    const vCardId = await createVCard(transport, campaignId, account.vcard);
+
+    // Один сюжет используют несколько кампаний. Повторная загрузка того же
+    // файла стоила бы баллов и плодила дубли в библиотеке изображений.
+    const campaignImages = options.imagesByCampaign?.[campaign.name] ?? [];
+    const fresh = campaignImages.filter((image) => !imageHashByName.has(image.name));
+    if (fresh.length > 0) {
+      const hashes = await uploadImages(transport, fresh);
+      fresh.forEach((image, i) => imageHashByName.set(image.name, hashes[i] as string));
+      log(`adimages.add   картинок ${hashes.length}`);
+    }
+    const imageHashes = campaignImages
+      .map((image) => imageHashByName.get(image.name))
+      .filter((hash): hash is string => hash !== undefined);
 
     const groupsWithTargeting = campaign.groups;
     const groupPayloads = groupsWithTargeting.map((group) => {
@@ -183,7 +215,7 @@ export async function deployAccount(
     }
 
     const ads = groupsWithTargeting.flatMap((group, i) =>
-      adVariants(group).map((variant) => ({
+      adVariants(group).map((variant, variantIndex) => ({
         AdGroupId: groupIds[i],
         TextAd: {
           Title: variant.title,
@@ -192,6 +224,14 @@ export async function deployAccount(
           Href: landingUrl(account.site, group.ad.landingPath, options.urlParams),
           DisplayUrlPath: group.ad.displayLink,
           Mobile: 'NO',
+          VCardId: vCardId,
+          SitelinkSetId: sitelinkSetId,
+          AdExtensionIds: calloutIds,
+          // Каждому варианту — своя картинка: одинаковая во всех трёх убила бы
+          // смысл теста, Директ не смог бы различить их по креативу.
+          ...(imageHashes.length > 0
+            ? { AdImageHash: imageHashes[variantIndex % imageHashes.length] }
+            : {}),
         },
       })),
     );
@@ -262,6 +302,15 @@ export class DryRunTransport implements Transport {
 
     const collection = Object.values(params)[0];
     const count = Array.isArray(collection) ? collection.length : 1;
+
+    if (service === 'adimages') {
+      return {
+        AddResults: Array.from({ length: count }, () => ({
+          AdImageHash: `stub-hash-${this.nextId++}`,
+        })),
+      } as TResult;
+    }
+
     return {
       AddResults: Array.from({ length: count }, () => ({ Id: this.nextId++ })),
     } as TResult;

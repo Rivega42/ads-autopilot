@@ -5,6 +5,7 @@
  *   pnpm campaign:deploy --apply --sandbox       заливка в песочницу
  *   pnpm campaign:deploy --apply --counter 123   заливка в production
  *   pnpm campaign:deploy --priority 1            только первый эшелон
+ *   pnpm campaign:deploy --no-images             без загрузки картинок
  *
  * По умолчанию — холостой прогон. Реальная отправка только по явному --apply:
  * промахнуться мимо флага дороже, чем лишний раз его напечатать.
@@ -20,6 +21,7 @@ import {
 import { DryRunTransport, deployAccount } from '../deploy.js';
 
 import { SMARTSAY_ACCOUNT, UTM_TEMPLATE } from './blueprint.js';
+import { loadCreatives } from './creative-map.js';
 import { formatViolations, validateAccount } from './validate.js';
 
 function out(line: string): void {
@@ -69,6 +71,7 @@ async function main(): Promise<void> {
     urlParams: UTM_TEMPLATE,
     ...(counter === undefined ? {} : { counterIds: [Number.parseInt(counter, 10)] }),
     ...(priorities === undefined ? {} : { onlyPriority: priorities }),
+    ...(flag('no-images') ? {} : { imagesByCampaign: loadCreatives() }),
     log: out,
   };
 
