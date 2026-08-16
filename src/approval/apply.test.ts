@@ -34,7 +34,14 @@ const h = vi.hoisted(() => {
     changeLogs: Record<string, unknown>[];
     updateError: string | null;
     changeLogError: string | null;
-  } = { row: null, changeLogs: [], updateError: null, changeLogError: null };
+    negatedError: string | null;
+  } = {
+    row: null,
+    changeLogs: [],
+    updateError: null,
+    changeLogError: null,
+    negatedError: null,
+  };
   return {
     state,
     prisma: {
@@ -64,9 +71,25 @@ const h = vi.hoisted(() => {
         }),
       },
       campaign: {
-        findUnique: vi.fn(async () => ({ id: 'camp-internal-1' })),
+        findUnique: vi.fn(async (): Promise<{ id: string; clientId: string } | null> => ({
+          id: 'camp-internal-1',
+          clientId: 'cl1',
+        })),
+      },
+      searchQueryStat: {
+        updateMany: vi.fn(async (_args: unknown) => {
+          if (state.negatedError) throw new Error(state.negatedError);
+          return { count: 2 };
+        }),
       },
     },
+    addNegativeKeywords: vi.fn(
+      async (
+        _ctx: ChannelContext,
+        _campaignExternalId: string,
+        _phrases: string[],
+      ): Promise<WriteResult> => ({ applied: true, plan: { negatives: 2 } }),
+    ),
     setBudgets: vi.fn(async (_ctx: ChannelContext, _changes: unknown[]): Promise<WriteResult> => ({
       applied: true,
       plan: { budgets: 1 },
@@ -100,6 +123,7 @@ vi.mock('@/channels/registry.js', () => ({
     channel: 'YANDEX_DIRECT',
     setBudgets: h.setBudgets,
     listCampaigns: h.listCampaigns,
+    addNegativeKeywords: h.addNegativeKeywords,
   }),
 }));
 
@@ -139,12 +163,34 @@ function cardText(): string {
   return calls[calls.length - 1]?.[2] ?? '';
 }
 
+const negativesAction: ApprovalAction = {
+  kind: 'add_negatives',
+  clientId: 'cl1',
+  channel: 'YANDEX_DIRECT',
+  reason: '«скачать бесплатно» — 40 кликов, 0 конверсий',
+  campaignExternalId: '777',
+  phrases: ['скачать бесплатно', 'своими руками'],
+};
+
+/** Аргументы последнего updateMany по статистике поисковых запросов. */
+function negatedUpdate(): unknown {
+  const calls = h.prisma.searchQueryStat.updateMany.mock.calls;
+  return calls[calls.length - 1]?.[0];
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   h.state.changeLogs = [];
   h.state.updateError = null;
   h.state.changeLogError = null;
+  h.state.negatedError = null;
   h.setBudgets.mockResolvedValue({ applied: true, plan: { budgets: 1 } });
+  h.addNegativeKeywords.mockResolvedValue({ applied: true, plan: { negatives: 2 } });
+  h.prisma.campaign.findUnique.mockResolvedValue({ id: 'camp-internal-1', clientId: 'cl1' });
+  h.prisma.searchQueryStat.updateMany.mockImplementation(async () => {
+    if (h.state.negatedError) throw new Error(h.state.negatedError);
+    return { count: 2 };
+  });
   h.buildContext.mockResolvedValue({ clientId: 'cl1', credentials: {}, dryRun: false });
   h.listCampaigns.mockResolvedValue([
     {
@@ -375,6 +421,78 @@ describe('applyApproval', () => {
     expect(h.state.row?.decision).toBe(ApprovalDecision.FAILED);
     expect(h.state.row?.error).toContain('изменился после запроса апрува');
     expect(cardText()).toContain('20 000');
+  });
+
+  // ── минус-слова: пометка «уже применено» ───────────────────────────────────
+  it('одобренные минус-слова помечаются в статистике, иначе вернутся завтра', async () => {
+    seed({ payload: negativesAction, kind: ApprovalKind.STRATEGY_CHANGE });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toEqual({ status: 'APPLIED', dryRun: false });
+    expect(h.addNegativeKeywords).toHaveBeenCalledWith(expect.anything(), '777', [
+      'скачать бесплатно',
+      'своими руками',
+    ]);
+    expect(negatedUpdate()).toEqual({
+      where: {
+        adGroup: { campaignId: 'camp-internal-1' },
+        query: { in: ['скачать бесплатно', 'своими руками'] },
+        negated: false,
+      },
+      data: { negated: true },
+    });
+  });
+
+  it('пустой результат адаптера тоже помечается: фраза уже в кабинете', async () => {
+    seed({ payload: negativesAction, kind: ApprovalKind.STRATEGY_CHANGE });
+    h.addNegativeKeywords.mockResolvedValue({ applied: false, plan: { negatives: 0 } });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toMatchObject({ status: 'APPLIED', noop: true });
+    expect(h.prisma.searchQueryStat.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('в dry-run пометки нет: на площадке ничего не менялось', async () => {
+    seed({ payload: negativesAction, kind: ApprovalKind.STRATEGY_CHANGE });
+    h.buildContext.mockResolvedValue({ clientId: 'cl1', credentials: {}, dryRun: true });
+    h.addNegativeKeywords.mockResolvedValue({ applied: false, plan: { would: 'add 2' } });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toEqual({ status: 'APPLIED', dryRun: true });
+    expect(h.prisma.searchQueryStat.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('упавшая пометка не превращает применённое изменение в FAILED', async () => {
+    seed({ payload: negativesAction, kind: ApprovalKind.STRATEGY_CHANGE });
+    h.state.negatedError = 'connection pool timeout';
+
+    const out = await applyApproval('ap1', '@roman');
+
+    // Минус-слова в кабинете уже стоят: «не применено» позвало бы человека на второй заход.
+    expect(out.status).toBe('APPLIED');
+    expect(out).toMatchObject({ warning: expect.stringContaining('минус-фраз') });
+    expect(h.state.row?.decision).toBe(ApprovalDecision.APPLIED);
+    expect(h.state.row?.error).toContain('минус-фраз');
+    expect(cardText()).not.toContain('применить не удалось');
+  });
+
+  it('несопоставимая кампания не ломает апрув', async () => {
+    seed({ payload: negativesAction, kind: ApprovalKind.STRATEGY_CHANGE });
+    h.prisma.campaign.findUnique.mockResolvedValue(null);
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out.status).toBe('APPLIED');
+    expect(h.prisma.searchQueryStat.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('другие виды действий статистику запросов не трогают', async () => {
+    seed();
+    await applyApproval('ap1', '@roman');
+    expect(h.prisma.searchQueryStat.updateMany).not.toHaveBeenCalled();
   });
 
   it('копеечное расхождение и нечитаемое состояние применению не мешают', async () => {

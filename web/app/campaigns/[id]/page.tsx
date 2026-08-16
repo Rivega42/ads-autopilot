@@ -1,6 +1,11 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import {
+  AttributionNote,
+  MixedAttributionNotice,
+  MixedCpaNote,
+} from '../../../components/attribution';
 import { Badge } from '../../../components/badge';
 import { ChangeLogTable } from '../../../components/change-log-table';
 import { DailyTable } from '../../../components/daily-table';
@@ -8,6 +13,12 @@ import { FilterBar } from '../../../components/filter-bar';
 import type { ChartPoint } from '../../../components/metric-chart';
 import { MetricChart } from '../../../components/metric-chart';
 import { StatTile } from '../../../components/stat-tile';
+import {
+  attributionLabel,
+  comparableCpa,
+  countsOfSources,
+  summarizeAttribution,
+} from '../../../lib/attribution';
 import { formatMskDateTime, formatYmd, formatYmdShort } from '../../../lib/dates';
 import type { SearchParams } from '../../../lib/filters';
 import { parseFilters, rangeLength, withFilters } from '../../../lib/filters';
@@ -68,7 +79,12 @@ export default async function CampaignPage({
     { impressions: 0, clicks: 0, spend: 0, conversions: 0 },
   );
 
-  const periodCpa = cpa(totals.spend, totals.conversions);
+  // Дни без строк в статистике источника не имеют — они не «третья модель»,
+  // а просто отсутствие данных, и смешением их считать нельзя.
+  const attribution = summarizeAttribution(
+    countsOfSources(daily.map((row) => row.conversionSource)),
+  );
+  const periodCpa = comparableCpa(cpa(totals.spend, totals.conversions), attribution);
   const deviation = cpaDeviation(periodCpa, campaign.targetCpa);
   const days = rangeLength(filters);
 
@@ -102,21 +118,33 @@ export default async function CampaignPage({
 
       <FilterBar action={`/campaigns/${campaign.id}`} filters={filters} fields={[]} />
 
+      {attribution.mixed ? (
+        <MixedAttributionNotice scope="За выбранный период часть дней посчитала Метрика, часть — рекламный кабинет." />
+      ) : null}
+
       <div className="tiles">
         <StatTile
           hero
           label={`CPA за ${days} дн.`}
           value={formatMoneyPrecise(periodCpa)}
           hint={
-            campaign.targetCpa === null
-              ? 'цель не задана'
-              : `цель ${formatMoneyPrecise(campaign.targetCpa)}${
-                  deviation === null ? '' : ` · ${formatSignedPercent(deviation)}`
-                }`
+            attribution.mixed ? (
+              <MixedCpaNote />
+            ) : campaign.targetCpa === null ? (
+              'цель не задана'
+            ) : (
+              `цель ${formatMoneyPrecise(campaign.targetCpa)}${
+                deviation === null ? '' : ` · ${formatSignedPercent(deviation)}`
+              }`
+            )
           }
         />
         <StatTile label="Расход" value={formatMoney(totals.spend)} />
-        <StatTile label="Конверсии" value={formatInteger(totals.conversions)} />
+        <StatTile
+          label="Конверсии"
+          value={formatInteger(totals.conversions)}
+          hint={<AttributionNote summary={attribution} prefix="источник" />}
+        />
         <StatTile label="Клики" value={formatInteger(totals.clicks)} />
         <StatTile label="Показы" value={formatInteger(totals.impressions)} />
         <StatTile label="CTR" value={formatPercent(ctr(totals.clicks, totals.impressions))} />
@@ -150,7 +178,7 @@ export default async function CampaignPage({
             formatValue={formatMoney}
           />
           <MetricChart
-            title="Конверсии"
+            title={`Конверсии · ${attributionLabel(attribution)}`}
             summary={formatInteger(totals.conversions)}
             points={toPoints(daily, (row) => row.conversions)}
             kind="column"
@@ -177,7 +205,8 @@ export default async function CampaignPage({
           <div className="card-head">
             <h2>Метрики по дням</h2>
             <span className="muted">
-              дни без строк в статистике показаны нулями; CPA без конверсий — прочерком
+              дни без строк в статистике показаны нулями; CPA без конверсий — прочерком; источник
+              конверсий — в последней колонке
             </span>
           </div>
           <DailyTable rows={daily} />

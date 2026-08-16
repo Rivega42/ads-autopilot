@@ -1,6 +1,7 @@
 import type { Job, Processor } from 'bullmq';
 
 import { expireApprovals } from '@/approval/index.js';
+import { runAbEvaluation } from '@/creatives/index.js';
 import { env } from '@/env.js';
 import { refreshExpiringTokens, runIngestion, runSearchQueryIngestion } from '@/ingestion/index.js';
 import { runWeeklyKeywordRefresh } from '@/keywords/index.js';
@@ -93,6 +94,11 @@ export const handlers: Record<QueueName, Processor> = {
     const core = await runWeeklyKeywordRefresh();
     return { queries, core };
   }),
+  // Только оценка уже открученных вариантов. Генерация новых креативов стоит денег
+  // на каждом вызове и на крон не вешается: точка входа — `generateCreativeSetOnDemand`.
+  [QUEUE_NAMES.evaluateAbTests]: exclusive(QUEUE_NAMES.evaluateAbTests, async () => ({
+    ...(await runAbEvaluation({ dryRun: env.DRY_RUN })),
+  })),
   [QUEUE_NAMES.dailyReport]: exclusive(QUEUE_NAMES.dailyReport, async () => ({
     ...(await runDailyReports()),
   })),

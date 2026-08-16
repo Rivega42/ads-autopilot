@@ -348,6 +348,38 @@ tbody tr:hover td {
   min-width: 220px;
 }
 
+/* ── Источник конверсий ───────────────────────────────────────────────── */
+
+/*
+ * Пометка стоит у каждого числа конверсий и CPA, поэтому она приглушена до
+ * уровня сноски: это метаданные, а не статус. Смешанный случай — единственный,
+ * который повышает голос, и делает это точкой статусного цвета, а не цветным
+ * текстом: подпись остаётся читаемой, а смысл не держится на одном лишь цвете.
+ */
+.attribution {
+  display: block;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  cursor: help;
+  white-space: normal;
+}
+
+.attribution-mixed {
+  color: var(--text-secondary);
+}
+
+.attribution-mixed::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--serious);
+  vertical-align: baseline;
+}
+
 /* ── Бейджи и статусы ─────────────────────────────────────────────────── */
 
 .badges {
@@ -592,6 +624,19 @@ details.table-view[open] > summary {
   border-radius: var(--radius);
   background: var(--surface);
   padding: 14px 16px;
+}
+
+/* Не поломка, а непригодные к сравнению данные — тоном ниже, чем ошибка. */
+.notice-serious {
+  border-left-color: var(--serious);
+}
+
+.notice-text {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-width: 78ch;
 }
 
 .json {

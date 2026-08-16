@@ -9,6 +9,7 @@ export const QUEUE_NAMES = {
   optimizeBids: 'optimize-bids',
   pauseLosers: 'pause-losers',
   wordstatMine: 'wordstat-mine',
+  evaluateAbTests: 'evaluate-ab-tests',
   dailyReport: 'daily-report',
   weeklyReport: 'weekly-report',
   refreshTokens: 'refresh-tokens',
@@ -28,6 +29,10 @@ export const CRON_SCHEDULE: Record<QueueName, string | null> = {
   [QUEUE_NAMES.optimizeBids]: '0 8 * * *',
   [QUEUE_NAMES.pauseLosers]: '0 3 * * *',
   [QUEUE_NAMES.wordstatMine]: '0 4 */3 * *',
+  // Раз в сутки: решение принимается по накопленным показам, за час они картину не
+  // меняют. В 5:00 — уже после ночного сбора статистики и до утреннего отчёта в 8:30,
+  // чтобы карточка про победителя не пришла клиенту раньше цифр, из которых она выросла.
+  [QUEUE_NAMES.evaluateAbTests]: '0 5 * * *',
   [QUEUE_NAMES.dailyReport]: '30 8 * * *',
   [QUEUE_NAMES.weeklyReport]: '0 10 * * 1',
   [QUEUE_NAMES.refreshTokens]: '0 */4 * * *',

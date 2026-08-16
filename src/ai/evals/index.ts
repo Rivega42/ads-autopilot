@@ -7,8 +7,10 @@
  */
 export {
   createMemoryBriefStore,
+  createMemoryClientStore,
   type MemoryBriefRow,
   type MemoryBriefStore,
+  type MemoryClientStore,
 } from './memory-store.js';
 export { runEvalCase, type ReplayOptions } from './replay.js';
 export {

@@ -66,6 +66,36 @@ describe('applyTurnUpdates', () => {
     expect(result.rejected[0]).toMatchObject({ reason: 'evidence-not-found' });
   });
 
+  it('отбрасывает счётчик Метрики без цитаты', () => {
+    // Правдоподобный, но выдуманный номер — это чужие конверсии в отчёте клиента.
+    const result = applyTurnUpdates(
+      {},
+      turn({ updates: { metrika: { counterId: 12_345_678 } } }),
+      CLIENT_SAID,
+    );
+    expect(result.draft.metrika).toBeUndefined();
+    expect(result.rejected[0]).toMatchObject({ field: 'metrika', reason: 'no-evidence' });
+  });
+
+  it('принимает счётчик, названный клиентом', () => {
+    const result = applyTurnUpdates(
+      {},
+      turn({
+        updates: { metrika: { counterId: 12_345_678 } },
+        evidence: { metrika: '12345678' },
+      }),
+      [...CLIENT_SAID, 'Счётчик 12345678'],
+    );
+    expect(result.draft.metrika).toEqual({ counterId: 12_345_678 });
+  });
+
+  it('«Метрики нет» цитаты не требует', () => {
+    // Отказ — не выдуманное значение: подтверждать в нём нечего.
+    const result = applyTurnUpdates({}, turn({ updates: { metrika: null } }), CLIENT_SAID);
+    expect(result.draft.metrika).toBeNull();
+    expect(result.rejected).toEqual([]);
+  });
+
   it('не роняет остальные поля хода из-за отклонённой суммы', () => {
     const result = applyTurnUpdates(
       {},

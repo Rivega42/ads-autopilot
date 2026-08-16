@@ -19,7 +19,11 @@ import type { ClientConfigStore } from './metrika-config.js';
 import { parseTranscript } from './state.js';
 import { interviewTurnSchema, type InterviewTurn } from './turn.schema.js';
 
-import { createMemoryBriefStore, type MemoryBriefStore } from '@/ai/evals/memory-store.js';
+import {
+  createMemoryBriefStore,
+  createMemoryClientStore,
+  type MemoryBriefStore,
+} from '@/ai/evals/memory-store.js';
 import type { AgentRun, RunAgentOptions } from '@/clients/llm/index.js';
 
 const CLIENT = 'cl1';
@@ -35,11 +39,16 @@ const FULL_BRIEF: ClientBriefData = {
   budgetScope: 'per_channel',
   competitors: [{ name: 'Skyeng', site: 'https://skyeng.ru' }],
   conversionGoals: [{ name: 'заявка на пробный урок' }],
+  metrika: { counterId: 12_345_678, goalId: 555, attribution: 'LASTSIGN' },
 };
 
-/** Ответ клиента, из которого обе денежные цитаты действительно находятся. */
-const MONEY_ANSWER = 'CPA 2000, бюджет 5000 на канал';
-const MONEY_EVIDENCE = { targetCpaRub: 'CPA 2000', dailyBudgetRub: 'бюджет 5000' };
+/** Ответ клиента, из которого все требующие цитаты значения действительно находятся. */
+const QUOTED_ANSWER = 'CPA 2000, бюджет 5000 на канал, счётчик 12345678';
+const QUOTED_EVIDENCE = {
+  targetCpaRub: 'CPA 2000',
+  dailyBudgetRub: 'бюджет 5000',
+  metrika: '12345678',
+};
 
 interface Scripted {
   reply?: string;
@@ -125,10 +134,10 @@ describe('startInterview', () => {
   it('на собранном брифе возвращает результат без вызова модели', async () => {
     const { run } = runner([
       { reply: 'Что продаём?' },
-      { reply: 'Готово', updates: FULL_BRIEF, evidence: MONEY_EVIDENCE, done: true },
+      { reply: 'Готово', updates: FULL_BRIEF, evidence: QUOTED_EVIDENCE, done: true },
     ]);
     await startInterview(CLIENT, { db: store.db, run });
-    await handleAnswer(CLIENT, MONEY_ANSWER, { db: store.db, run });
+    await handleAnswer(CLIENT, QUOTED_ANSWER, { db: store.db, run });
 
     const again = runner([{}]);
     const step = await startInterview(CLIENT, { db: store.db, run: again.run });
@@ -241,13 +250,13 @@ describe('handleAnswer', () => {
       {
         reply: 'Собрал бриф. Стартуем?',
         updates: FULL_BRIEF,
-        evidence: MONEY_EVIDENCE,
+        evidence: QUOTED_EVIDENCE,
         done: true,
       },
     ]);
 
     await startInterview(CLIENT, { db: store.db, run });
-    const step = await handleAnswer(CLIENT, MONEY_ANSWER, { db: store.db, run });
+    const step = await handleAnswer(CLIENT, QUOTED_ANSWER, { db: store.db, run });
 
     expect(step.kind).toBe('complete');
     if (step.kind === 'complete') {
@@ -259,37 +268,75 @@ describe('handleAnswer', () => {
     expect(row?.completedAt).toBeInstanceOf(Date);
   });
 
-  it('готовый бриф проставляет цель Метрики в карточке клиента', async () => {
+  it('готовый бриф проставляет настройку Метрики в карточке клиента', async () => {
     // До сих пор эти колонки не заполнял никто, поэтому загрузка конверсий из
     // Метрики не включалась ни у одного клиента.
-    const updates: Array<Record<string, unknown>> = [];
-    const clients = {
-      client: {
-        update: (args: { where: { id: string }; data: Record<string, unknown> }) => {
-          updates.push({ id: args.where.id, ...args.data });
-          return Promise.resolve({ id: args.where.id });
-        },
-      },
-    } as unknown as ClientConfigStore;
+    const spy = createMemoryClientStore();
 
     const { run } = runner([
       { reply: 'Что продаём?' },
       {
         reply: 'Собрал бриф. Стартуем?',
-        updates: {
-          ...FULL_BRIEF,
-          conversionGoals: [{ name: 'заявка на пробный урок', metrikaGoalId: 555 }],
-        },
-        evidence: MONEY_EVIDENCE,
+        updates: FULL_BRIEF,
+        evidence: QUOTED_EVIDENCE,
         done: true,
       },
     ]);
 
-    await startInterview(CLIENT, { db: store.db, clients, run });
-    const step = await handleAnswer(CLIENT, MONEY_ANSWER, { db: store.db, clients, run });
+    await startInterview(CLIENT, { db: store.db, clients: spy.clients, run });
+    const step = await handleAnswer(CLIENT, QUOTED_ANSWER, {
+      db: store.db,
+      clients: spy.clients,
+      run,
+    });
 
     expect(step.kind).toBe('complete');
-    expect(updates).toEqual([{ id: CLIENT, metrikaGoalId: 555 }]);
+    expect(spy.updates).toEqual([
+      {
+        id: CLIENT,
+        metrikaCounterId: 12_345_678,
+        metrikaGoalId: 555,
+        metrikaAttribution: 'LASTSIGN',
+      },
+    ]);
+  });
+
+  it('без ответа про Метрику интервью не заканчивается, даже если модель сказала done', async () => {
+    const { metrika: _metrika, ...withoutMetrika } = FULL_BRIEF;
+    const { run } = runner([
+      { reply: 'Что продаём?' },
+      { reply: 'Собрал бриф.', updates: withoutMetrika, evidence: QUOTED_EVIDENCE, done: true },
+    ]);
+
+    await startInterview(CLIENT, { db: store.db, run });
+    const step = await handleAnswer(CLIENT, QUOTED_ANSWER, { db: store.db, run });
+
+    expect(step.kind).toBe('question');
+    if (step.kind === 'question') expect(step.missing).toEqual(['metrika']);
+  });
+
+  it('«Метрики нет» завершает бриф и оставляет колонки пустыми', async () => {
+    // Штатный путь, а не ошибка: конверсии тогда считает сама площадка.
+    const spy = createMemoryClientStore();
+    const { run } = runner([
+      { reply: 'Что продаём?' },
+      {
+        reply: 'Собрал бриф.',
+        updates: { ...FULL_BRIEF, metrika: null },
+        evidence: QUOTED_EVIDENCE,
+        done: true,
+      },
+    ]);
+
+    await startInterview(CLIENT, { db: store.db, clients: spy.clients, run });
+    const step = await handleAnswer(CLIENT, QUOTED_ANSWER, {
+      db: store.db,
+      clients: spy.clients,
+      run,
+    });
+
+    expect(step.kind).toBe('complete');
+    expect(spy.updates).toEqual([]);
   });
 
   it('сбой записи конфигурации не отменяет собранный бриф', async () => {
@@ -299,19 +346,11 @@ describe('handleAnswer', () => {
 
     const { run } = runner([
       { reply: 'Что продаём?' },
-      {
-        reply: 'Собрал бриф.',
-        updates: {
-          ...FULL_BRIEF,
-          conversionGoals: [{ name: 'заявка', metrikaGoalId: 555 }],
-        },
-        evidence: MONEY_EVIDENCE,
-        done: true,
-      },
+      { reply: 'Собрал бриф.', updates: FULL_BRIEF, evidence: QUOTED_EVIDENCE, done: true },
     ]);
 
     await startInterview(CLIENT, { db: store.db, clients, run });
-    const step = await handleAnswer(CLIENT, MONEY_ANSWER, { db: store.db, clients, run });
+    const step = await handleAnswer(CLIENT, QUOTED_ANSWER, { db: store.db, clients, run });
 
     expect(step.kind).toBe('complete');
     expect(store.get(CLIENT)?.status).toBe(BriefStatus.COMPLETE);
@@ -323,12 +362,15 @@ describe('handleAnswer', () => {
       {
         reply: 'Готово',
         updates: { ...FULL_BRIEF, dailyBudgetRub: 1_000, targetCpaRub: 3_000 },
-        evidence: { targetCpaRub: 'CPA 3000', dailyBudgetRub: 'бюджет 1000' },
+        evidence: { ...QUOTED_EVIDENCE, targetCpaRub: 'CPA 3000', dailyBudgetRub: 'бюджет 1000' },
       },
     ]);
 
     await startInterview(CLIENT, { db: store.db, run });
-    const step = await handleAnswer(CLIENT, 'CPA 3000, бюджет 1000', { db: store.db, run });
+    const step = await handleAnswer(CLIENT, 'CPA 3000, бюджет 1000, счётчик 12345678', {
+      db: store.db,
+      run,
+    });
 
     expect(step.kind).toBe('complete');
     if (step.kind === 'complete') expect(step.warnings.join(' ')).toContain('CPA');
@@ -368,10 +410,10 @@ describe('handleAnswer', () => {
   it('на собранном брифе возвращает результат и не идёт в модель', async () => {
     const { run } = runner([
       { reply: 'Что продаём?' },
-      { reply: 'Готово', updates: FULL_BRIEF, evidence: MONEY_EVIDENCE },
+      { reply: 'Готово', updates: FULL_BRIEF, evidence: QUOTED_EVIDENCE },
     ]);
     await startInterview(CLIENT, { db: store.db, run });
-    await handleAnswer(CLIENT, MONEY_ANSWER, { db: store.db, run });
+    await handleAnswer(CLIENT, QUOTED_ANSWER, { db: store.db, run });
 
     const again = runner([{}]);
     const step = await handleAnswer(CLIENT, 'ещё что-то', { db: store.db, run: again.run });

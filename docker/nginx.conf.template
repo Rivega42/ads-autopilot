@@ -1,0 +1,81 @@
+# Reverse-proxy прод-стека. Два имени: API и дашборд.
+#
+# Это шаблон: официальный образ nginx прогоняет /etc/nginx/templates/*.template
+# через envsubst и кладёт результат в /etc/nginx/conf.d. Подставляются только
+# переменные, объявленные в окружении, поэтому $host и $remote_addr остаются
+# нетронутыми — их nginx раскрывает сам. Домены задаются в .env деплоя.
+
+# Общий редирект на HTTPS. ACME-челлендж обязан остаться на 80: certbot renew
+# ходит по HTTP, и без этого исключения продление сертификата упадёт.
+server {
+  listen 80;
+  server_name _;
+
+  location /.well-known/acme-challenge/ {
+    root /var/www/certbot;
+  }
+
+  location / {
+    return 301 https://$host$request_uri;
+  }
+}
+
+server {
+  listen 443 ssl;
+  http2 on;
+  server_name ${API_DOMAIN};
+
+  ssl_certificate /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers off;
+  ssl_session_cache shared:SSL:10m;
+
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Content-Type-Options nosniff always;
+  add_header X-Frame-Options DENY always;
+  add_header Referrer-Policy no-referrer always;
+
+  client_max_body_size 2m;
+
+  location / {
+    proxy_pass http://api:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 60s;
+  }
+}
+
+server {
+  listen 443 ssl;
+  http2 on;
+  server_name ${DASHBOARD_DOMAIN};
+
+  ssl_certificate /etc/letsencrypt/live/${DASHBOARD_DOMAIN}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/${DASHBOARD_DOMAIN}/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers off;
+  ssl_session_cache shared:SSL:10m;
+
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Content-Type-Options nosniff always;
+  add_header X-Frame-Options DENY always;
+  add_header Referrer-Policy no-referrer always;
+
+  # Второй basic-auth здесь намеренно не ставится: дашборд закрывается сам
+  # (web/middleware.ts), и два пароля на одну дверь только путают. Если понадобится
+  # закрыть его на уровне прокси — DASHBOARD_AUTH_MODE=proxy плюс auth_basic тут.
+  location / {
+    proxy_pass http://web:3001;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}

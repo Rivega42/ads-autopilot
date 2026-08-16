@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import type { MetrikaClientOptions } from '@/clients/metrika.js';
+
 /**
  * Схема `ClientBrief.data` — контракт между интервью и всем, что запускается после
  * него: стратегом, семантикой, креативами, оптимизатором.
@@ -26,6 +28,38 @@ const nonEmptyList = (max: number): z.ZodArray<z.ZodString> =>
  */
 const rubles = (min: number, max: number): z.ZodNumber =>
   z.number().finite().int().min(min).max(max);
+
+type MetrikaAttributionOption = NonNullable<MetrikaClientOptions['attribution']>;
+
+/**
+ * Модели атрибуции Метрики. Перечень не наш: ровно эти значения принимает
+ * `MetrikaClient`, а колонка `Client.metrikaAttribution` — обычный текст, и
+ * незнакомая строка в ней тихо откатит загрузку на умолчание клиента.
+ */
+export const METRIKA_ATTRIBUTIONS = [
+  'LAST',
+  'FIRST',
+  'LASTSIGN',
+  'LAST_YANDEX_DIRECT_CLICK',
+] as const satisfies readonly MetrikaAttributionOption[];
+
+export type MetrikaAttribution = (typeof METRIKA_ATTRIBUTIONS)[number];
+
+/** Расхождение с клиентом Метрики ловится компиляцией, а не первым живым прогоном. */
+type AssertNever<T extends never> = T;
+type _NoUnlistedAttribution = AssertNever<Exclude<MetrikaAttributionOption, MetrikaAttribution>>;
+
+/**
+ * Счётчик Метрики. Номер обязателен: без него цель и модель атрибуции бесполезны —
+ * загрузка конверсий требует всех троих, а «настроено наполовину» выглядит как
+ * настроенное и молча не работает.
+ */
+export const metrikaBriefSchema = z.object({
+  counterId: z.number().int().positive(),
+  /** Цель, которую клиент считает заявкой. Без неё оптимизатор считает по площадке. */
+  goalId: z.number().int().positive().optional(),
+  attribution: z.enum(METRIKA_ATTRIBUTIONS).optional(),
+});
 
 export const clientBriefSchema = z.object({
   /** Что продаём. Одно предложение — ровно то, что просит TZ §13.1. */
@@ -79,6 +113,13 @@ export const clientBriefSchema = z.object({
     .min(1)
     .max(20),
 
+  /**
+   * `null` — «Метрики у меня нет», полноценный ответ и штатный путь: конверсии
+   * тогда считает сама площадка. Отсутствие ключа — другое: про Метрику ещё не
+   * спрашивали, и интервью обязано спросить (см. `REQUIRED_BRIEF_FIELDS`).
+   */
+  metrika: metrikaBriefSchema.nullish(),
+
   landingUrl: z.string().trim().url().max(500).optional(),
   notes: trimmedString(1, 2_000).optional(),
 });
@@ -105,6 +146,7 @@ export const BRIEF_FIELDS = [
   'budgetScope',
   'competitors',
   'conversionGoals',
+  'metrika',
   'landingUrl',
   'notes',
 ] as const;
@@ -120,6 +162,7 @@ export const REQUIRED_BRIEF_FIELDS = [
   'geo',
   'usp',
   'conversionGoals',
+  'metrika',
   'competitors',
   'targetCpaRub',
   'dailyBudgetRub',
@@ -139,6 +182,9 @@ export const BRIEF_FIELD_LABELS: Readonly<Record<BriefField, string>> = {
   budgetScope: 'бюджет указан на каждый канал (per_channel) или общий (total)',
   competitors: 'конкуренты: названия и сайты (пустой список — тоже ответ)',
   conversionGoals: 'целевые действия: заявка, звонок, покупка, сообщение',
+  metrika:
+    'Яндекс.Метрика: номер счётчика, id цели-заявки, модель атрибуции ' +
+    '(«Метрики нет» — тоже ответ)',
   landingUrl: 'ссылка на посадочную страницу (необязательно)',
   notes: 'важные оговорки: сезонность, ограничения, что нельзя обещать (необязательно)',
 };
@@ -154,8 +200,20 @@ export const MONEY_BRIEF_FIELDS = [
 
 export type MoneyBriefField = (typeof MONEY_BRIEF_FIELDS)[number];
 
-export function isMoneyField(field: string): field is MoneyBriefField {
-  return (MONEY_BRIEF_FIELDS as readonly string[]).includes(field);
+/**
+ * Поля, которые нельзя заполнить «по смыслу»: без дословной цитаты клиента значение
+ * отбрасывается. Кроме денег сюда входит счётчик Метрики — правдоподобный, но
+ * выдуманный номер приписал бы клиенту чужие конверсии, а по ним двигаются ставки.
+ */
+export const EVIDENCE_BRIEF_FIELDS = [
+  ...MONEY_BRIEF_FIELDS,
+  'metrika',
+] as const satisfies readonly BriefField[];
+
+export type EvidenceBriefField = (typeof EVIDENCE_BRIEF_FIELDS)[number];
+
+export function requiresEvidence(field: string): field is EvidenceBriefField {
+  return (EVIDENCE_BRIEF_FIELDS as readonly string[]).includes(field);
 }
 
 /**
@@ -165,14 +223,17 @@ export function isMoneyField(field: string): field is MoneyBriefField {
  */
 export function missingBriefFields(draft: ClientBriefDraft): BriefField[] {
   const result = clientBriefSchema.safeParse(draft);
-  if (result.success) return [];
-
   const broken = new Set<string>();
-  for (const issue of result.error.issues) {
-    const head = issue.path[0];
-    if (typeof head === 'string') broken.add(head);
+  if (!result.success) {
+    for (const issue of result.error.issues) {
+      const head = issue.path[0];
+      if (typeof head === 'string') broken.add(head);
+    }
   }
-  return REQUIRED_BRIEF_FIELDS.filter((field) => broken.has(field));
+  // Схему проходит и бриф, в котором про Метрику просто не спрашивали: `metrika`
+  // необязательна, чтобы собранные до неё брифы остались валидными. Спросить всё
+  // равно надо — иначе загрузка конверсий не включится и об этом никто не узнает.
+  return REQUIRED_BRIEF_FIELDS.filter((field) => broken.has(field) || draft[field] === undefined);
 }
 
 export type BriefParseResult =
@@ -200,6 +261,13 @@ export function briefWarnings(brief: ClientBriefData): string[] {
     warnings.push(
       `Дневной бюджет ${brief.dailyBudgetRub} ₽ меньше целевого CPA ${brief.targetCpaRub} ₽: ` +
         'меньше одной заявки в день, статистики на оптимизацию не наберётся.',
+    );
+  }
+
+  if (brief.metrika == null) {
+    warnings.push(
+      'Метрики нет: конверсии считает сама площадка по своей модели атрибуции, ' +
+        'CPA в отчёте будет её.',
     );
   }
 

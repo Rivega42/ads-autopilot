@@ -1,6 +1,7 @@
 import { BriefStatus, type Prisma } from '@prisma/client';
 
 import type { BriefStore } from '@/ai/onboarding/interview.js';
+import type { ClientConfigStore } from '@/ai/onboarding/metrika-config.js';
 
 /**
  * `ClientBrief` в памяти. Нужен и тестам интервью, и eval-прогонам: оба должны
@@ -43,6 +44,33 @@ export interface MemoryBriefStore {
   get(clientId: string): MemoryBriefRow | undefined;
   /** Сколько раз строку переписали — по нему видно, что каждый ход дошёл до БД. */
   writes: number;
+}
+
+export interface MemoryClientStore {
+  /** То, что передаётся агенту как `deps.clients`. */
+  clients: ClientConfigStore;
+  /** Апдейты карточки клиента по порядку: онбординг пишет туда настройку Метрики. */
+  updates: Array<Record<string, unknown>>;
+}
+
+/**
+ * Карточка клиента в памяти.
+ *
+ * Без неё завершённый бриф уезжает настройкой Метрики в настоящий `prisma` —
+ * eval-прогон и юнит-тест не имеют права трогать живую БД.
+ */
+export function createMemoryClientStore(): MemoryClientStore {
+  const updates: Array<Record<string, unknown>> = [];
+  const clients = {
+    client: {
+      update: (args: { where: { id: string }; data: Record<string, unknown> }) => {
+        updates.push({ id: args.where.id, ...args.data });
+        return Promise.resolve({ id: args.where.id });
+      },
+    },
+  } as unknown as ClientConfigStore;
+
+  return { clients, updates };
 }
 
 export function createMemoryBriefStore(seed: readonly MemoryBriefRow[] = []): MemoryBriefStore {

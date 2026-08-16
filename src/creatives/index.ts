@@ -5,6 +5,12 @@
  * через `generateImages`, победитель — через `selectWinner`/`evaluateAdExperiment`.
  * Провайдеры напрямую звать не нужно: мимо этих функций не работают ни проверка
  * лимитов, ни кеш, ни учёт стоимости.
+ *
+ * Две точки входа снаружи модуля, и разница между ними принципиальная:
+ *  • `runAbEvaluation` — суточная задача планировщика (`evaluate-ab-tests`). Денег не
+ *    тратит, только читает статистику и просит человека выключить проигравших.
+ *  • `generateCreativeSetOnDemand` — ручной запуск генерации. Платный, поэтому крона
+ *    у него нет: зовут онбординг, CLI или человек.
  */
 
 export {
@@ -78,6 +84,12 @@ export {
   type SetCostCheck,
 } from './images/pricing.js';
 export {
+  generateCreativeSetOnDemand,
+  type CreativeSet,
+  type CreativeSetImages,
+  type GenerateCreativeSetRequest,
+} from './on-demand.js';
+export {
   buildImagePrompt,
   buildNegativePrompt,
   imageBriefFromClient,
@@ -105,6 +117,13 @@ export {
   type PlatformTextLimits,
   type TextLimitViolation,
 } from './platform-limits.js';
+export {
+  abApprovalIdempotencyKey,
+  AB_WINDOW_DAYS,
+  runAbEvaluation,
+  type AbEvaluationOptions,
+  type AbEvaluationSummary,
+} from './scheduled.js';
 export { saveCreative, type CreativeStore, type SaveCreativeInput } from './store.js';
 export {
   CREATIVES_TEXT_AGENT,

@@ -20,7 +20,13 @@ const log = logger.child({ scope: 'ingestion:metrika' });
 /** Метрика считает клики Директа, поэтому конверсии привязываются к его кампаниям. */
 const PROVIDER = 'YANDEX_DIRECT' as const;
 
-const ATTRIBUTIONS = ['LAST', 'FIRST', 'LASTSIGN', 'LAST_YANDEX_DIRECT_CLICK'] as const;
+/** Тот же перечень, что принимает `MetrikaClient`: `satisfies` не даст ему разойтись. */
+const ATTRIBUTIONS = [
+  'LAST',
+  'FIRST',
+  'LASTSIGN',
+  'LAST_YANDEX_DIRECT_CLICK',
+] as const satisfies readonly NonNullable<MetrikaClientOptions['attribution']>[];
 
 export interface MetrikaSettings {
   counterId: number;
@@ -82,9 +88,8 @@ function str(value: unknown): string | undefined {
  * Настройка счётчика читается из карточки клиента, токен — из секретов кабинета.
  *
  * Номер счётчика, цель и модель атрибуции секретом не являются: их называет
- * клиент на онбординге, и лежать они должны там, где их видно и можно поправить,
- * — в `Client`. В зашифрованном payload они были недостижимы для всего, кроме
- * этой функции, поэтому и не заполнялись никогда.
+ * клиент на онбординге (`ai/onboarding/metrika-config.ts`), и лежать они должны
+ * там, где их видно и можно поправить, — в `Client`.
  *
  * Токен остаётся в `Credential`: Метрика принимает тот же OAuth-токен Яндекса,
  * если приложению выдан доступ к статистике. Общий сервисный токен из окружения
@@ -110,9 +115,12 @@ export function readMetrikaSettings(
 }
 
 /**
- * Ключи, по которым настройка счётчика лежала в зашифрованном payload до
- * переезда в `Client`. Нужны ровно для того, чтобы не промолчать: кабинет со
- * старой настройкой иначе просто перестал бы получать конверсии Метрики.
+ * Ключи настройки счётчика в зашифрованном payload. Наш код их туда не пишет и
+ * никогда не писал: схемы payload (`schemas/credentials.ts`, `yandexCredentialsSchema`)
+ * выбрасывают всё постороннее, а продление токена перезаписывает payload целиком.
+ * Проверка нужна для кабинета, куда счётчик вписали руками: молча игнорировать
+ * такую настройку — значит оставить клиента без конверсий Метрики без единой
+ * строчки в логе.
  */
 const LEGACY_CONFIG_KEYS = [
   'metrikaCounterId',

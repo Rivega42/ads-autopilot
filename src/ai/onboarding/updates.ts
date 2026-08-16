@@ -1,13 +1,13 @@
-import { isMoneyField, type BriefField, type ClientBriefDraft } from './brief.schema.js';
+import { requiresEvidence, type BriefField, type ClientBriefDraft } from './brief.schema.js';
 import type { InterviewTurn } from './turn.schema.js';
 
 /**
  * Приём обновлений брифа от модели.
  *
- * Здесь живёт защита от выдуманных цифр. Для денежных полей модель обязана приложить
- * цитату из ответа клиента; если такой фразы в сообщениях клиента нет — значение
- * отбрасывается, и интервью спросит ещё раз. Пустое поле стоит одного лишнего вопроса,
- * выдуманный CPA — реальных денег на ставках.
+ * Здесь живёт защита от выдуманных цифр. Для полей из `EVIDENCE_BRIEF_FIELDS` модель
+ * обязана приложить цитату из ответа клиента; если такой фразы в сообщениях клиента
+ * нет — значение отбрасывается, и интервью спросит ещё раз. Пустое поле стоит одного
+ * лишнего вопроса, выдуманный CPA — реальных денег на ставках.
  */
 
 export interface RejectedUpdate {
@@ -53,7 +53,9 @@ export function applyTurnUpdates(
   for (const [field, value] of Object.entries(turn.updates ?? {}) as [BriefField, unknown][]) {
     if (value === undefined) continue;
 
-    if (isMoneyField(field)) {
+    // `null` — это отказ клиента («Метрики нет»), а не значение: выдумать в нём
+    // нечего, и требовать цитату не за что.
+    if (value !== null && requiresEvidence(field)) {
       const quote = evidence[field];
       if (quote === undefined || quote.trim() === '') {
         rejected.push({ field, reason: 'no-evidence', value });

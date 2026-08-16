@@ -10,8 +10,12 @@ import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import { describeError } from '@/lib/errors.js';
+import { withTimeout } from '@/lib/retry.js';
 import { logger } from '@/logger.js';
 import { onShutdown } from '@/shutdown.js';
+
+/** Сколько ждём ответа Telegram на старте, прежде чем считать запуск неудавшимся. */
+const BOT_INIT_TIMEOUT_MS = 30_000;
 
 /**
  * Telegram-бот: единственная точка, где человек участвует в работе автопилота.
@@ -75,7 +79,10 @@ async function main(): Promise<void> {
   }
 
   const bot = buildBot(token);
-  await bot.init();
+  // Без ограничения по времени недоступный Telegram превращает старт в вечное
+  // ожидание: процесс жив, в логах пусто, докер считает контейнер рабочим и не
+  // перезапускает его. Падение с текстом лучше молчаливого зависания.
+  await withTimeout(() => bot.init(), BOT_INIT_TIMEOUT_MS, 'telegram getMe при старте');
   logger.info({ username: bot.botInfo.username }, 'bot started');
 
   // Не bot.start(): long polling grammY обрабатывает апдейты строго по одному, а

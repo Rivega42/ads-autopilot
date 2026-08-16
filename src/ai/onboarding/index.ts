@@ -9,16 +9,21 @@ export {
   clientBriefSchema,
   briefDraftSchema,
   briefFieldSchema,
+  metrikaBriefSchema,
   missingBriefFields,
   parseCompleteBrief,
+  requiresEvidence,
   BRIEF_FIELDS,
   BRIEF_FIELD_LABELS,
+  EVIDENCE_BRIEF_FIELDS,
+  METRIKA_ATTRIBUTIONS,
   MONEY_BRIEF_FIELDS,
   REQUIRED_BRIEF_FIELDS,
   type BriefField,
   type BriefParseResult,
   type ClientBriefData,
   type ClientBriefDraft,
+  type MetrikaAttribution,
 } from './brief.schema.js';
 export {
   getInterviewState,
@@ -36,10 +41,18 @@ export {
 } from './interview.js';
 export {
   metrikaConfigFromBrief,
+  metrikaConfigPatch,
   saveMetrikaConfig,
   type ClientConfigStore,
   type MetrikaBriefConfig,
+  type MetrikaConfigPatch,
 } from './metrika-config.js';
+export {
+  backfillMetrikaConfig,
+  type MetrikaBackfillOptions,
+  type MetrikaBackfillResult,
+  type MetrikaBackfillStore,
+} from './metrika-backfill.js';
 export { interviewTurnSchema, personaReplySchema, type InterviewTurn } from './turn.schema.js';
 export {
   emptyTranscript,

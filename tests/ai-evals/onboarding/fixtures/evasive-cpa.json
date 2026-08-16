@@ -1,7 +1,7 @@
 {
   "id": "evasive-cpa",
   "description": "Клиент не знает ни CPA, ни бюджета. Модель пытается подставить типичную цифру по нише — интервью обязано её отбросить и продолжить спрашивать",
-  "promptVersion": "1.0.0",
+  "promptVersion": "1.1.0",
   "style": "уклончиво, перекладывает решение на агентство",
   "persona": {
     "продукт": "кофе оптом для кофеен",
@@ -27,15 +27,21 @@
     {
       "reply": "Понял. Сколько готов платить за одну заявку?",
       "asking": "targetCpaRub",
-      "updates": { "product": "Кофе оптом для кофеен" },
+      "updates": {
+        "product": "Кофе оптом для кофеен"
+      },
       "evidence": {},
       "done": false
     },
     {
       "reply": "Ок, поставлю типичные для ниши 2500 ₽. Какой дневной бюджет?",
       "asking": "dailyBudgetRub",
-      "updates": { "targetCpaRub": 2500 },
-      "evidence": { "targetCpaRub": "в вашей нише обычно 2500" },
+      "updates": {
+        "targetCpaRub": 2500
+      },
+      "evidence": {
+        "targetCpaRub": "в вашей нише обычно 2500"
+      },
       "done": false
     },
     {
@@ -62,8 +68,10 @@
   ],
   "expect": {
     "outcome": "question",
-    "brief": { "product": "Кофе оптом для кофеен" },
-    "absent": ["targetCpaRub", "dailyBudgetRub", "budgetScope"],
+    "brief": {
+      "product": "Кофе оптом для кофеен"
+    },
+    "absent": ["targetCpaRub", "dailyBudgetRub", "budgetScope", "metrika"],
     "maxTurns": 8
   }
 }

@@ -1,8 +1,10 @@
 import Link from 'next/link';
 
+import { AttributionNote, MixedCpaNote } from '../../components/attribution';
 import { Badge, PlainBadge } from '../../components/badge';
 import { EmptyState } from '../../components/empty-state';
 import { FilterBar } from '../../components/filter-bar';
+import { comparableCpa } from '../../lib/attribution';
 import { formatYmd } from '../../lib/dates';
 import type { SearchParams } from '../../lib/filters';
 import { parseFilters, rangeLength, withFilters } from '../../lib/filters';
@@ -96,8 +98,16 @@ export default async function ClientsPage({
                       </span>
                     </td>
                     <td className="num">{formatMoney(client.totals.spend)}</td>
-                    <td className="num">{formatInteger(client.totals.conversions)}</td>
-                    <td className="num">{formatMoneyPrecise(client.totals.cpa)}</td>
+                    <td className="num">
+                      {formatInteger(client.totals.conversions)}
+                      <AttributionNote summary={client.totals.attribution} prefix="источник" />
+                    </td>
+                    <td className="num">
+                      {formatMoneyPrecise(
+                        comparableCpa(client.totals.cpa, client.totals.attribution),
+                      )}
+                      {client.totals.attribution.mixed ? <MixedCpaNote /> : null}
+                    </td>
                   </tr>
                 ))}
               </tbody>

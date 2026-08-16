@@ -1,6 +1,8 @@
 import type { Job } from 'bullmq';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { env } from '@/env.js';
+
 const h = vi.hoisted(() => ({
   runIngestion: vi.fn(async () => ({ targets: 1, ok: 1, failures: [] })),
   runSearchQueryIngestion: vi.fn(async () => ({ targets: 1, ok: 1, written: 3, failures: [] })),
@@ -8,6 +10,11 @@ const h = vi.hoisted(() => ({
   expireApprovals: vi.fn(async () => ({ expired: 1, raced: 0, stuck: 0 })),
   runWeeklyKeywordRefresh: vi.fn(async () => ({ clients: 1, cores: 1, degraded: 1 })),
   runModerationCheck: vi.fn(async () => ({ polled: 4, repaired: 1, escalated: 0 })),
+  runAbEvaluation: vi.fn(async (_options: { dryRun: boolean }) => ({
+    adGroups: 3,
+    winners: 1,
+    approvals: 1,
+  })),
 }));
 
 vi.mock('@/ingestion/index.js', () => ({
@@ -18,6 +25,7 @@ vi.mock('@/ingestion/index.js', () => ({
 vi.mock('@/approval/index.js', () => ({ expireApprovals: h.expireApprovals }));
 vi.mock('@/keywords/index.js', () => ({ runWeeklyKeywordRefresh: h.runWeeklyKeywordRefresh }));
 vi.mock('@/moderation/index.js', () => ({ runModerationCheck: h.runModerationCheck }));
+vi.mock('@/creatives/index.js', () => ({ runAbEvaluation: h.runAbEvaluation }));
 
 const { handlers } = await import('@/scheduler/handlers.js');
 const { QUEUE_NAMES } = await import('@/scheduler/queues.js');
@@ -106,6 +114,16 @@ describe('handlers', () => {
 
     await handlers[QUEUE_NAMES.fetchStats](job(), 'token');
     expect(h.runIngestion).toHaveBeenCalledTimes(2);
+  });
+
+  it('evaluate-ab-tests оценивает эксперименты с предохранителем из env', async () => {
+    const result = await handlers[QUEUE_NAMES.evaluateAbTests](job(), 'token');
+
+    expect(h.runAbEvaluation).toHaveBeenCalledTimes(1);
+    // Крон не имеет права применять изменения в обход общего предохранителя.
+    const [options] = h.runAbEvaluation.mock.calls[0] ?? [];
+    expect(options).toEqual({ dryRun: env.DRY_RUN });
+    expect(result).toMatchObject({ winners: 1, approvals: 1 });
   });
 
   it('check-moderation опрашивает статусы', async () => {

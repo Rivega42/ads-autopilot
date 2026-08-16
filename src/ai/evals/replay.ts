@@ -1,6 +1,6 @@
 import type { EvalCase, EvalRunResult, ScriptedTurn } from './types.js';
 
-import { createMemoryBriefStore } from '@/ai/evals/memory-store.js';
+import { createMemoryBriefStore, createMemoryClientStore } from '@/ai/evals/memory-store.js';
 import {
   handleAnswer,
   startInterview,
@@ -38,6 +38,9 @@ export async function runEvalCase(
   opts: ReplayOptions = {},
 ): Promise<EvalRunResult> {
   const store = createMemoryBriefStore();
+  // Карточка клиента тоже в памяти: завершённый бриф пишет в неё настройку
+  // Метрики, и без подмены прогон постучался бы в настоящий Postgres.
+  const clients = createMemoryClientStore().clients;
   const observed: ScriptedTurn[] = [];
   const answers: string[] = [];
 
@@ -46,13 +49,13 @@ export async function runEvalCase(
   const maxSteps = opts.live ? MAX_QUESTIONS + 1 : evalCase.recorded.length + 1;
 
   try {
-    let step: InterviewStep = await startInterview(CLIENT_ID, { db: store.db, run });
+    let step: InterviewStep = await startInterview(CLIENT_ID, { db: store.db, clients, run });
 
     for (let i = 0; step.kind === 'question' && i < maxSteps; i += 1) {
       const next = await answer(step.text);
       if (next === null) break;
       answers.push(next);
-      step = await handleAnswer(CLIENT_ID, next, { db: store.db, run });
+      step = await handleAnswer(CLIENT_ID, next, { db: store.db, clients, run });
     }
 
     return {

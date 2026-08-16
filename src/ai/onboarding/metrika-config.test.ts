@@ -20,6 +20,7 @@ const BRIEF: ClientBriefData = {
   budgetScope: 'per_channel',
   competitors: [],
   conversionGoals: [{ name: 'заявка на пробный урок' }],
+  metrika: null,
 };
 
 interface ClientStoreHarness {
@@ -41,22 +42,47 @@ function clientStore(): ClientStoreHarness {
 }
 
 describe('metrikaConfigFromBrief', () => {
-  it('берёт единственную названную цель', () => {
+  it('берёт счётчик, цель и модель атрибуции из ответа клиента', () => {
+    const brief: ClientBriefData = {
+      ...BRIEF,
+      metrika: { counterId: 12_345_678, goalId: 555, attribution: 'LAST_YANDEX_DIRECT_CLICK' },
+    };
+
+    expect(metrikaConfigFromBrief(brief)).toEqual({
+      config: {
+        metrikaCounterId: 12_345_678,
+        metrikaGoalId: 555,
+        metrikaAttribution: 'LAST_YANDEX_DIRECT_CLICK',
+      },
+      ambiguousGoalIds: [],
+    });
+  });
+
+  it('«Метрики нет» — пустая конфигурация, а не ошибка', () => {
+    expect(metrikaConfigFromBrief(BRIEF)).toEqual({
+      config: { metrikaCounterId: null, metrikaGoalId: null, metrikaAttribution: null },
+      ambiguousGoalIds: [],
+    });
+  });
+
+  it('«Метрики нет» перебивает id цели из целевых действий', () => {
+    // Клиент сказал прямо; id цели в списке действий — в лучшем случае чужой.
     const brief: ClientBriefData = {
       ...BRIEF,
       conversionGoals: [{ name: 'заявка', metrikaGoalId: 555 }],
     };
 
-    expect(metrikaConfigFromBrief(brief)).toEqual({
-      config: { metrikaCounterId: null, metrikaGoalId: 555 },
-      ambiguousGoalIds: [],
-    });
+    expect(metrikaConfigFromBrief(brief).config.metrikaGoalId).toBeNull();
   });
 
-  it('номер счётчика не выдумывает: в брифе его нет', () => {
-    // Счётчик чужого аккаунта тихо приписал бы клиенту чужие конверсии, а по ним
-    // потом двигаются ставки. Пусто — честнее.
-    expect(metrikaConfigFromBrief(BRIEF).config.metrikaCounterId).toBeNull();
+  it('цель берёт из целевых действий, если отдельно её не назвали', () => {
+    const brief: ClientBriefData = {
+      ...BRIEF,
+      conversionGoals: [{ name: 'заявка', metrikaGoalId: 555 }],
+      metrika: { counterId: 12_345_678 },
+    };
+
+    expect(metrikaConfigFromBrief(brief).config.metrikaGoalId).toBe(555);
   });
 
   it('две разные цели — выбор человека, а не первой попавшейся', () => {
@@ -66,11 +92,27 @@ describe('metrikaConfigFromBrief', () => {
         { name: 'заявка', metrikaGoalId: 1 },
         { name: 'звонок', metrikaGoalId: 2 },
       ],
+      metrika: { counterId: 12_345_678 },
     };
 
     const { config, ambiguousGoalIds } = metrikaConfigFromBrief(brief);
     expect(config.metrikaGoalId).toBeNull();
     expect(ambiguousGoalIds).toEqual([1, 2]);
+  });
+
+  it('названная цель снимает неоднозначность целевых действий', () => {
+    const brief: ClientBriefData = {
+      ...BRIEF,
+      conversionGoals: [
+        { name: 'заявка', metrikaGoalId: 1 },
+        { name: 'звонок', metrikaGoalId: 2 },
+      ],
+      metrika: { counterId: 12_345_678, goalId: 2 },
+    };
+
+    const { config, ambiguousGoalIds } = metrikaConfigFromBrief(brief);
+    expect(config.metrikaGoalId).toBe(2);
+    expect(ambiguousGoalIds).toEqual([]);
   });
 
   it('одна и та же цель, названная дважды, неоднозначностью не считается', () => {
@@ -80,34 +122,66 @@ describe('metrikaConfigFromBrief', () => {
         { name: 'заявка с формы', metrikaGoalId: 7 },
         { name: 'заявка из квиза', metrikaGoalId: 7 },
       ],
+      metrika: { counterId: 12_345_678 },
     };
 
-    expect(metrikaConfigFromBrief(brief)).toEqual({
-      config: { metrikaCounterId: null, metrikaGoalId: 7 },
-      ambiguousGoalIds: [],
-    });
+    expect(metrikaConfigFromBrief(brief).ambiguousGoalIds).toEqual([]);
   });
 });
 
 describe('saveMetrikaConfig', () => {
-  it('пишет цель из брифа в карточку клиента', async () => {
+  it('пишет счётчик, цель и атрибуцию в карточку клиента', async () => {
     const store = clientStore();
     const brief: ClientBriefData = {
       ...BRIEF,
-      conversionGoals: [{ name: 'заявка', metrikaGoalId: 555 }],
+      metrika: { counterId: 12_345_678, goalId: 555, attribution: 'LASTSIGN' },
     };
 
     const saved = await saveMetrikaConfig(CLIENT, brief, store.db);
 
-    expect(saved).toEqual({ metrikaCounterId: null, metrikaGoalId: 555 });
-    expect(store.updates).toEqual([{ id: CLIENT, metrikaGoalId: 555 }]);
+    expect(saved).toEqual({
+      metrikaCounterId: 12_345_678,
+      metrikaGoalId: 555,
+      metrikaAttribution: 'LASTSIGN',
+    });
+    expect(store.updates).toEqual([
+      {
+        id: CLIENT,
+        metrikaCounterId: 12_345_678,
+        metrikaGoalId: 555,
+        metrikaAttribution: 'LASTSIGN',
+      },
+    ]);
   });
 
-  it('без цели в брифе строку не трогает', async () => {
+  it('не пишет колонки, о которых бриф молчит', async () => {
+    const store = clientStore();
+    const brief: ClientBriefData = { ...BRIEF, metrika: { counterId: 12_345_678 } };
+
+    await saveMetrikaConfig(CLIENT, brief, store.db);
+
+    // `null` в апдейте затёр бы то, что могли проставить руками.
+    expect(store.updates).toEqual([{ id: CLIENT, metrikaCounterId: 12_345_678 }]);
+  });
+
+  it('без Метрики строку не трогает', async () => {
     const store = clientStore();
 
     expect(await saveMetrikaConfig(CLIENT, BRIEF, store.db)).toBeNull();
-    // Пустой апдейт затёр бы то, что могли проставить руками.
     expect(store.updates).toEqual([]);
+  });
+
+  it('в брифе, собранном до вопроса про Метрику, берёт цель из целевых действий', async () => {
+    const store = clientStore();
+    const { metrika: _metrika, ...legacy } = BRIEF;
+    const brief: ClientBriefData = {
+      ...legacy,
+      conversionGoals: [{ name: 'заявка', metrikaGoalId: 555 }],
+    };
+
+    await saveMetrikaConfig(CLIENT, brief, store.db);
+
+    // Счётчика в таких брифах нет — его проставят руками или следующим интервью.
+    expect(store.updates).toEqual([{ id: CLIENT, metrikaGoalId: 555 }]);
   });
 });

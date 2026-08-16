@@ -2,6 +2,7 @@ import { ApprovalDecision, ChangeActor, type PendingApproval } from '@prisma/cli
 
 import { formatAmount, renderOutcome, type CardOutcome } from '@/approval/card.js';
 import { changeLogAction, changeSnapshot, executeAction } from '@/approval/execute.js';
+import { markNegatedQueries } from '@/approval/mark-negated.js';
 import { getMessenger } from '@/approval/telegram.js';
 import {
   approvalActionSchema,
@@ -97,6 +98,9 @@ export async function applyApproval(approvalId: string, approvedBy: string): Pro
     result.plan,
   );
   if (changeLogError) notes.push(`запись в журнал изменений не удалась: ${changeLogError}`);
+
+  const negatedError = await markNegatedIfNeeded(action, dryRun);
+  if (negatedError) notes.push(`пометка минус-фраз в статистике не удалась: ${negatedError}`);
 
   try {
     await prisma.pendingApproval.update({
@@ -280,6 +284,39 @@ async function writeChangeLog(
   } catch (err) {
     const message = describeError(err);
     log.error({ err: message, kind: action.kind }, 'changelog write failed');
+    return message;
+  }
+}
+
+/**
+ * Пометка применённых минус-фраз — тот же долг, что и у прямого применения
+ * (`markNegated` в src/optimizer/scheduled.ts): без неё оптимизатор предложит
+ * одобренную человеком фразу завтра, послезавтра и далее без конца.
+ *
+ * В dry-run не помечаем: на площадке ничего не менялось, и запрет фразы в
+ * статистике скрыл бы её от следующего — уже настоящего — прогона.
+ *
+ * Ошибку возвращаем, а не бросаем: минус-слова в кабинете уже стоят, и провал
+ * пометки обязан остаться примечанием, а не превратить исход в FAILED.
+ *
+ * @returns текст ошибки либо null.
+ */
+async function markNegatedIfNeeded(
+  action: ApprovalAction,
+  dryRun: boolean,
+): Promise<string | null> {
+  if (action.kind !== 'add_negatives' || dryRun) return null;
+  try {
+    await markNegatedQueries({
+      clientId: action.clientId,
+      provider: action.channel,
+      campaignExternalId: action.campaignExternalId,
+      phrases: action.phrases,
+    });
+    return null;
+  } catch (err) {
+    const message = describeError(err);
+    log.error({ campaign: action.campaignExternalId, err: message }, 'negated marking failed');
     return message;
   }
 }

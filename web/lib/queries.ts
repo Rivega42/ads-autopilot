@@ -5,10 +5,13 @@ import type {
   CampaignStatus,
   ChangeActor,
   ClientStatus,
+  ConversionSource,
   HandoverMode,
   Provider,
 } from '@prisma/client';
 
+import type { AttributionSummary, ConversionSourceCounts } from './attribution';
+import { addCounts, emptyCounts, summarizeAttribution } from './attribution';
 import { dateColumnToYmd, eachDay, mskDateToUtc, shiftYmd, ymdToDateColumn } from './dates';
 import type { DashboardFilters } from './filters';
 import { cpa, ctr } from './metrics';
@@ -26,6 +29,8 @@ export interface PeriodTotals {
   readonly conversions: number;
   readonly cpa: number | null;
   readonly ctr: number | null;
+  /** Чьи конверсии сложены в `conversions`. При `mixed` `cpa` несопоставим. */
+  readonly attribution: AttributionSummary;
 }
 
 export interface ClientRow {
@@ -74,6 +79,8 @@ export interface DailyMetrics {
   readonly spend: number;
   readonly conversions: number;
   readonly cpa: number | null;
+  /** `null` — за этот день строки статистики нет, а не «источник неизвестен». */
+  readonly conversionSource: ConversionSource | null;
 }
 
 export interface ChangeRow {
@@ -110,26 +117,42 @@ export interface ApprovalRow {
   readonly tgMessageId: string | null;
 }
 
-function totalsOf(raw: {
-  impressions: number;
-  clicks: number;
-  spend: number;
-  conversions: number;
-}): PeriodTotals {
+interface RawTotals {
+  readonly impressions: number;
+  readonly clicks: number;
+  readonly spend: number;
+  readonly conversions: number;
+}
+
+function totalsOf(raw: RawTotals, counts: ConversionSourceCounts = emptyCounts()): PeriodTotals {
   return {
     ...raw,
     cpa: cpa(raw.spend, raw.conversions),
     ctr: ctr(raw.clicks, raw.impressions),
+    attribution: summarizeAttribution(counts),
   };
 }
 
-const ZERO = { impressions: 0, clicks: 0, spend: 0, conversions: 0 };
+function addRaw(left: RawTotals, right: RawTotals): RawTotals {
+  return {
+    impressions: left.impressions + right.impressions,
+    clicks: left.clicks + right.clicks,
+    spend: left.spend + right.spend,
+    conversions: left.conversions + right.conversions,
+  };
+}
+
+const ZERO: RawTotals = { impressions: 0, clicks: 0, spend: 0, conversions: 0 };
 
 /**
  * Суммы `CampaignStat` по кампаниям за период.
  *
  * `CampaignStat` полиморфна: без `entityType` в выборку попали бы строки групп
  * и объявлений, у которых `entityId` из другой таблицы, но формально сравним.
+ *
+ * Группировка идёт ещё и по `conversionSource`: одна строка на кампанию скрыла
+ * бы, что часть дней окна посчитала Метрика, а часть — площадка, и суммарный
+ * CPA молча получился бы из двух несовместимых моделей атрибуции.
  */
 async function campaignTotals(
   campaignIds: readonly string[],
@@ -140,26 +163,36 @@ async function campaignTotals(
   if (campaignIds.length === 0) return result;
 
   const grouped = await getPrisma().campaignStat.groupBy({
-    by: ['entityId'],
+    by: ['entityId', 'conversionSource'],
     where: {
       entityType: StatEntityType.CAMPAIGN,
       entityId: { in: [...campaignIds] },
       date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
     },
     _sum: { impressions: true, clicks: true, spend: true, conversions: true },
+    _count: { _all: true },
   });
 
+  const accumulated = new Map<string, { totals: RawTotals; counts: ConversionSourceCounts }>();
   for (const row of grouped) {
-    result.set(
-      row.entityId,
-      totalsOf({
+    const previous = accumulated.get(row.entityId) ?? { totals: ZERO, counts: emptyCounts() };
+    const counts = emptyCounts();
+    counts[row.conversionSource] = row._count._all;
+
+    accumulated.set(row.entityId, {
+      totals: addRaw(previous.totals, {
         impressions: row._sum.impressions ?? 0,
         clicks: row._sum.clicks ?? 0,
         // spend — Decimal: без явного преобразования сюда приехал бы объект.
         spend: decimalToNumberOr(row._sum.spend, 0),
         conversions: row._sum.conversions ?? 0,
       }),
-    );
+      counts: addCounts(previous.counts, counts),
+    });
+  }
+
+  for (const [entityId, entry] of accumulated) {
+    result.set(entityId, totalsOf(entry.totals, entry.counts));
   }
   return result;
 }
@@ -201,16 +234,19 @@ export async function listClients(filters: DashboardFilters): Promise<ClientRow[
     for (const credential of client.credentials) channels.add(credential.provider);
     for (const campaign of client.campaigns) channels.add(campaign.provider);
 
-    const summed = campaigns.reduce((accumulator, campaign) => {
-      const stat = totals.get(campaign.id);
-      if (!stat) return accumulator;
-      return {
-        impressions: accumulator.impressions + stat.impressions,
-        clicks: accumulator.clicks + stat.clicks,
-        spend: accumulator.spend + stat.spend,
-        conversions: accumulator.conversions + stat.conversions,
-      };
-    }, ZERO);
+    // Смешение вылезает чаще всего именно здесь: у одной кампании клиента
+    // Метрика настроена, у соседней — нет, а в строке клиента они складываются.
+    const summed = campaigns.reduce<{ totals: RawTotals; counts: ConversionSourceCounts }>(
+      (accumulator, campaign) => {
+        const stat = totals.get(campaign.id);
+        if (!stat) return accumulator;
+        return {
+          totals: addRaw(accumulator.totals, stat),
+          counts: addCounts(accumulator.counts, stat.attribution.counts),
+        };
+      },
+      { totals: ZERO, counts: emptyCounts() },
+    );
 
     return {
       id: client.id,
@@ -222,7 +258,7 @@ export async function listClients(filters: DashboardFilters): Promise<ClientRow[
       ),
       campaignCount: campaigns.length,
       activeCampaignCount: campaigns.filter((campaign) => campaign.status === 'ACTIVE').length,
-      totals: totalsOf(summed),
+      totals: totalsOf(summed.totals, summed.counts),
     };
   });
 }
@@ -325,7 +361,14 @@ export async function getCampaignDaily(
       entityId: campaignId,
       date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
     },
-    select: { date: true, impressions: true, clicks: true, spend: true, conversions: true },
+    select: {
+      date: true,
+      impressions: true,
+      clicks: true,
+      spend: true,
+      conversions: true,
+      conversionSource: true,
+    },
     orderBy: { date: 'asc' },
   });
 
@@ -342,6 +385,7 @@ export async function getCampaignDaily(
       spend,
       conversions,
       cpa: cpa(spend, conversions),
+      conversionSource: row?.conversionSource ?? null,
     };
   });
 }

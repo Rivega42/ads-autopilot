@@ -45,6 +45,9 @@ export {
   type ApprovalMeta,
 } from '@/approval/types.js';
 export { registerActionExecutor, type ActionExecutor } from '@/approval/execute.js';
+// Пометка применённых минус-фраз нужна обоим путям применения — через апрув и
+// напрямую из оптимизатора, — поэтому лежит здесь, а не внутри одного из них.
+export { markNegatedQueries, type MarkNegatedInput } from '@/approval/mark-negated.js';
 export {
   createApiMessenger,
   getMessenger,

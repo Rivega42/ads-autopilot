@@ -81,3 +81,57 @@ jobs:
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/ads_autopilot_test
           REDIS_URL: redis://localhost:6379
+
+  # Дашборд — отдельный пакет workspace: корневой vitest не подхватывает
+  # web/lib/**/*.test.ts, а корневой typecheck не знает про JSX. Без этой job'ы
+  # правки в web/ не проверялись ничем.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter web test
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
+      # Сборка Next включает собственный typecheck страниц и генерирует клиент
+      # Prisma в свой экземпляр пакета — подключения к базе при этом нет.
+      - run: pnpm --filter web build
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+
+  # Образ ломается иначе, чем тесты: alias'ы `@/`, отсутствие workspace-манифестов
+  # и незагенерённый клиент Prisma видны только при реальной сборке.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: app
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: build dashboard image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: web
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

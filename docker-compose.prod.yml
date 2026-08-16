@@ -1,0 +1,136 @@
+# Прод-стек. Разворачивается на одном VPS: `docker compose -f docker-compose.prod.yml up -d`.
+# Переменные читаются из файла .env рядом с этим файлом — см. docs/DEPLOY.md.
+#
+# Postgres и Redis наружу не публикуются: их порты видны только внутри сети
+# compose. Единственная точка входа снаружи — nginx на 80/443.
+
+x-app-env: &app-env
+  NODE_ENV: production
+  TZ: Europe/Moscow
+  DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+  REDIS_URL: redis://redis:6379
+  # Предохранитель. Снимать осознанно и только после проверки в песочнице:
+  # с DRY_RUN=false система начинает писать в живые рекламные кабинеты.
+  DRY_RUN: ${DRY_RUN:-true}
+
+x-app-base: &app-base
+  image: ${APP_IMAGE:-ghcr.io/rivega42/ads-autopilot:latest}
+  restart: unless-stopped
+  env_file: [.env]
+  networks: [internal]
+  logging:
+    driver: json-file
+    options: { max-size: '10m', max-file: '5' }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # noeviction обязателен: BullMQ держит в Redis состояние задач, и вытеснение
+    # ключей под нагрузкой молча потеряло бы запланированные прогоны.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+  api:
+    <<: *app-base
+    environment:
+      <<: *app-env
+      ROLE: api
+      # Миграции накатывает только api. Prisma берёт advisory-lock, так что гонки
+      # не было бы и при трёх контейнерах, но каждый лишний ждал бы её впустую.
+      RUN_MIGRATIONS: 'true'
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    <<: *app-base
+    environment:
+      <<: *app-env
+      ROLE: worker
+    # Ждём здоровья api: до конца миграций схема в базе старая, и воркер начал бы
+    # ходить в колонки, которых ещё нет.
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      api: { condition: service_healthy }
+
+  bot:
+    <<: *app-base
+    environment:
+      <<: *app-env
+      ROLE: bot
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      api: { condition: service_healthy }
+
+  web:
+    image: ${WEB_IMAGE:-ghcr.io/rivega42/ads-autopilot-web:latest}
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      TZ: Europe/Moscow
+      DATABASE_URL: postgresql://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+      # Дашборд закрыт nginx-ом, но собственная калитка остаётся включённой:
+      # доступ в обход прокси не должен открывать расходы клиентов.
+      DASHBOARD_USER: ${DASHBOARD_USER:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?}
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [internal]
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '5' }
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?}
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN:?}
+    volumes:
+      - ./docker/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - certbot_webroot:/var/www/certbot
+    depends_on: [api, web]
+    networks: [internal]
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '5' }
+
+volumes:
+  pg_data:
+  redis_data:
+  certbot_webroot:
+
+networks:
+  internal:

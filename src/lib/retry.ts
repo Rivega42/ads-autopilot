@@ -39,6 +39,39 @@ export function backoffDelay(attempt: number, baseMs: number, maxDelayMs: number
   return Math.round(Math.random() * exp);
 }
 
+/**
+ * Ограничивает ожидание операции без собственного таймаута.
+ *
+ * Нужна там, где зависание неотличимо от работы: процесс, застрявший на сетевом
+ * вызове, для докера жив, restart-политика не срабатывает, а в логах пусто. Лучше
+ * упасть с внятной строкой и дать себя перезапустить.
+ *
+ * Отменить сам `fn` нельзя — обещание продолжит жить, поэтому годится только для
+ * старта, после которого процесс всё равно завершается.
+ */
+export async function withTimeout<T>(fn: () => Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new AppError(`${label}: нет ответа за ${ms} мс`, {
+                code: 'TIMEOUT',
+                context: { label, ms },
+              }),
+            ),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}): Promise<T> {
   const {
     attempts = 3,

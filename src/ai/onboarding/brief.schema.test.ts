@@ -4,9 +4,10 @@ import {
   briefDraftSchema,
   briefWarnings,
   clientBriefSchema,
-  isMoneyField,
   missingBriefFields,
   parseCompleteBrief,
+  requiresEvidence,
+  METRIKA_ATTRIBUTIONS,
   REQUIRED_BRIEF_FIELDS,
   type ClientBriefData,
 } from './brief.schema.js';
@@ -22,6 +23,7 @@ const FULL: ClientBriefData = {
   budgetScope: 'per_channel',
   competitors: [{ name: 'Skyeng', site: 'https://skyeng.ru' }],
   conversionGoals: [{ name: 'заявка на пробный урок', metrikaGoalId: 123 }],
+  metrika: { counterId: 12_345_678, goalId: 123, attribution: 'LASTSIGN' },
 };
 
 describe('clientBriefSchema', () => {
@@ -61,6 +63,44 @@ describe('clientBriefSchema', () => {
   it('требует настоящий url у сайта конкурента', () => {
     const broken = { ...FULL, competitors: [{ name: 'X', site: 'скайэнг' }] };
     expect(clientBriefSchema.safeParse(broken).success).toBe(false);
+  });
+});
+
+describe('блок Метрики в брифе', () => {
+  it('«Метрики нет» — валидный ответ, а не пропуск', () => {
+    expect(clientBriefSchema.safeParse({ ...FULL, metrika: null }).success).toBe(true);
+    expect(missingBriefFields({ ...FULL, metrika: null })).toEqual([]);
+  });
+
+  it('без ответа про Метрику бриф не собран', () => {
+    const { metrika: _metrika, ...withoutMetrika } = FULL;
+    expect(missingBriefFields(withoutMetrika)).toEqual(['metrika']);
+  });
+
+  it('номер счётчика — положительное целое, а не любая строка', () => {
+    for (const counterId of ['12345678', 0, -1, 1.5]) {
+      expect(clientBriefSchema.safeParse({ ...FULL, metrika: { counterId } }).success).toBe(false);
+    }
+    expect(clientBriefSchema.safeParse({ ...FULL, metrika: { counterId: 42 } }).success).toBe(true);
+  });
+
+  it('счётчик обязателен, если Метрика у клиента есть', () => {
+    // Цель без счётчика — это выключенная загрузка конверсий, а выглядит как настроенная.
+    expect(clientBriefSchema.safeParse({ ...FULL, metrika: { goalId: 7 } }).success).toBe(false);
+  });
+
+  it('id цели — тоже положительное целое', () => {
+    const broken = { ...FULL, metrika: { counterId: 42, goalId: 0 } };
+    expect(clientBriefSchema.safeParse(broken).success).toBe(false);
+  });
+
+  it('модель атрибуции — только та, которую понимает клиент Метрики', () => {
+    for (const attribution of METRIKA_ATTRIBUTIONS) {
+      const brief = { ...FULL, metrika: { counterId: 42, attribution } };
+      expect(clientBriefSchema.safeParse(brief).success).toBe(true);
+    }
+    const invented = { ...FULL, metrika: { counterId: 42, attribution: 'LAST_CLICK' } };
+    expect(clientBriefSchema.safeParse(invented).success).toBe(false);
   });
 });
 
@@ -124,15 +164,22 @@ describe('briefWarnings', () => {
     expect(warnings.join(' ')).toContain('Москва');
   });
 
+  it('замечает отказ от Метрики', () => {
+    // Не ошибка, но человек должен знать: CPA будет считать сама площадка.
+    expect(briefWarnings({ ...FULL, metrika: null }).join(' ')).toContain('Метрик');
+  });
+
   it('на чистом брифе молчит', () => {
     expect(briefWarnings(FULL)).toEqual([]);
   });
 });
 
-describe('isMoneyField', () => {
-  it('покрывает ровно денежные поля', () => {
-    expect(isMoneyField('targetCpaRub')).toBe(true);
-    expect(isMoneyField('dailyBudgetRub')).toBe(true);
-    expect(isMoneyField('product')).toBe(false);
+describe('requiresEvidence', () => {
+  it('покрывает деньги и счётчик Метрики', () => {
+    expect(requiresEvidence('targetCpaRub')).toBe(true);
+    expect(requiresEvidence('dailyBudgetRub')).toBe(true);
+    // Выдуманный счётчик — это чужие конверсии, по которым потом двигаются ставки.
+    expect(requiresEvidence('metrika')).toBe(true);
+    expect(requiresEvidence('product')).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { AppError, OutOfUnitsError, RateLimitError } from '@/lib/errors.js';
-import { backoffDelay, withRetry } from '@/lib/retry.js';
+import { backoffDelay, withRetry, withTimeout } from '@/lib/retry.js';
 
 describe('backoffDelay', () => {
   it('растёт экспоненциально по верхней границе', () => {
@@ -80,5 +80,33 @@ describe('withRetry', () => {
       withRetry(fn, { attempts: 3, baseMs: 1, shouldRetry: () => true }),
     ).rejects.toThrow('plain');
     expect(fn).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('withTimeout', () => {
+  it('отдаёт результат, если операция успела', async () => {
+    await expect(withTimeout(async () => 'ok', 1000, 'быстрая')).resolves.toBe('ok');
+  });
+
+  it('падает по таймауту, а не ждёт вечно', async () => {
+    const hanging = () => new Promise<never>(() => {});
+    await expect(withTimeout(hanging, 5, 'зависшая')).rejects.toThrow(
+      'зависшая: нет ответа за 5 мс',
+    );
+  });
+
+  it('пробрасывает ошибку операции как есть', async () => {
+    const failing = () => Promise.reject(new AppError('нет сети', { code: 'NET' }));
+    await expect(withTimeout(failing, 1000, 'сетевая')).rejects.toThrow('нет сети');
+  });
+
+  it('снимает таймер после успеха: процесс не держится живым лишние секунды', async () => {
+    const clear = vi.spyOn(globalThis, 'clearTimeout');
+    try {
+      await withTimeout(async () => 'ok', 60_000, 'быстрая');
+      expect(clear).toHaveBeenCalled();
+    } finally {
+      clear.mockRestore();
+    }
   });
 });

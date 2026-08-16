@@ -3,6 +3,8 @@ import { formatInteger, formatMoney, formatMoneyPrecise, formatPercent } from '.
 import { ctr } from '../lib/metrics';
 import type { DailyMetrics } from '../lib/queries';
 
+import { DailySourceCell } from './attribution';
+
 export interface DailyTableProps {
   readonly rows: readonly DailyMetrics[];
 }
@@ -40,6 +42,7 @@ export function DailyTable({ rows }: DailyTableProps) {
               <th scope="col" className="num">
                 CPA
               </th>
+              <th scope="col">Источник конверсий</th>
             </tr>
           </thead>
           <tbody>
@@ -52,6 +55,9 @@ export function DailyTable({ rows }: DailyTableProps) {
                 <td className="num">{formatMoney(row.spend)}</td>
                 <td className="num">{formatInteger(row.conversions)}</td>
                 <td className="num">{formatMoneyPrecise(row.cpa)}</td>
+                <td>
+                  <DailySourceCell source={row.conversionSource} />
+                </td>
               </tr>
             ))}
           </tbody>
