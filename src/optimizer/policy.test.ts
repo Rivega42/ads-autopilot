@@ -4,6 +4,7 @@ import {
   approvalKindFor,
   APPROVAL_CHANGE_THRESHOLD_PCT,
   classifyDecisions,
+  entityLabel,
   MASS_PAUSE_THRESHOLD,
   relativeChange,
   type PolicyContext,
@@ -236,5 +237,48 @@ describe('classifyDecisions bookkeeping', () => {
 
   it('handles an empty batch', () => {
     expect(classifyDecisions([], context())).toEqual({ autoApply: [], approvals: [] });
+  });
+
+  it('keeps an oversized bid change as its own request instead of losing it', () => {
+    const oversized = decision({ nextValue: { kind: 'bid', amount: 200 } });
+    const { approvals } = classifyDecisions([oversized, budget(9000)], context());
+
+    expect(approvals.map((r) => r.kind)).toEqual(['BUDGET_CHANGE', 'BID_CHANGE']);
+    expect(approvals.find((r) => r.kind === 'BID_CHANGE')?.decisions).toHaveLength(1);
+  });
+});
+
+describe('summaries a human has to act on', () => {
+  it('names the phrase in a mass-pause summary instead of the internal id', () => {
+    const decisions = Array.from({ length: 11 }, (_unused, index) => pause(`clx8f2k9a000${index}`));
+    const named = decisions.map((d, index) => ({ ...d, label: `фраза ${index}` }));
+    const [request] = classifyDecisions(named, context()).approvals;
+
+    expect(request?.summary).toContain('• фраза 0:');
+    expect(request?.summary).not.toContain('clx8f2k9a0000');
+  });
+
+  it('prefers the name of the entity over its internal id', () => {
+    expect(entityLabel(decision({ label: 'ремонт ванной' }))).toBe('ремонт ванной');
+    expect(entityLabel(decision({ label: null }))).toBe('KEYWORD kw-1');
+  });
+
+  it('falls back to the type and id when the entity has no name', () => {
+    const decisions = Array.from({ length: 11 }, (_unused, index) => pause(`kw-${index}`));
+    const [request] = classifyDecisions(decisions, context()).approvals;
+
+    expect(request?.summary).toContain('• KEYWORD kw-0:');
+  });
+
+  it('names entities in the handover summary and says how many were hidden', () => {
+    const decisions = Array.from({ length: 12 }, (_unused, index) => ({
+      ...pause(`kw-${index}`),
+      label: `фраза ${index}`,
+    }));
+    const [request] = classifyDecisions(decisions, context('OBSERVER')).approvals;
+
+    expect(request?.kind).toBe('IMPORT_HANDOVER');
+    expect(request?.summary).toContain('• фраза 0: тест');
+    expect(request?.summary).toContain('…и ещё 2');
   });
 });

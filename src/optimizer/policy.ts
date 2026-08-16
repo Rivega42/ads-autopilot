@@ -140,10 +140,7 @@ function isSurgery(decision: Decision): boolean {
  * обязан описывать ровно те решения, которые попали в эту карточку, — иначе
  * «Отключить 4 фразы» соседствует со списком из одиннадцати строк.
  */
-export function summarizeDecisions(
-  kind: ApprovalKindName,
-  decisions: readonly Decision[],
-): string {
+export function summarizeDecisions(kind: ApprovalKindName, decisions: readonly Decision[]): string {
   if (decisions.length === 0) return '';
 
   switch (kind) {

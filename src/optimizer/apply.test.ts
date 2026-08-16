@@ -232,7 +232,8 @@ describe('applyDecisions', () => {
     // которого не было, и аудит копил бы по 200 ложных записей в день.
     const deps = createDeps({
       writeToPlatform: vi.fn(
-        async () => ({ status: 'noop', reason: 'площадке нечего было менять' }) as PlatformWriteResult,
+        async () =>
+          ({ status: 'noop', reason: 'площадке нечего было менять' }) as PlatformWriteResult,
       ),
     });
     const report = await applyDecisions(
@@ -259,7 +260,8 @@ describe('applyDecisions', () => {
     const noop = createDeps({
       idempotency,
       writeToPlatform: vi.fn(
-        async () => ({ status: 'noop', reason: 'площадке нечего было менять' }) as PlatformWriteResult,
+        async () =>
+          ({ status: 'noop', reason: 'площадке нечего было менять' }) as PlatformWriteResult,
       ),
     });
     await applyDecisions(noop, params([decision()]));

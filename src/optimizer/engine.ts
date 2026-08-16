@@ -336,7 +336,10 @@ export function resolveTargetCpa(
   return { value: null, source: null };
 }
 
-function resolveTargetCpaSource(campaign: CampaignRecord, fallback: number | null): TargetCpaSource {
+function resolveTargetCpaSource(
+  campaign: CampaignRecord,
+  fallback: number | null,
+): TargetCpaSource {
   return resolveTargetCpa(campaign.targetCpa, fallback).source;
 }
 

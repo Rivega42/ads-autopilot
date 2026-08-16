@@ -33,14 +33,12 @@ const h = vi.hoisted(() => {
       keyword: { findUnique: vi.fn(async () => state.keyword) },
     },
     registry: {
-      getAdapter: vi.fn(() => adapter),
-      buildContext: vi.fn(
-        async (clientId: string): Promise<ChannelContext> => ({
-          clientId,
-          credentials: {},
-          dryRun: state.dryRun,
-        }),
-      ),
+      getAdapter: vi.fn((): ChannelAdapter => adapter as unknown as ChannelAdapter),
+      buildContext: vi.fn(async (clientId: string): Promise<ChannelContext> => ({
+        clientId,
+        credentials: {},
+        dryRun: state.dryRun,
+      })),
     },
   };
 });
@@ -53,6 +51,11 @@ vi.mock('@/channels/registry.js', () => ({
 
 const { createApplyDb, createPlatformWriter, createPrismaIdempotencyStore, fromWriteResult } =
   await import('./runtime.js');
+
+// Мок несёт ровно те делегаты, которые модуль трогает; полный PrismaClient в тест не тянем.
+type PrismaLike = Parameters<typeof createPrismaIdempotencyStore>[0] &
+  Parameters<typeof createApplyDb>[0];
+const db = h.prisma as unknown as PrismaLike;
 
 const ctx = (dryRun: boolean): ChannelContext => ({ clientId: 'cl-1', credentials: {}, dryRun });
 
@@ -199,7 +202,7 @@ describe('createPlatformWriter', () => {
 describe('createPrismaIdempotencyStore', () => {
   it('reserves a free key', async () => {
     h.prisma.idempotencyKey.create.mockResolvedValue({});
-    expect(await createPrismaIdempotencyStore(h.prisma).reserve('k1')).toBe('reserved');
+    expect(await createPrismaIdempotencyStore(db).reserve('k1')).toBe('reserved');
   });
 
   it('reads a unique-constraint violation as a duplicate, not as a failure', async () => {
@@ -209,12 +212,12 @@ describe('createPrismaIdempotencyStore', () => {
         clientVersion: 'test',
       }),
     );
-    expect(await createPrismaIdempotencyStore(h.prisma).reserve('k1')).toBe('duplicate');
+    expect(await createPrismaIdempotencyStore(db).reserve('k1')).toBe('duplicate');
   });
 
   it('rethrows anything that is not a duplicate', async () => {
     h.prisma.idempotencyKey.create.mockRejectedValue(new Error('connection refused'));
-    await expect(createPrismaIdempotencyStore(h.prisma).reserve('k1')).rejects.toThrow(
+    await expect(createPrismaIdempotencyStore(db).reserve('k1')).rejects.toThrow(
       'connection refused',
     );
   });
@@ -223,7 +226,7 @@ describe('createPrismaIdempotencyStore', () => {
 describe('createApplyDb', () => {
   it('writes a ChangeLog row through the narrow port', async () => {
     h.prisma.changeLog.create.mockResolvedValue({ id: 'cl-1' });
-    const db = createApplyDb(h.prisma);
+    const db = createApplyDb(db);
     const row = await db.changeLog.create({
       data: {
         campaignId: 'c-1',

@@ -122,6 +122,23 @@ describe('writes when dry run is off', () => {
     expect(res.applied).toBe(true);
   });
 
+  it('reports "nothing added" instead of claiming a change that never happened', async () => {
+    const transport = transportOf([
+      {
+        data: {
+          result: { Campaigns: [{ Id: 5, Name: 'C', NegativeKeywords: { Items: ['бесплатно'] } }] },
+        },
+      },
+    ]);
+    const res = await adapterOf(transport).addNegativeKeywords(ctxOf(false), '5', ['бесплатно']);
+
+    // Второго запроса нет: менять нечего. `applied: true` заставило бы оптимизатор
+    // записать в ChangeLog изменение, которого в кабинете не было.
+    expect(transport.calls).toHaveLength(1);
+    expect(res.applied).toBe(false);
+    expect(res.plan['added']).toEqual([]);
+  });
+
   it('refuses to suspend an ad group, which the API has no method for', async () => {
     await expect(
       adapterOf(transportOf()).pauseEntities(ctxOf(false), 'adgroup', ['1']),

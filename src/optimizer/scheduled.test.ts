@@ -208,9 +208,7 @@ describe('runScheduledOptimization: IMPORT_HANDOVER', () => {
     ];
     h.runOptimizer.mockResolvedValue(
       run({
-        approvals: [
-          { kind: 'IMPORT_HANDOVER', decisions, summary: 'Режим передачи управления' },
-        ],
+        approvals: [{ kind: 'IMPORT_HANDOVER', decisions, summary: 'Режим передачи управления' }],
       }),
     );
 
@@ -349,9 +347,33 @@ describe('runScheduledOptimization: negative keywords', () => {
     const day = (n: number): Date => new Date(`2026-08-1${n}T00:00:00Z`);
     const rows: SearchQueryRow[] = [
       // Одна фраза в двух группах: слив в первой, конверсии во второй.
-      { adGroupId: 'ag-1', query: 'ремонт', date: day(4), impressions: 1000, clicks: 4, spend: 900, conversions: 0 },
-      { adGroupId: 'ag-2', query: 'ремонт', date: day(4), impressions: 1000, clicks: 6, spend: 100, conversions: 3 },
-      { adGroupId: 'ag-2', query: 'ремонт', date: day(5), impressions: 500, clicks: 2, spend: 50, conversions: 1 },
+      {
+        adGroupId: 'ag-1',
+        query: 'ремонт',
+        date: day(4),
+        impressions: 1000,
+        clicks: 4,
+        spend: 900,
+        conversions: 0,
+      },
+      {
+        adGroupId: 'ag-2',
+        query: 'ремонт',
+        date: day(4),
+        impressions: 1000,
+        clicks: 6,
+        spend: 100,
+        conversions: 3,
+      },
+      {
+        adGroupId: 'ag-2',
+        query: 'ремонт',
+        date: day(5),
+        impressions: 500,
+        clicks: 2,
+        spend: 50,
+        conversions: 1,
+      },
     ];
     h.state.searchQueries = rows;
 
