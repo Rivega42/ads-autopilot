@@ -40,8 +40,21 @@ export interface PollResult {
   updated: number;
   /** Объявления кабинета, которых нет в нашей БД: их заведёт ingestion. */
   orphaned: number;
+  /** Строк, снятых с зависшего `REWRITING`. Ненулевое значение — след падения процесса. */
+  reclaimed: number;
   rejected: RejectedAd[];
 }
+
+/**
+ * Сколько строка имеет право числиться в `REWRITING`.
+ *
+ * Захват живёт от `updateMany` до отправки текста — это секунды. Полчаса (период
+ * самого крона) — это заведомо больше любой живой отправки и заведомо меньше, чем
+ * «навсегда»: процесс, убитый между захватом и отправкой, иначе оставлял бы объявление
+ * в статусе, который `pollAdModeration` пропускает безусловно, то есть выключал бы его
+ * из модерации до ручного вмешательства.
+ */
+export const REWRITING_STALE_MS = 30 * 60 * 1_000;
 
 interface LocalAd {
   id: string;
@@ -50,6 +63,29 @@ interface LocalAd {
   moderationStatus: ModerationStatus;
   moderationReason: string | null;
   moderationRetries: number;
+  updatedAt: Date;
+}
+
+export interface PollOptions {
+  now?: () => Date;
+}
+
+/**
+ * Возвращает зависший захват в `REJECTED`.
+ *
+ * Условие на `updatedAt` продублировано в `where` намеренно: между чтением и записью
+ * мог начаться другой прогон, и он имеет право на свою попытку.
+ */
+async function reclaimStale(db: ModerationDb, local: LocalAd, before: Date): Promise<boolean> {
+  const freed = await db.ad.updateMany({
+    where: {
+      id: local.id,
+      moderationStatus: ModerationStatus.REWRITING,
+      updatedAt: { lt: before },
+    },
+    data: { moderationStatus: ModerationStatus.REJECTED },
+  });
+  return freed.count > 0;
 }
 
 interface LocalGroup {
@@ -79,14 +115,22 @@ function remoteText(ad: RemoteAd): AdText {
  * не трогаются вовсе. `REWRITING` означает «прямо сейчас другой прогон отправляет
  * туда новый текст»; перезаписать его вердиктом, полученным до отправки, — значит
  * потерять факт отправки и переписать объявление второй раз.
+ *
+ * Исключение — захват старше `REWRITING_STALE_MS`: такого прогона уже нет в живых
+ * (процесс убит между захватом и отправкой), и строка возвращается в `REJECTED`.
+ * Попытка при этом остаётся потраченной — счётчик сдвинут захватом, и обнулять его
+ * нельзя: текст мог уйти в кабинет ровно перед падением.
  */
 export async function pollAdModeration(
   db: ModerationDb,
   target: ModerationTarget,
   ctx: ChannelContext,
   adapter: ChannelAdapter,
+  options: PollOptions = {},
 ): Promise<PollResult> {
-  const result: PollResult = { polled: 0, updated: 0, orphaned: 0, rejected: [] };
+  const result: PollResult = { polled: 0, updated: 0, orphaned: 0, reclaimed: 0, rejected: [] };
+  const now = options.now ?? ((): Date => new Date());
+  const staleBefore = new Date(now().getTime() - REWRITING_STALE_MS);
 
   const groups: LocalGroup[] = await db.adGroup.findMany({
     where: { campaign: { clientId: target.clientId, provider: target.provider } },
@@ -110,6 +154,7 @@ export async function pollAdModeration(
       moderationStatus: true,
       moderationReason: true,
       moderationRetries: true,
+      updatedAt: true,
     },
   });
   const localByKey = new Map(locals.map((ad) => [key(ad.adGroupId, ad.externalId), ad]));
@@ -129,12 +174,20 @@ export async function pollAdModeration(
     }
 
     result.polled += 1;
-    if (local.moderationStatus === ModerationStatus.REWRITING) continue;
+
+    let known = local.moderationStatus;
+    if (known === ModerationStatus.REWRITING) {
+      // Свежий захват не трогаем: прямо сейчас другой прогон отправляет туда текст.
+      if (local.updatedAt >= staleBefore) continue;
+      if (!(await reclaimStale(db, local, staleBefore))) continue;
+      result.reclaimed += 1;
+      known = ModerationStatus.REJECTED;
+    }
 
     const status = toModerationStatus(ad.moderationStatus);
     const reason = ad.moderationReason ?? null;
 
-    if (status !== local.moderationStatus || reason !== local.moderationReason) {
+    if (status !== known || reason !== local.moderationReason) {
       const written = await db.ad.updateMany({
         where: { id: local.id, moderationStatus: { not: ModerationStatus.REWRITING } },
         data: {

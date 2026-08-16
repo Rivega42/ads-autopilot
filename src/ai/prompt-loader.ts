@@ -32,7 +32,8 @@ export const PROMPT_VERSION = {
   'keywords-expand': '1.0.0',
   'keywords-negatives': '1.0.0',
   'moderation-classify': '1.0.0',
-  'moderation-rewrite': '1.0.0',
+  // 1.1.0 — лимиты длины приходят блоком под конкретную площадку, а не константами Директа.
+  'moderation-rewrite': '1.1.0',
 } as const;
 
 export type PromptName = keyof typeof PROMPT_VERSION;

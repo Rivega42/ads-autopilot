@@ -92,6 +92,7 @@ export {
   type ImageUploader,
 } from './images/provider.js';
 export {
+  creativePlatformFor,
   findTextViolations,
   fitToPlatform,
   isPlatformValid,

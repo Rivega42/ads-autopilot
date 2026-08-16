@@ -46,6 +46,8 @@ export interface ModerationRunSummary {
   ok: number;
   adsPolled: number;
   statusUpdated: number;
+  /** Строк, снятых с зависшего `REWRITING`. Ненулевое — след упавшего прогона. */
+  reclaimed: number;
   rejected: number;
   rewritten: number;
   /** Посчитано и показано планом, но не отправлено из-за dry-run. */
@@ -99,6 +101,7 @@ export async function runModerationCheck(
     ok: 0,
     adsPolled: 0,
     statusUpdated: 0,
+    reclaimed: 0,
     rejected: 0,
     rewritten: 0,
     planned: 0,
@@ -143,10 +146,11 @@ async function checkTarget(
   try {
     const adapter = deps.adapterFor(target.provider);
     const ctx = await deps.contextFor(target.clientId, target.provider);
-    const poll = await pollAdModeration(deps.db, target, ctx, adapter);
+    const poll = await pollAdModeration(deps.db, target, ctx, adapter, { now: deps.now });
 
     summary.adsPolled += poll.polled;
     summary.statusUpdated += poll.updated;
+    summary.reclaimed += poll.reclaimed;
     summary.rejected += poll.rejected.length;
     rejected = poll.rejected;
 
@@ -162,11 +166,18 @@ async function checkTarget(
       summary.deferred += 1;
       continue;
     }
-    left -= 1;
     try {
-      tally(summary, await repairRejectedAd(rc, ad));
+      const outcome = await repairRejectedAd(rc, ad);
+      tally(summary, outcome);
+      // Потолок считает работу, а не строки. `skipped` — это объявление, которое уже
+      // отдано человеку или захвачено соседним прогоном: ни вызова модели, ни операции
+      // в кабинете. Списывать за него бюджет значило бы отдать весь потолок застрявшим
+      // объявлениям (порядок `listAds` стабилен, так что тем же самым каждый прогон),
+      // а свежие отказы откладывать до бесконечности.
+      if (outcome.status !== 'skipped') left -= 1;
     } catch (err) {
       // Одно объявление не чинится — остальные в этом же кабинете чинятся.
+      left -= 1;
       await fail(deps, target, `repair:${ad.id}`, err, summary);
     }
   }

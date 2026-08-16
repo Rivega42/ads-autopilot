@@ -41,6 +41,8 @@ export interface AdRow {
   moderationReason: string | null;
   moderationRetries: number;
   llmVariant: string | null;
+  /** Как `@updatedAt` в схеме: любая запись в строку двигает отметку. */
+  updatedAt: Date;
 }
 
 export interface CredentialRow {
@@ -77,6 +79,7 @@ interface AdWhere {
   adGroupId?: { in: string[] };
   moderationStatus?: StatusFilter;
   moderationRetries?: number;
+  updatedAt?: { lt: Date };
 }
 
 interface AdData {
@@ -141,6 +144,7 @@ export class FakeDb {
       moderationReason: null,
       moderationRetries: 0,
       llmVariant: null,
+      updatedAt: new Date(),
       ...row,
     };
     this.ads.push(ad);
@@ -170,6 +174,7 @@ export class FakeDb {
     if (where.moderationRetries !== undefined && where.moderationRetries !== ad.moderationRetries) {
       return false;
     }
+    if (where.updatedAt !== undefined && !(ad.updatedAt < where.updatedAt.lt)) return false;
     return true;
   }
 
@@ -200,7 +205,7 @@ export class FakeDb {
       let count = 0;
       for (const ad of this.ads) {
         if (!this.matchAd(args.where, ad)) continue;
-        Object.assign(ad, args.data);
+        Object.assign(ad, args.data, { updatedAt: new Date() });
         count += 1;
       }
       return { count };
@@ -208,7 +213,7 @@ export class FakeDb {
 
     update: async (args: { where: { id: string }; data: AdData }): Promise<AdRow> => {
       const ad = this.adOf(args.where.id);
-      Object.assign(ad, args.data);
+      Object.assign(ad, args.data, { updatedAt: new Date() });
       return { ...ad };
     },
   };

@@ -1,6 +1,8 @@
 import { ChangeActor, ModerationStatus, type Prisma } from '@prisma/client';
 
 import type { ChannelAdapter, ChannelContext } from '@/channels/types.js';
+import { textVariantId } from '@/creatives/types.js';
+import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 import { classifyRejection } from '@/moderation/classify.js';
 import type { ModerationDb, ModerationDeps } from '@/moderation/deps.js';
@@ -41,6 +43,11 @@ interface EscalationInput {
   classification: ClassifiedRejection | null;
   ad: AdText;
   problems: readonly string[];
+  /**
+   * На каком значении счётчика объявление паркуется. По умолчанию — на потолке:
+   * «отдали человеку» означает, что автоматика по этому объявлению закончила.
+   */
+  parkAt?: number;
 }
 
 function toJson(value: Record<string, unknown>): Prisma.InputJsonObject {
@@ -49,14 +56,15 @@ function toJson(value: Record<string, unknown>): Prisma.InputJsonObject {
 }
 
 /**
- * Эскалация уже отправлена по этой попытке?
+ * Эскалация уже отправлена по этому состоянию объявления?
  *
- * Ключ дедупликации — счётчик попыток: он растёт внутри одного цикла отказов и
- * обнуляется, когда площадка объявление принимает. Так человек получает ровно одно
- * письмо на застрявшее объявление, а не по письму каждые полчаса, — и при этом
- * следующий цикл отказов снова достучится.
+ * Ключ дедупликации — счётчик, на котором объявление запарковано (`parkedAt`), а не
+ * число сделанных попыток: письмо «не смогли переписать» и следующее за ним «попытки
+ * кончились» относятся к одному и тому же застрявшему объявлению, и человеку нужно
+ * ровно одно из них. Счётчик обнуляется, когда площадка объявление принимает
+ * (см. `pollAdModeration`), — следующий цикл отказов снова достучится.
  */
-async function alreadyEscalated(db: ModerationDb, adId: string, retries: number): Promise<boolean> {
+async function alreadyEscalated(db: ModerationDb, adId: string, parkedAt: number): Promise<boolean> {
   const rows = await db.changeLog.findMany({
     where: { entityType: 'AD', entityId: adId, action: ESCALATION_ACTION },
     select: { newValue: true },
@@ -66,17 +74,27 @@ async function alreadyEscalated(db: ModerationDb, adId: string, retries: number)
   return rows.some((row) => {
     const value = row.newValue;
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-    return (value as Record<string, unknown>)['retries'] === retries;
+    return (value as Record<string, unknown>)['parkedAt'] === parkedAt;
   });
 }
 
+/**
+ * Отдаёт объявление человеку и паркует его.
+ *
+ * Парковка — это перевод счётчика попыток на потолок. Без неё объявление, которое
+ * невозможно переписать, каждые полчаса заново оплачивало бы классификацию и три
+ * переписывания: счётчик рос только на успешной отправке, а значит не рос никогда.
+ * Цена парковки — потерянные остатки попыток, и это правильный размен: письмо человеку
+ * уже ушло, и до его решения объявление всё равно остановлено.
+ */
 async function escalate(
   rc: RepairContext,
   ad: RejectedAd,
   input: EscalationInput,
 ): Promise<RepairOutcome> {
   const { deps, target } = rc;
-  if (await alreadyEscalated(deps.db, ad.id, ad.retries)) {
+  const parkedAt = Math.max(input.parkAt ?? MAX_MODERATION_RETRIES, ad.retries);
+  if (await alreadyEscalated(deps.db, ad.id, parkedAt)) {
     return { status: 'skipped', reason: 'already escalated' };
   }
 
@@ -109,6 +127,7 @@ async function escalate(
       prevValue: toJson({ ...input.ad, reason: ad.reason }),
       newValue: toJson({
         retries: ad.retries,
+        parkedAt,
         cause: input.cause,
         category: input.classification?.category ?? null,
         problems: [...input.problems],
@@ -119,8 +138,21 @@ async function escalate(
     },
   });
 
+  if (parkedAt > ad.retries) {
+    // Сверка со счётчиком в условии: если параллельный прогон уже захватил строку,
+    // парковать нечего — он сам решит судьбу этой попытки.
+    await deps.db.ad.updateMany({
+      where: {
+        id: ad.id,
+        moderationStatus: ModerationStatus.REJECTED,
+        moderationRetries: ad.retries,
+      },
+      data: { moderationRetries: parkedAt },
+    });
+  }
+
   log.warn(
-    { adId: ad.id, clientId: target.clientId, cause: input.cause, retries: ad.retries },
+    { adId: ad.id, clientId: target.clientId, cause: input.cause, retries: ad.retries, parkedAt },
     'moderation escalated to human',
   );
   return { status: 'escalated', cause: input.cause };
@@ -216,6 +248,24 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
       where: { id: ad.id, moderationStatus: ModerationStatus.REWRITING },
       data: { moderationStatus: ModerationStatus.REJECTED },
     });
+    // Единственный отказ, после которого объявление в кабинете может остаться
+    // наполовину обновлённым, — человек обязан о нём узнать. Парковка здесь не нужна:
+    // потрачена одна попытка, и следующий прогон имеет право попробовать ещё раз.
+    try {
+      await escalate(rc, ad, {
+        cause: 'apply_failed',
+        classification,
+        ad: rewrite.ad,
+        problems: [`отправка в кабинет ${target.provider} не удалась: ${describeError(err)}`],
+        parkAt: ad.retries + 1,
+      });
+    } catch (escalationErr) {
+      // Наверх обязана уйти исходная ошибка отправки: её ждёт ErrorLog прогона.
+      log.error(
+        { adId: ad.id, err: describeError(escalationErr) },
+        'failed to escalate apply failure',
+      );
+    }
     throw err;
   }
 
@@ -226,7 +276,11 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
       body: rewrite.ad.text,
       moderationStatus: ModerationStatus.PENDING,
       moderationReason: null,
-      llmVariant: `${classification.category}:${ad.retries + 1}`,
+      // `llmVariant` — отпечаток текста, по нему A/B-отчёт складывает статистику
+      // (см. `creatives/ab/experiment.ts`). Переписывание меняет текст, значит это
+      // новый вариант; категория отказа в это поле не помещается ни по смыслу, ни по
+      // последствиям — два разных объявления с одной категорией слились бы в один ряд.
+      llmVariant: textVariantId(rewrite.ad),
     },
   });
 

@@ -1,13 +1,13 @@
 import type { Provider } from '@prisma/client';
 
 import { loadPrompt } from '@/ai/prompt-loader.js';
-import {
-  DIRECT_TEXT_MAX,
-  DIRECT_TITLE2_MAX,
-  DIRECT_TITLE_MAX,
-  findAdTextViolations,
-} from '@/campaigns/limits.js';
 import { runAgent, type AgentRun, type RunAgentOptions } from '@/clients/llm/index.js';
+import {
+  creativePlatformFor,
+  findTextViolations,
+  PLATFORM_TEXT_LIMITS,
+  type TextLimitViolation,
+} from '@/creatives/platform-limits.js';
 import { findForbidden, formatRules } from '@/moderation/rules.js';
 import { adRewriteSchema, type AdRewriteDraft } from '@/moderation/schema.js';
 import { CATEGORY_TITLE, type AdText, type ClassifiedRejection } from '@/moderation/types.js';
@@ -76,6 +76,39 @@ function toAdText(draft: AdRewriteDraft): AdText {
   return ad;
 }
 
+function describeViolation(violation: TextLimitViolation): string {
+  if (violation.kind === 'too_long') {
+    return `поле ${violation.field}: ${violation.actual} символов при лимите ${violation.limit}`;
+  }
+  if (violation.kind === 'empty') return `поле ${violation.field}: пустое, площадка его не примет`;
+  return `поле ${violation.field}: у этой площадки такого поля нет, возвращать его не нужно`;
+}
+
+/**
+ * Блок лимитов для промпта.
+ *
+ * Числа берутся из таблицы площадки, а не из констант Директа: модель, которой сказали
+ * «заголовок до 33 символов», честно вернёт 33 символа, и VK отклонит их за превышение
+ * своих 25 — попытка потрачена ещё до отправки.
+ */
+function limitsBlock(channel: Provider): string {
+  const platform = creativePlatformFor(channel);
+  if (platform === null) {
+    return (
+      '- лимиты этой площадки нам неизвестны: держи заголовок в пределах 25 символов, ' +
+      'а текст — в пределах 80, так пройдёт на любой из площадок.'
+    );
+  }
+  const limits = PLATFORM_TEXT_LIMITS[platform];
+  return [
+    `- \`title\` — не больше **${limits.title}** символов.`,
+    limits.title2 === null
+      ? '- `title2` — второго заголовка у этой площадки нет, поле возвращать не нужно.'
+      : `- \`title2\` — не больше **${limits.title2}** символов, поле необязательное.`,
+    `- \`text\` — не больше **${limits.text}** символов.`,
+  ].join('\n');
+}
+
 /**
  * Проверка переписанного объявления теми же правилами, что и у нового.
  *
@@ -90,10 +123,13 @@ export function validateRewrite(original: AdText, candidate: AdText, channel: Pr
     return problems;
   }
 
-  for (const violation of findAdTextViolations(candidate)) {
-    problems.push(
-      `поле ${violation.field}: ${violation.actual} символов при лимите ${violation.limit}`,
-    );
+  // Лимиты той площадки, куда текст поедет. Незнакомый канал длиной не проверяем:
+  // выдуманный лимит забракует годный вариант так же надёжно, как пропустит негодный.
+  const platform = creativePlatformFor(channel);
+  if (platform !== null) {
+    for (const violation of findTextViolations(candidate, platform)) {
+      problems.push(describeViolation(violation));
+    }
   }
 
   const joined = [candidate.title, candidate.title2 ?? '', candidate.text].join('\n');
@@ -149,9 +185,7 @@ export async function rewriteRejectedAd(
       title: input.ad.title,
       title2: input.ad.title2 ?? EMPTY_FIELD,
       text: input.ad.text,
-      titleMax: DIRECT_TITLE_MAX,
-      title2Max: DIRECT_TITLE2_MAX,
-      textMax: DIRECT_TEXT_MAX,
+      limits: limitsBlock(input.channel),
       attemptNote: attemptNote(input, problems),
     });
     version = `${prompt.name}@${prompt.version}`;

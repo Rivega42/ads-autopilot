@@ -1,3 +1,5 @@
+import { Provider } from '@prisma/client';
+
 import type { CreativePlatform } from './types.js';
 
 import {
@@ -62,6 +64,20 @@ export const PLATFORM_TEXT_LIMITS: Readonly<Record<CreativePlatform, PlatformTex
     verified: false,
   },
 };
+
+/**
+ * Канал кабинета → площадка, под лимиты которой проверяется текст.
+ *
+ * `null` для канала, чьи лимиты не подтверждены ничем (TikTok в схеме есть, адаптера
+ * и требований к текстам у нас нет). Молча подставить сюда Директ значило бы проверять
+ * объявление по чужой линейке — ровно та ошибка, из-за которой в VK уезжали
+ * тридцатитрёхсимвольные заголовки.
+ */
+export function creativePlatformFor(provider: Provider): CreativePlatform | null {
+  if (provider === Provider.YANDEX_DIRECT) return 'yandex_direct';
+  if (provider === Provider.VK_ADS) return 'vk_ads';
+  return null;
+}
 
 export type TextViolationKind = 'too_long' | 'unsupported_field' | 'empty';
 
