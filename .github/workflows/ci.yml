@@ -10,15 +10,21 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # prisma.config.ts падает без DATABASE_URL, а `prisma generate` нужен
+  # ещё до typecheck: без сгенерированного клиента @prisma/client пустой.
+  TEST_DATABASE_URL: postgresql://test:test@localhost:5432/ads_autopilot_test
+
 jobs:
   lint-and-typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Без version берётся packageManager из package.json.
+      # Пин на 9 ломал `pnpm store path`: pnpm 9 требует поле packages
+      # в pnpm-workspace.yaml, а там только настройки сборки.
       - uses: pnpm/action-setup@v3
-        with:
-          version: 9
 
       - uses: actions/setup-node@v4
         with:
@@ -26,6 +32,11 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      - run: pnpm db:generate
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+
       - run: pnpm lint
       - run: pnpm typecheck
 
@@ -48,12 +59,14 @@ jobs:
         image: redis:7
         ports: [6379:6379]
 
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/ads_autopilot_test
+      REDIS_URL: redis://localhost:6379
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v3
-        with:
-          version: 9
 
       - uses: actions/setup-node@v4
         with:
@@ -62,12 +75,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - run: pnpm db:generate
+
       - run: pnpm prisma migrate deploy
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/ads_autopilot_test
 
       - run: pnpm test:unit
       - run: pnpm test:integration
-        env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/ads_autopilot_test
-          REDIS_URL: redis://localhost:6379

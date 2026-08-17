@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>SmartSay — креативы для РСЯ</title>
+<style>
+  :root {
+    --brand: #00d8c0;
+    --brand-deep: #007f74;
+    --red: #fc0000;
+    --ink: #0d2b28;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #dcdcd8; font-family: "DejaVu Sans", Arial, sans-serif; }
+  .grid { display: flex; flex-wrap: wrap; gap: 20px; padding: 20px; align-items: flex-start; }
+
+  .cr {
+    position: relative; overflow: hidden; flex: none;
+    background: linear-gradient(135deg, #eafffb 0%, #c6f6ef 45%, #8fe9de 100%);
+  }
+  /* Мягкие круги вместо плоской заливки: фон читается как объём, а не как баннер 2010-х. */
+  .cr::before {
+    content: ''; position: absolute; border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, rgba(255,255,255,.85), rgba(0,216,192,.25) 60%, rgba(0,216,192,0) 70%);
+    width: 120%; height: 120%; left: -45%; top: -35%;
+  }
+  .cr::after {
+    content: ''; position: absolute; border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%, rgba(0,127,116,.16), rgba(0,127,116,0) 68%);
+    width: 90%; height: 90%; right: -30%; bottom: -35%;
+  }
+
+  .person {
+    position: absolute; bottom: 0; right: 0; height: 100%;
+    object-fit: contain; object-position: bottom right; z-index: 2;
+    filter: drop-shadow(0 12px 28px rgba(0,60,55,.28));
+  }
+  .copy { position: relative; z-index: 3; display: flex; flex-direction: column; height: 100%; }
+  .logo { height: auto; }
+  h1 { color: var(--ink); font-weight: 700; letter-spacing: -.015em; line-height: 1.1; }
+  h1 b { color: var(--brand-deep); font-weight: 700; }
+  .sub { color: #14504a; line-height: 1.35; }
+  .badge {
+    display: inline-block; background: var(--red); color: #fff; font-weight: 700;
+    border-radius: 999px; align-self: flex-start; letter-spacing: .01em; white-space: nowrap;
+  }
+  .place { color: #14504a; opacity: .85; }
+  .spacer { flex: 1; }
+
+  /* ---- 1:1 · 1200×1200 ---- */
+  .s11 { width: 1200px; height: 1200px; }
+  .s11 .copy { padding: 72px 70px; width: 690px; }
+  .s11 .logo { width: 300px; margin-bottom: 46px; }
+  .s11 h1 { font-size: 74px; }
+  .s11 .sub { font-size: 32px; margin-top: 26px; }
+  .s11 .badge { font-size: 34px; padding: 18px 34px; margin-top: 40px; }
+  .s11 .place { font-size: 26px; margin-top: 26px; }
+  .s11 .person { width: 620px; }
+
+  /* ---- 16:9 · 1920×1080 ---- */
+  .s169 { width: 1920px; height: 1080px; }
+  .s169 .copy { padding: 78px 80px; width: 1230px; }
+  .s169 .logo { width: 330px; margin-bottom: 44px; }
+  .s169 h1 { font-size: 88px; }
+  .s169 .sub { font-size: 38px; margin-top: 26px; }
+  .s169 .badge { font-size: 38px; padding: 20px 40px; margin-top: 42px; }
+  .s169 .place { font-size: 30px; margin-top: 28px; }
+  .s169 .person { width: 700px; }
+
+  /* ---- 3:4 · 1200×1600 ---- */
+  .s34 { width: 1200px; height: 1600px; }
+  .s34 .copy { padding: 84px 76px; width: 780px; }
+  .s34 .logo { width: 320px; margin-bottom: 52px; }
+  .s34 h1 { font-size: 84px; }
+  .s34 .sub { font-size: 36px; margin-top: 30px; }
+  .s34 .badge { font-size: 38px; padding: 20px 38px; margin-top: 46px; }
+  .s34 .place { font-size: 28px; margin-top: 30px; }
+  .s34 .person { width: 780px; }
+
+  .caption { font-size: 13px; color: #444; padding: 6px 0 0; }
+</style>
+</head>
+<body>
+<div class="grid">
+
+<!-- ==================== 1. ВЗРОСЛЫЕ · АНГЛИЙСКИЙ ==================== -->
+<div>
+<div class="cr s11" id="adults-1x1">
+  <img class="person" src="source/cutouts/man_cutout_white_background.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Английский<br>для взрослых</h1>
+    <div class="sub">70% урока — разговорная практика.<br>Группы до 6 человек, уровни A1–C2.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">Петергоф, Чичеринская 2 · и онлайн</div>
+  </div>
+</div>
+<div class="caption">adults-1x1 · 1200×1200</div>
+</div>
+
+<div>
+<div class="cr s169" id="adults-16x9">
+  <img class="person" src="source/cutouts/man_cutout_white_background.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Английский для взрослых<br>в Петергофе</h1>
+    <div class="sub">70% урока — разговорная практика. Группы до 6 человек, уровни A1–C2.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">Чичеринская 2 — 5 минут от станции Новый Петергоф · и онлайн</div>
+  </div>
+</div>
+<div class="caption">adults-16x9 · 1920×1080</div>
+</div>
+
+<div>
+<div class="cr s34" id="adults-3x4">
+  <img class="person" src="source/cutouts/man_cutout_white_background.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Английский<br>для взрослых</h1>
+    <div class="sub">70% урока — разговорная практика.<br>Группы до 6 человек, уровни A1–C2.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">Петергоф, Чичеринская 2 · и онлайн</div>
+  </div>
+</div>
+<div class="caption">adults-3x4 · 1200×1600</div>
+</div>
+
+<!-- ==================== 2. ДЕТИ И ШКОЛЬНИКИ ==================== -->
+<div>
+<div class="cr s11" id="kids-1x1">
+  <img class="person" src="source/cutouts/student_full_body_pointing_right.png" alt="" style="transform: scaleX(-1)">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Английский<br>детям 7–17 лет</h1>
+    <div class="sub">Учим говорить с первого занятия.<br>Группы по уровню и возрасту, до 6 человек.</div>
+    <div class="badge">Пробный урок — 0 ₽</div>
+    <div class="spacer"></div>
+    <div class="place">Петергоф, Чичеринская 2 · и онлайн</div>
+  </div>
+</div>
+<div class="caption">kids-1x1 · 1200×1200</div>
+</div>
+
+<div>
+<div class="cr s169" id="kids-16x9">
+  <img class="person" src="source/cutouts/student_full_body_pointing_right.png" alt="" style="transform: scaleX(-1)">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Английский детям<br>7–17 лет в Петергофе</h1>
+    <div class="sub">Учим говорить с первого занятия. Группы по уровню и возрасту, до 6 человек.</div>
+    <div class="badge">Пробный урок — 0 ₽</div>
+    <div class="spacer"></div>
+    <div class="place">Подготовка к ОГЭ и ЕГЭ · очно и онлайн</div>
+  </div>
+</div>
+<div class="caption">kids-16x9 · 1920×1080</div>
+</div>
+
+<div>
+<div class="cr s34" id="kids-3x4">
+  <img class="person" src="source/cutouts/student_full_body_pointing_right.png" alt="" style="transform: scaleX(-1)">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Английский<br>детям 7–17</h1>
+    <div class="sub">Учим говорить с первого занятия.<br>Группы по уровню и возрасту, до 6 человек.</div>
+    <div class="badge">Пробный урок — 0 ₽</div>
+    <div class="spacer"></div>
+    <div class="place">Петергоф, Чичеринская 2 · и онлайн</div>
+  </div>
+</div>
+<div class="caption">kids-3x4 · 1200×1600</div>
+</div>
+
+<!-- ==================== 3. ДОШКОЛЬНИКИ ==================== -->
+<div>
+<div class="cr s11" id="preschool-1x1">
+  <img class="person" src="source/cutouts/image_1766308608934.png" alt="" style="width: 560px">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Детский клуб<br>3–6 лет</h1>
+    <div class="sub">Языки, творчество и подготовка к школе.<br>Группы до 7 детей.</div>
+    <div class="badge">От 4 500 ₽/мес</div>
+    <div class="spacer"></div>
+    <div class="place">Петергоф, Чичеринская 2</div>
+  </div>
+</div>
+<div class="caption">preschool-1x1 · 1200×1200</div>
+</div>
+
+<div>
+<div class="cr s169" id="preschool-16x9">
+  <img class="person" src="source/cutouts/image_1766308608934.png" alt="" style="width: 620px">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Детский клуб 3–6 лет<br>в Петергофе</h1>
+    <div class="sub">Языки, творчество и подготовка к школе. Группы до 7 детей.</div>
+    <div class="badge">Абонемент от 4 500 ₽/мес</div>
+    <div class="spacer"></div>
+    <div class="place">Чичеринская 2 · пробное занятие по записи</div>
+  </div>
+</div>
+<div class="caption">preschool-16x9 · 1920×1080</div>
+</div>
+
+<div>
+<div class="cr s34" id="preschool-3x4">
+  <img class="person" src="source/cutouts/image_1766308608934.png" alt="" style="width: 700px">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Детский клуб<br>3–6 лет</h1>
+    <div class="sub">Языки, творчество и подготовка к школе.<br>Группы до 7 детей.</div>
+    <div class="badge">От 4 500 ₽/мес</div>
+    <div class="spacer"></div>
+    <div class="place">Петергоф, Чичеринская 2</div>
+  </div>
+</div>
+<div class="caption">preschool-3x4 · 1200×1600</div>
+</div>
+
+<!-- ==================== 4. ОНЛАЙН-ШКОЛА ==================== -->
+<div>
+<div class="cr s11" id="online-1x1">
+  <img class="person" src="source/cutouts/consultant_full_body_headset.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Языки онлайн<br>с преподавателем</h1>
+    <div class="sub">Живые уроки по Zoom, записи в личном кабинете,<br>домашние задания с проверкой.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">Английский · китайский · испанский · немецкий</div>
+  </div>
+</div>
+<div class="caption">online-1x1 · 1200×1200</div>
+</div>
+
+<div>
+<div class="cr s169" id="online-16x9">
+  <img class="person" src="source/cutouts/consultant_full_body_headset.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Языки онлайн<br>с преподавателем</h1>
+    <div class="sub">Живые уроки по Zoom, записи в личном кабинете, домашние задания с проверкой.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">Английский · китайский · испанский · немецкий · уровни A1–C2</div>
+  </div>
+</div>
+<div class="caption">online-16x9 · 1920×1080</div>
+</div>
+
+<div>
+<div class="cr s34" id="online-3x4">
+  <img class="person" src="source/cutouts/consultant_full_body_headset.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>Языки онлайн<br>с преподавателем</h1>
+    <div class="sub">Живые уроки по Zoom, записи уроков,<br>домашние задания с проверкой.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">4 языка · уровни A1–C2</div>
+  </div>
+</div>
+<div class="caption">online-3x4 · 1200×1600</div>
+</div>
+
+<!-- ==================== 5. ОБЩИЙ / БРЕНД ==================== -->
+<div>
+<div class="cr s11" id="brand-1x1">
+  <img class="person" src="source/cutouts/girl_full_body_thumbs_up.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>4 языка<br>в одной школе</h1>
+    <div class="sub">Английский, китайский, испанский, немецкий.<br>Взрослым и детям, очно и онлайн.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">Петергоф, Чичеринская 2 · с 2018 года</div>
+  </div>
+</div>
+<div class="caption">brand-1x1 · 1200×1200</div>
+</div>
+
+<div>
+<div class="cr s169" id="brand-16x9">
+  <img class="person" src="source/cutouts/girl_full_body_thumbs_up.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>4 языка в одной школе<br>в Петергофе</h1>
+    <div class="sub">Английский, китайский, испанский, немецкий. Взрослым и детям, очно и онлайн.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">Чичеринская 2 · лицензия на образовательную деятельность · с 2018 года</div>
+  </div>
+</div>
+<div class="caption">brand-16x9 · 1920×1080</div>
+</div>
+
+<div>
+<div class="cr s34" id="brand-3x4">
+  <img class="person" src="source/cutouts/girl_full_body_thumbs_up.png" alt="">
+  <div class="copy">
+    <img class="logo" src="source/logo1-06_1765626702945-cdAyjoCh.png" alt="">
+    <h1>4 языка<br>в одной школе</h1>
+    <div class="sub">Английский, китайский, испанский, немецкий.<br>Взрослым и детям, очно и онлайн.</div>
+    <div class="badge">Первый урок бесплатно</div>
+    <div class="spacer"></div>
+    <div class="place">Петергоф, Чичеринская 2 · с 2018 года</div>
+  </div>
+</div>
+<div class="caption">brand-3x4 · 1200×1600</div>
+</div>
+
+</div>
+</body>
+</html>

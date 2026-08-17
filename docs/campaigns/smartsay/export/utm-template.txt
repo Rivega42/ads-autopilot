@@ -1,0 +1,1 @@
+utm_source=yandex&utm_medium=cpc&utm_campaign={campaign_name}&utm_content={ad_id}_{gbid}_{device_type}&utm_term={keyword}&yclid={yclid}
