@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { UnknownRegionsError, matchRegionIds } from '../clients/yandex-direct/geo.js';
 
+import { BidModifierError, buildBidModifierPayloads } from './bid-modifiers-deploy.js';
 import { DryRunTransport, deployAccount, rubToMicros } from './deploy.js';
 import { SMARTSAY_ACCOUNT, UTM_TEMPLATE } from './smartsay/blueprint.js';
 
@@ -54,10 +55,11 @@ describe('matchRegionIds', () => {
 });
 
 describe('deployAccount', () => {
-  it('создаёт все кампании blueprint и возвращает их ID', async () => {
+  it('создаёт все кампании blueprint, кроме ретаргетинга без сегментов', async () => {
     const result = await deploy();
+    const deployable = SMARTSAY_ACCOUNT.campaigns.filter((c) => c.placement !== 'retargeting');
 
-    expect(result.campaigns).toHaveLength(SMARTSAY_ACCOUNT.campaigns.length);
+    expect(result.campaigns).toHaveLength(deployable.length);
     expect(result.campaigns.every((c) => c.id > 0)).toBe(true);
   });
 
@@ -147,17 +149,58 @@ describe('deployAccount', () => {
 
   it('фильтрует кампании по приоритету', async () => {
     const result = await deploy([1]);
-    const firstWave = SMARTSAY_ACCOUNT.campaigns.filter((c) => c.priority === 1);
+    const firstWave = SMARTSAY_ACCOUNT.campaigns.filter(
+      (c) => c.priority === 1 && c.placement !== 'retargeting',
+    );
     expect(result.campaigns).toHaveLength(firstWave.length);
+  });
+
+  it('пропускает ретаргетинг, пока нет сегментов Метрики', async () => {
+    const result = await deploy();
+    const retargeting = SMARTSAY_ACCOUNT.campaigns.find((c) => c.placement === 'retargeting');
+
+    expect(result.campaigns.some((c) => c.name === retargeting?.name)).toBe(false);
+    expect(result.campaigns).toHaveLength(SMARTSAY_ACCOUNT.campaigns.length - 1);
+  });
+
+  it('создаёт условия ретаргетинга, когда сегменты переданы', async () => {
+    const transport = new DryRunTransport(GEO);
+    const retargeting = SMARTSAY_ACCOUNT.campaigns.find((c) => c.placement === 'retargeting');
+
+    const result = await deployAccount(transport, SMARTSAY_ACCOUNT, {
+      ...OPTIONS,
+      retargetingListIds: { [retargeting?.name ?? '']: [777, 888] },
+    });
+
+    expect(result.campaigns.some((c) => c.name === retargeting?.name)).toBe(true);
+    const targets = result.calls.filter((c) => c.service === 'audiencetargets');
+    expect(targets).toHaveLength(1);
+    expect((targets[0]?.params.AudienceTargets as unknown[]).length).toBe(2);
+  });
+
+  it('создаёт корректировки ставок для очных кампаний', async () => {
+    const result = await deploy([1]);
+    const calls = result.calls.filter((c) => c.service === 'bidmodifiers');
+    expect(calls.length).toBeGreaterThan(0);
+
+    const flat = calls.flatMap((c) => c.params.BidModifiers as Record<string, unknown>[]);
+    expect(flat.some((m) => m.MobileAdjustment !== undefined)).toBe(true);
+    expect(flat.some((m) => m.RegionalAdjustment !== undefined)).toBe(true);
+    expect(flat.some((m) => m.DemographicsAdjustment !== undefined)).toBe(true);
   });
 
   it('не отправляет группе ретаргетинга ключевые фразы', async () => {
     const result = await deploy();
-    const retargeting = SMARTSAY_ACCOUNT.campaigns.find((c) => c.placement === 'retargeting');
-    const campaignIndex = result.campaigns.findIndex((c) => c.name === retargeting?.name);
-    expect(campaignIndex).toBeGreaterThanOrEqual(0);
-
-    const groupIds = new Set(result.campaigns[campaignIndex]?.groups.map((g) => g.id));
+    const groupsWithoutKeywords = SMARTSAY_ACCOUNT.campaigns
+      .flatMap((c) => c.groups)
+      .filter((g) => g.keywords.length === 0)
+      .map((g) => g.name);
+    const groupIds = new Set(
+      result.campaigns
+        .flatMap((c) => c.groups)
+        .filter((g) => groupsWithoutKeywords.includes(g.name))
+        .map((g) => g.id),
+    );
     const keywordCalls = result.calls.filter((c) => c.service === 'keywords');
     for (const call of keywordCalls) {
       for (const keyword of call.params.Keywords as { AdGroupId: number }[]) {
@@ -166,18 +209,18 @@ describe('deployAccount', () => {
     }
   });
 
-  it('создаёт кампанию, визитку, группы, фразы и объявления в этом порядке', async () => {
+  it('создаёт объекты в порядке зависимостей: кампания раньше групп, группы раньше фраз', async () => {
     const result = await deploy([1]);
     const order = result.calls.map((c) => c.service);
+    const at = (service: string) => order.indexOf(service);
 
-    const first = order.indexOf('campaigns');
-    expect(order.slice(first, first + 5)).toEqual([
-      'campaigns',
-      'vcards',
-      'adgroups',
-      'keywords',
-      'ads',
-    ]);
+    // Набор быстрых ссылок нужен объявлениям, поэтому создаётся до всего.
+    expect(at('sitelinks')).toBeLessThan(at('campaigns'));
+    expect(at('campaigns')).toBeLessThan(at('vcards'));
+    expect(at('vcards')).toBeLessThan(at('adgroups'));
+    expect(at('bidmodifiers')).toBeLessThan(at('adgroups'));
+    expect(at('adgroups')).toBeLessThan(at('keywords'));
+    expect(at('keywords')).toBeLessThan(at('ads'));
   });
 
   it('создаёт набор быстрых ссылок и уточнения один раз на аккаунт', async () => {
@@ -235,5 +278,36 @@ describe('deployAccount', () => {
       .slice(0, 3)
       .map((ad) => ad.TextAd.AdImageHash);
     expect(new Set(hashes).size).toBe(3);
+  });
+});
+
+describe('buildBidModifierPayloads', () => {
+  const regions = new Map([['Санкт-Петербург', 2]]);
+
+  it('кладёт проценты устройств и регионов в разные поля Директа', () => {
+    const payloads = buildBidModifierPayloads(
+      1,
+      [
+        { kind: 'mobile', percent: 120, note: '' },
+        { kind: 'region', region: 'Санкт-Петербург', percent: 60, note: '' },
+      ],
+      regions,
+    );
+
+    expect(payloads[0]).toEqual({ CampaignId: 1, MobileAdjustment: { BidModifierPercent: 120 } });
+    expect(payloads[1]).toEqual({
+      CampaignId: 1,
+      RegionalAdjustment: { RegionId: 2, BidModifier: 60 },
+    });
+  });
+
+  it('падает на неразрешённом регионе, а не создаёт корректировку в пустоту', () => {
+    expect(() =>
+      buildBidModifierPayloads(
+        1,
+        [{ kind: 'region', region: 'Урюпинск', percent: 60, note: '' }],
+        regions,
+      ),
+    ).toThrow(BidModifierError);
   });
 });

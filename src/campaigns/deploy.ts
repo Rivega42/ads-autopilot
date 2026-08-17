@@ -6,6 +6,7 @@ import type {
 } from '../clients/yandex-direct/deploy-types.js';
 import { resolveRegionIds } from '../clients/yandex-direct/geo.js';
 
+import { createBidModifiers } from './bid-modifiers-deploy.js';
 import {
   createCallouts,
   createSitelinkSet,
@@ -79,6 +80,11 @@ export interface DeployOptions {
   /** UTM-шаблон в поле «Параметры URL». */
   readonly urlParams?: string;
   readonly onlyPriority?: readonly (1 | 2 | 3)[];
+  /**
+   * ID условий ретаргетинга по имени кампании. Их источник — сегменты Метрики,
+   * поэтому до установки счётчика их не существует.
+   */
+  readonly retargetingListIds?: Readonly<Record<string, readonly number[]>>;
   /** Картинки для РСЯ по имени кампании: base64 файлов из creatives/out. */
   readonly imagesByCampaign?: Readonly<
     Record<string, readonly { readonly name: string; readonly base64: string }[]>
@@ -165,6 +171,15 @@ export async function deployAccount(
   let adCount = 0;
 
   for (const campaign of wanted) {
+    const retargetingLists = options.retargetingListIds?.[campaign.name] ?? [];
+    if (campaign.placement === 'retargeting' && retargetingLists.length === 0) {
+      // У группы должно быть хоть одно условие показа. Ретаргетинг без сегментов
+      // Метрики — заведомо невалидная группа, лучше не создавать её вовсе,
+      // чем оставить в аккаунте мусор со статусом «нет условий показа».
+      log(`пропуск: ${campaign.name} — нет условий ретаргетинга (сначала счётчик Метрики)`);
+      continue;
+    }
+
     const created = await transport.request<AddResult>('campaigns', 'add', {
       Campaigns: [campaignPayload(campaign, options)],
     });
@@ -172,6 +187,16 @@ export async function deployAccount(
     log(`campaigns.add  ${campaign.name} → ${campaignId}`);
 
     const vCardId = await createVCard(transport, campaignId, account.vcard);
+
+    const modifierCount = await createBidModifiers(
+      transport,
+      campaignId,
+      campaign.bidModifiers ?? [],
+      regionIds,
+    );
+    if (modifierCount > 0) {
+      log(`bidmodifiers.add  корректировок ${modifierCount}`);
+    }
 
     // Один сюжет используют несколько кампаний. Повторная загрузка того же
     // файла стоила бы баллов и плодила дубли в библиотеке изображений.
@@ -235,6 +260,18 @@ export async function deployAccount(
         },
       })),
     );
+    if (retargetingLists.length > 0) {
+      await transport.request('audiencetargets', 'add', {
+        AudienceTargets: groupIds.flatMap((adGroupId) =>
+          retargetingLists.map((listId) => ({
+            AdGroupId: adGroupId,
+            RetargetingListId: listId,
+          })),
+        ),
+      });
+      log(`audiencetargets.add  условий ${groupIds.length * retargetingLists.length}`);
+    }
+
     if (ads.length > 0) {
       await transport.request('ads', 'add', { Ads: ads });
       adCount += ads.length;

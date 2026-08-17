@@ -44,6 +44,16 @@ const campaignAdultsSearch: CampaignBlueprint = {
   regions: [...OFFLINE_REGIONS],
   negativeKeywords: [...OFFLINE_NEGATIVES, ...KIDS_NEGATIVE_KEYWORDS],
   priority: 1,
+  bidModifiers: [
+    { kind: 'mobile', percent: 120, note: 'Больше половины локального спроса приходит с телефона' },
+    {
+      kind: 'region',
+      region: 'Санкт-Петербург',
+      percent: 60,
+      note: 'Из центра города на еженедельные занятия в Петергоф не поедут',
+    },
+    { kind: 'age', age: 'AGE_0_17', percent: 0, note: 'Решение принимает и платит взрослый' },
+  ],
   note: 'Ядро аккаунта. Корректировка −40% на Санкт-Петербург за пределами Петродворцового района, +20% на мобильные.',
   groups: [
     {
@@ -268,6 +278,18 @@ const campaignKidsSearch: CampaignBlueprint = {
   regions: [...OFFLINE_REGIONS],
   negativeKeywords: [...OFFLINE_NEGATIVES, ...ADULTS_NEGATIVE_KEYWORDS],
   priority: 1,
+  bidModifiers: [
+    { kind: 'mobile', percent: 120, note: 'Больше половины локального спроса приходит с телефона' },
+    {
+      kind: 'region',
+      region: 'Санкт-Петербург',
+      percent: 60,
+      note: 'Из центра города на еженедельные занятия в Петергоф не поедут',
+    },
+    { kind: 'age', age: 'AGE_0_17', percent: 0, note: 'Решение принимает и платит взрослый' },
+    { kind: 'age', age: 'AGE_25_34', percent: 130, note: 'Ядро родителей школьников' },
+    { kind: 'age', age: 'AGE_35_44', percent: 130, note: 'Ядро родителей школьников' },
+  ],
   note: 'Решение принимает родитель. Корректировка +30% на возраст 25–44, вечерние часы и выходные — по факту заявок.',
   groups: [
     {
@@ -407,6 +429,12 @@ const campaignPreschoolSearch: CampaignBlueprint = {
   regions: ['Петергоф', 'Ломоносов', 'Стрельна'],
   negativeKeywords: [...OFFLINE_NEGATIVES, ...ADULTS_NEGATIVE_KEYWORDS, 'школьник', 'егэ', 'огэ'],
   priority: 1,
+  bidModifiers: [
+    { kind: 'mobile', percent: 120, note: 'Больше половины локального спроса приходит с телефона' },
+    { kind: 'age', age: 'AGE_0_17', percent: 0, note: 'Решение принимает и платит взрослый' },
+    { kind: 'age', age: 'AGE_25_34', percent: 130, note: 'Ядро родителей школьников' },
+    { kind: 'age', age: 'AGE_35_44', percent: 130, note: 'Ядро родителей школьников' },
+  ],
   note: 'Самое узкое гео: за развивашкой родители не поедут дальше 15 минут. Ставим только ближние локации и радиус 7 км вокруг Чичеринской, 2.',
   groups: [
     {
@@ -827,6 +855,16 @@ const campaignNetworkOffline: CampaignBlueprint = {
   regions: [...OFFLINE_REGIONS],
   negativeKeywords: [...GLOBAL_NEGATIVE_KEYWORDS],
   priority: 2,
+  bidModifiers: [
+    { kind: 'mobile', percent: 120, note: 'Больше половины локального спроса приходит с телефона' },
+    {
+      kind: 'region',
+      region: 'Санкт-Петербург',
+      percent: 60,
+      note: 'Из центра города на еженедельные занятия в Петергоф не поедут',
+    },
+    { kind: 'age', age: 'AGE_0_17', percent: 0, note: 'Решение принимает и платит взрослый' },
+  ],
   note: 'Автотаргетинг + интересы «Изучение иностранных языков», «Детское развитие», «Родители школьников». Обязательно: отключение мобильных приложений как площадок и еженедельная чистка площадок по отчёту.',
   groups: [
     {

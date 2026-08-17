@@ -42,6 +42,20 @@ export interface AdGroupBlueprint {
   readonly note?: string;
 }
 
+/**
+ * Корректировка ставки. `percent` — множитель в процентах, как его понимает
+ * Директ: 60 означает «платить 60% от ставки», то есть −40%; 0 — не показывать.
+ */
+export interface BidModifierBlueprint {
+  readonly kind: 'region' | 'mobile' | 'age';
+  readonly percent: number;
+  /** Для kind: 'region' — имя региона из того же справочника, что и таргетинг. */
+  readonly region?: string;
+  /** Для kind: 'age' — возрастная группа Директа. */
+  readonly age?: 'AGE_0_17' | 'AGE_18_24' | 'AGE_25_34' | 'AGE_35_44' | 'AGE_45_54' | 'AGE_55';
+  readonly note: string;
+}
+
 export interface CampaignBlueprint {
   readonly name: string;
   readonly placement: PlacementType;
@@ -51,6 +65,7 @@ export interface CampaignBlueprint {
   readonly regions: readonly string[];
   readonly negativeKeywords: readonly string[];
   readonly groups: readonly AdGroupBlueprint[];
+  readonly bidModifiers?: readonly BidModifierBlueprint[];
   /** 1 — запускаем в первый день, 3 — когда появятся данные и свободный бюджет. */
   readonly priority: 1 | 2 | 3;
   readonly startPaused?: boolean;

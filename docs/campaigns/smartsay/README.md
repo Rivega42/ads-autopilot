@@ -11,6 +11,7 @@
 | [02-metrika.md](./02-metrika.md)                             | **Блокер запуска:** счётчик Метрики, цели, сегменты ретаргетинга |
 | [03-launch-checklist.md](./03-launch-checklist.md)           | Пошаговая настройка в интерфейсе Директа                         |
 | [04-optimization-playbook.md](./04-optimization-playbook.md) | Что делать в 1-ю, 2-ю, 4-ю и 8-ю неделю                          |
+| [05-api-verification.md](./05-api-verification.md)           | Что проверить на первом прогоне заливки в песочницу              |
 | [structure.md](./structure.md)                               | Полная структура: все группы, фразы, заголовки, тексты           |
 | [creatives/](./creatives/README.md)                          | 15 изображений для РСЯ + разбор фотобазы клиента                 |
 | [metrika/](./metrika/README.md)                              | Готовый код счётчика и целей для передачи разработчику сайта     |
