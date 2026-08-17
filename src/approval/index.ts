@@ -21,7 +21,9 @@ export {
 export {
   expireApprovals,
   reconcileStuckApprovals,
+  registerExpiredApprovalHandler,
   STUCK_APPROVAL_MINUTES,
+  type ExpiredApprovalHandler,
   type ExpireResult,
 } from '@/approval/expire.js';
 export {

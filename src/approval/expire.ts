@@ -33,6 +33,48 @@ export const STUCK_NOTIFIED_PREFIX = 'stuck:notified ';
 /** Решения, из которых заявка сама уже не выберется: применение оборвалось. */
 const STUCK_DECISIONS = [ApprovalDecision.APPLYING, ApprovalDecision.APPROVED];
 
+export type ExpiredApprovalHandler = (approval: PendingApproval) => Promise<void>;
+
+const expiredHandlers = new Map<string, ExpiredApprovalHandler>();
+
+/**
+ * Что сделать с заявкой, когда её срок истёк.
+ *
+ * Нужно тем, кто перед созданием карточки занимает ключ идемпотентности: истёкшая
+ * карточка означает, что решения не было и его надо предложить снова, а занятый ключ
+ * заставляет систему молчать. Approval-модуль про чужие ключи ничего не знает и знать
+ * не должен — поэтому не вызов конкретного модуля, а точка подписки; подписчиков
+ * связывает планировщик (`scheduler/handlers.ts`), там же живёт и сам крон.
+ *
+ * Ключ — имя подписчика: регистрация повторяется при каждом импорте модуля, и
+ * одноимённый обработчик обязан заменять прежний, а не добавляться к нему.
+ */
+export function registerExpiredApprovalHandler(
+  name: string,
+  handler: ExpiredApprovalHandler,
+): void {
+  expiredHandlers.set(name, handler);
+}
+
+/**
+ * Обработчики истёкшей заявки.
+ *
+ * Падение одного не отменяет ни остальных, ни саму экспирацию: заявка уже переведена в
+ * EXPIRED, и оставить её без уведомления человека из-за недоступной БД было бы хуже.
+ */
+async function runExpiredHandlers(approval: PendingApproval): Promise<void> {
+  for (const [name, handler] of expiredHandlers) {
+    try {
+      await handler(approval);
+    } catch (err) {
+      log.error(
+        { approvalId: approval.id, handler: name, err: describeError(err) },
+        'expired approval handler failed',
+      );
+    }
+  }
+}
+
 /**
  * Гасит просроченные заявки и сообщает об этом в чат (TZ §5, Milestone 5).
  *
@@ -62,6 +104,7 @@ export async function expireApprovals(now: Date = new Date()): Promise<ExpireRes
     }
     expired += 1;
 
+    await runExpiredHandlers(approval);
     await editCard(approval, { kind: 'expired' });
     await notifyExpired(approval.chatId, approval.payload, approval.summary);
   }

@@ -15,6 +15,11 @@ const h = vi.hoisted(() => ({
     winners: 1,
     approvals: 1,
   })),
+  releaseAbApprovalKeys: vi.fn(async (_approval: { payload: unknown }) => 1),
+  registerExpiredApprovalHandler: vi.fn(
+    (_name: string, _handler: (approval: unknown) => Promise<void>) => undefined,
+  ),
+  purgeExpiredIdempotencyKeys: vi.fn(async () => 7),
 }));
 
 vi.mock('@/ingestion/index.js', () => ({
@@ -22,13 +27,26 @@ vi.mock('@/ingestion/index.js', () => ({
   runSearchQueryIngestion: h.runSearchQueryIngestion,
   refreshExpiringTokens: h.refreshExpiringTokens,
 }));
-vi.mock('@/approval/index.js', () => ({ expireApprovals: h.expireApprovals }));
+vi.mock('@/approval/index.js', () => ({
+  expireApprovals: h.expireApprovals,
+  registerExpiredApprovalHandler: h.registerExpiredApprovalHandler,
+}));
+vi.mock('@/scheduler/purge.js', () => ({
+  purgeExpiredIdempotencyKeys: h.purgeExpiredIdempotencyKeys,
+}));
 vi.mock('@/keywords/index.js', () => ({ runWeeklyKeywordRefresh: h.runWeeklyKeywordRefresh }));
 vi.mock('@/moderation/index.js', () => ({ runModerationCheck: h.runModerationCheck }));
-vi.mock('@/creatives/index.js', () => ({ runAbEvaluation: h.runAbEvaluation }));
+vi.mock('@/creatives/index.js', () => ({
+  runAbEvaluation: h.runAbEvaluation,
+  releaseAbApprovalKeys: h.releaseAbApprovalKeys,
+}));
 
 const { handlers } = await import('@/scheduler/handlers.js');
 const { QUEUE_NAMES } = await import('@/scheduler/queues.js');
+
+// Снимок делается сразу после импорта: подписка на истёкшие заявки происходит один раз
+// при загрузке модуля, а `clearAllMocks` в beforeEach стёр бы её из истории вызовов.
+const expiredSubscription = h.registerExpiredApprovalHandler.mock.calls[0];
 
 const job = (id = 'job-1'): Job => ({ id }) as Job;
 
@@ -82,6 +100,21 @@ describe('handlers', () => {
 
     expect(h.expireApprovals).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ expired: 1 });
+  });
+
+  it('expire-approvals заодно чистит просроченные ключи идемпотентности', async () => {
+    const result = await handlers[QUEUE_NAMES.expireApprovals](job(), 'token');
+
+    expect(h.purgeExpiredIdempotencyKeys).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ purgedKeys: 7 });
+  });
+
+  it('истёкшая A/B-карточка освобождает свой ключ: решение обязано прийти снова', async () => {
+    const [name, handler] = expiredSubscription ?? [];
+    expect(name).toBe('creatives:ab');
+
+    await handler?.({ id: 'ap-1', payload: { kind: 'pause_entities' } });
+    expect(h.releaseAbApprovalKeys).toHaveBeenCalledTimes(1);
   });
 
   it('второй тик поверх незакончившегося первого не запускает работу повторно', async () => {

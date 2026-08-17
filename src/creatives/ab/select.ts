@@ -27,6 +27,12 @@ export interface VariantCounts {
   variantId: string;
   impressions: number;
   clicks: number;
+  /**
+   * Человекочитаемое имя варианта — заголовок объявления. Без него в карточку уходит
+   * отпечаток текста (`t-9f3a1b…`), по которому человек не может понять, что именно
+   * ему предлагают выключить. То же требование, что и у `Decision.label` оптимизатора.
+   */
+  label?: string;
 }
 
 export interface AbTestConfig {
@@ -83,12 +89,17 @@ export interface SelectWinnerOptions {
 
 export interface VariantReport {
   variantId: string;
+  /** Заголовок объявления; null — имени не передали, в тексте останется id. */
+  label: string | null;
   impressions: number;
   clicks: number;
   ctr: number;
   /** Доверительный интервал Уилсона для CTR на уровне `1 − alpha`. */
   ctrInterval: Interval;
-  /** false — вариант не добрал минимума показов. */
+  /**
+   * false — вариант не добрал минимума показов. Такой вариант не участвует в
+   * сравнении, а значит и проиграть не может: см. `losingVariantIds`.
+   */
   eligible: boolean;
 }
 
@@ -130,6 +141,11 @@ function formatCtr(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
 }
 
+/** Имя варианта для человека. id остаётся только там, где имени не дали вовсе. */
+function nameOf(variants: readonly VariantReport[], variantId: string): string {
+  return variants.find((v) => v.variantId === variantId)?.label ?? variantId;
+}
+
 /**
  * Решение по набору вариантов.
  *
@@ -144,6 +160,7 @@ export function selectWinner(
 ): AbDecision {
   const variants: VariantReport[] = input.map((variant) => ({
     variantId: variant.variantId,
+    label: variant.label ?? null,
     impressions: variant.impressions,
     clicks: variant.clicks,
     ctr: ctr(counts(variant)),
@@ -269,8 +286,9 @@ export function selectWinner(
       winner: null,
       reasonCode: 'NOT_SIGNIFICANT',
       reason:
-        `Лидер «${leader.variantId}» (CTR ${formatCtr(leader.ctr)}) не отличается значимо от ` +
-        `«${worst.variantId}» (CTR ${formatCtr(byId(variants, worst.variantId))}): ` +
+        `Лидер «${nameOf(variants, leader.variantId)}» (CTR ${formatCtr(leader.ctr)}) ` +
+        `не отличается значимо от «${nameOf(variants, worst.variantId)}» ` +
+        `(CTR ${formatCtr(byId(variants, worst.variantId))}): ` +
         `p = ${worst.pValue.toFixed(3)} при пороге ${alphaAdjusted.toFixed(3)}. ` +
         `Разница в пределах шума — победителя нет.`,
       requiredImpressionsPerVariant: required,
@@ -286,7 +304,8 @@ export function selectWinner(
       winner: null,
       reasonCode: 'LIFT_TOO_SMALL',
       reason:
-        `Разница значима, но мала: лидер «${leader.variantId}» обходит «${worst.variantId}» ` +
+        `Разница значима, но мала: лидер «${nameOf(variants, leader.variantId)}» обходит ` +
+        `«${nameOf(variants, worst.variantId)}» ` +
         `на ${(worst.relativeLift * 100).toFixed(1)}% при пороге ` +
         `${(config.minRelativeLift * 100).toFixed(0)}%. Менять креатив ради этого не стоит.`,
       requiredImpressionsPerVariant: required,
@@ -299,12 +318,30 @@ export function selectWinner(
     winner: leader.variantId,
     reasonCode: 'WINNER',
     reason:
-      `Победитель «${leader.variantId}»: CTR ${formatCtr(leader.ctr)} ` +
+      `Победитель «${nameOf(variants, leader.variantId)}»: CTR ${formatCtr(leader.ctr)} ` +
       `(интервал ${formatCtr(leader.ctrInterval.low)}…${formatCtr(leader.ctrInterval.high)}) ` +
       `против ${formatCtr(runnerUp.ctr)} у ближайшего соперника, ` +
       `p = ${maxPValue(comparisons).toFixed(4)} при пороге ${alphaAdjusted.toFixed(3)}.`,
     requiredImpressionsPerVariant: null,
   };
+}
+
+/**
+ * Варианты, которые действительно проиграли: их сравнили с победителем и они уступили.
+ *
+ * Не «все, кроме победителя». Вариант, не добравший минимума показов, ни с кем не
+ * сравнивался — он не проиграл, у него просто нет данных. Разница не формальная:
+ * проигравший уходит на паузу, а выключенный вариант больше никогда не наберёт
+ * показов, чтобы себя оправдать. Лучший креатив группы с 400 показами и CTR 8%
+ * попадал в этот список ровно по этой ошибке.
+ */
+export function losingVariantIds(decision: AbDecision): string[] {
+  const winner = decision.winner;
+  if (decision.status !== 'winner' || winner === null) return [];
+  const compared = new Set(decision.comparisons.map((c) => c.variantId));
+  return decision.variants
+    .filter((v) => v.eligible && v.variantId !== winner && compared.has(v.variantId))
+    .map((v) => v.variantId);
 }
 
 type DecisionBase = Pick<AbDecision, 'variants' | 'comparisons' | 'config'>;

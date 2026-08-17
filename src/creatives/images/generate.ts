@@ -33,7 +33,8 @@ const log = logger.child({ scope: 'creatives:images' });
  *     старта задачи): деньги списаны, значит учтены.
  *  3. Ошибка одного формата не роняет набор. Три баннера из четырёх лучше, чем ноль.
  *  4. Бюджет набора — потолок ДО расхода, а не отчёт после. Генерация, которая его
- *     пробивает, не запускается.
+ *     пробивает, не запускается. Цена модели неизвестна — генерации нет вовсе: потолок
+ *     по нулю не считается, и такой набор потратил бы сколько угодно.
  */
 
 /** TZ §13.3: «3-5 вариантов на объявление». */
@@ -83,7 +84,7 @@ export interface CreativeImage {
   image: GeneratedImage | null;
 }
 
-export type ImageFailureKind = 'provider_error' | 'over_budget';
+export type ImageFailureKind = 'provider_error' | 'over_budget' | 'unknown_price';
 
 export interface ImageFailure {
   format: ImageFormatName;
@@ -173,6 +174,23 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Image
         continue;
       }
 
+      // Модели нет в прайсе — генерируем вслепую: потолок ниже не сработает ни разу
+      // (`unitCost === null`), а в итог набора такая картинка войдёт нулём. Неизвестная
+      // цена — это стоп: занизить месячный расход дороже, чем не получить баннер.
+      if (unitCost === null) {
+        failures.push({
+          format,
+          variantIndex,
+          kind: 'unknown_price',
+          reason:
+            `цена ${opts.provider.name}:${opts.provider.model} неизвестна — генерация без ` +
+            'потолка бюджета запрещена; добавьте строку в IMAGE_PRICING',
+          costUsd: null,
+          creativeId: null,
+        });
+        continue;
+      }
+
       const key = imageCacheKey(opts.provider.name, opts.provider.model, request, size);
       const cached = cache.get(key);
 
@@ -183,9 +201,8 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Image
         status = 'cached';
       } else {
         // Потолок проверяется до вызова, а не после набора: узнать о перерасходе из
-        // отчёта — значит уже его совершить. Неизвестная цена потолком не ограничивается:
-        // остановить набор по выдуманному числу хуже, чем сгенерировать его.
-        if (unitCost !== null && round6(spentUsd + unitCost) > budgetUsd) {
+        // отчёта — значит уже его совершить.
+        if (round6(spentUsd + unitCost) > budgetUsd) {
           failures.push({
             format,
             variantIndex,
@@ -205,14 +222,14 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Image
             opts.signal ? { signal: opts.signal } : undefined,
           );
           status = 'generated';
-          spentUsd = round6(spentUsd + (unitCost ?? 0));
+          spentUsd = round6(spentUsd + unitCost);
           cache.set(key, image);
         } catch (err) {
           // Ретрая здесь нет намеренно: генерация платная и не идемпотентная,
           // а провайдер уже мог начать (и списать) задачу. Раз мог списать — расход
           // учитывается: неудачная генерация, стоившая ноль, занижает месячный итог
           // ровно на те деньги, которые труднее всего объяснить.
-          spentUsd = round6(spentUsd + (unitCost ?? 0));
+          spentUsd = round6(spentUsd + unitCost);
           failures.push({
             format,
             variantIndex,
@@ -314,6 +331,12 @@ export async function generateImages(opts: GenerateImagesOptions): Promise<Image
   const estimatedCostUsd =
     unitCost === null ? 0 : round6(unitCost * (images.length + failures.length));
   const budget = checkSetCost(spent, budgetUsd);
+  if (unitCost === null && failures.length > 0) {
+    warnings.push(
+      `Цена ${opts.provider.name}:${opts.provider.model} неизвестна — картинки не ` +
+        'генерировались: без цены потолок бюджета не работает, а расход не считается.',
+    );
+  }
   if (!budget.withinBudget) {
     warnings.push(
       `Набор стоил $${budget.totalUsd} при бюджете $${budget.budgetUsd} — проверьте прайс провайдера.`,

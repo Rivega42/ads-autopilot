@@ -1,7 +1,7 @@
 import type { Job, Processor } from 'bullmq';
 
-import { expireApprovals } from '@/approval/index.js';
-import { runAbEvaluation } from '@/creatives/index.js';
+import { expireApprovals, registerExpiredApprovalHandler } from '@/approval/index.js';
+import { releaseAbApprovalKeys, runAbEvaluation } from '@/creatives/index.js';
 import { env } from '@/env.js';
 import { refreshExpiringTokens, runIngestion, runSearchQueryIngestion } from '@/ingestion/index.js';
 import { runWeeklyKeywordRefresh } from '@/keywords/index.js';
@@ -10,9 +10,23 @@ import { logger } from '@/logger.js';
 import { runModerationCheck } from '@/moderation/index.js';
 import { runScheduledOptimization } from '@/optimizer/index.js';
 import { runAlertScan, runDailyReports, runWeeklyReports } from '@/reporter/index.js';
+import { purgeExpiredIdempotencyKeys } from '@/scheduler/purge.js';
 import { QUEUE_NAMES, type QueueName } from '@/scheduler/queues.js';
 
 const log = logger.child({ scope: 'scheduler' });
+
+/**
+ * Истёкшая A/B-карточка обязана вернуть свой ключ идемпотентности.
+ *
+ * Ключ занимается до отправки карточки и держится, пока человек не ответит; если ответа
+ * не будет никогда (карточка ушла в 5:00, истекла в 7:00, человек проснулся в 9:00), то
+ * без освобождения ключа решение по этой группе не придёт больше ни разу. Связывание
+ * живёт здесь, а не внутри модулей: approval не должен знать про креативы, креативы — про
+ * крон экспирации, а планировщик знает про обоих по определению.
+ */
+registerExpiredApprovalHandler('creatives:ab', async (approval) => {
+  await releaseAbApprovalKeys(approval);
+});
 
 // Заглушки notImplemented больше нет намеренно: тип Record<QueueName, Processor>
 // не даст добавить очередь без обработчика, и компилятор поймает это раньше
@@ -110,6 +124,7 @@ export const handlers: Record<QueueName, Processor> = {
   })),
   [QUEUE_NAMES.expireApprovals]: exclusive(QUEUE_NAMES.expireApprovals, async () => ({
     ...(await expireApprovals()),
+    purgedKeys: await purgeExpiredIdempotencyKeys(),
   })),
   [QUEUE_NAMES.alertScan]: exclusive(QUEUE_NAMES.alertScan, async () => ({
     ...(await runAlertScan()),

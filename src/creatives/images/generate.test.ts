@@ -298,6 +298,46 @@ describe('учёт расхода', () => {
     expect(generate).toHaveBeenCalledTimes(5);
     expect(result.failures).toEqual([]);
   });
+
+  it('провайдер без цены в прайсе не генерирует ничего: неизвестная цена — это стоп', async () => {
+    const { provider, generate } = providerOf();
+    const unpriced: ImageProvider = { ...provider, name: 'midjourney', model: 'v7' };
+
+    const result = await generateImages({
+      clientId: 'c1',
+      brief: BRIEF,
+      formats: ['square_1080'],
+      variantsPerFormat: 3,
+      provider: unpriced,
+      ctx: { dryRun: false },
+      cache: new ImageCache(),
+    });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(result.images).toEqual([]);
+    expect(result.failures).toHaveLength(3);
+    expect(result.failures.every((f) => f.kind === 'unknown_price')).toBe(true);
+    expect(result.warnings.join(' ')).toMatch(/[Цц]ена/);
+  });
+
+  it('неизвестная цена не мешает посмотреть план в dry-run', async () => {
+    const { provider, generate } = providerOf();
+    const unpriced: ImageProvider = { ...provider, name: 'midjourney', model: 'v7' };
+
+    const result = await generateImages({
+      clientId: 'c1',
+      brief: BRIEF,
+      formats: ['square_1080'],
+      variantsPerFormat: 3,
+      provider: unpriced,
+      ctx: { dryRun: true },
+      cache: new ImageCache(),
+    });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(result.images).toHaveLength(3);
+    expect(result.failures).toEqual([]);
+  });
 });
 
 describe('кеш', () => {

@@ -76,8 +76,12 @@ const h = vi.hoisted(() => {
 
 vi.mock('@/db/prisma.js', () => ({ prisma: h.prisma }));
 
-const { expireApprovals, reconcileStuckApprovals, STUCK_APPROVAL_MINUTES } =
-  await import('@/approval/expire.js');
+const {
+  expireApprovals,
+  reconcileStuckApprovals,
+  registerExpiredApprovalHandler,
+  STUCK_APPROVAL_MINUTES,
+} = await import('@/approval/expire.js');
 const { setMessenger } = await import('@/approval/telegram.js');
 
 const NOW = new Date('2026-08-08T12:00:00Z');
@@ -177,6 +181,47 @@ describe('expireApprovals', () => {
 
     expect(res.expired).toBe(1);
     expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.EXPIRED);
+  });
+});
+
+describe('обработчики истёкших заявок', () => {
+  it('зовёт зарегистрированный обработчик: иначе решение теряется навсегда', async () => {
+    const seen: string[] = [];
+    registerExpiredApprovalHandler('release-keys', (approval) => {
+      seen.push(approval.id);
+      return Promise.resolve();
+    });
+    h.state.rows = [row({ id: 'ap1' }), row({ id: 'ap2' })];
+
+    await expireApprovals(NOW);
+
+    expect(seen).toEqual(['ap1', 'ap2']);
+  });
+
+  it('заявку, которую человек успел нажать, обработчикам не отдаёт', async () => {
+    const seen: string[] = [];
+    registerExpiredApprovalHandler('raced', (approval) => {
+      seen.push(approval.id);
+      return Promise.resolve();
+    });
+    h.state.rows = [row({ id: 'ap1' })];
+    h.prisma.pendingApproval.findMany.mockResolvedValueOnce([{ ...row({ id: 'ap1' }) }]);
+    h.state.rows[0]!.decision = ApprovalDecision.APPROVED;
+
+    await expireApprovals(NOW);
+
+    expect(seen).toEqual([]);
+  });
+
+  it('падение обработчика не мешает погасить заявку и написать в чат', async () => {
+    registerExpiredApprovalHandler('broken', () => Promise.reject(new Error('БД недоступна')));
+    h.state.rows = [row({ id: 'ap1' })];
+
+    const res = await expireApprovals(NOW);
+
+    expect(res.expired).toBe(1);
+    expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.EXPIRED);
+    expect(h.sendMessage).toHaveBeenCalledTimes(1);
   });
 });
 

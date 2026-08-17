@@ -3,10 +3,11 @@ import { createHash } from 'node:crypto';
 import { AdGroupStatus, CampaignStatus, ClientStatus, Prisma, type Provider } from '@prisma/client';
 
 import { evaluateAdExperiment, type AdExperiment } from './ab/experiment.js';
-import type { AbTestConfig } from './ab/select.js';
+import { losingVariantIds, type AbTestConfig } from './ab/select.js';
 
-import { createApproval, type ApprovalAction } from '@/approval/index.js';
+import { approvalActionSchema, createApproval, type ApprovalAction } from '@/approval/index.js';
 import { prisma } from '@/db/prisma.js';
+import { env } from '@/env.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 
@@ -27,7 +28,26 @@ export const AB_WINDOW_DAYS = 30;
 /** Одно объявление — это не эксперимент. Сравнивать не с чем, статистику не запрашиваем. */
 const MIN_ADS_IN_EXPERIMENT = 2;
 
+/**
+ * С какого числа кандидатов прогон стоит считать долгим.
+ *
+ * Жёсткого потолка здесь намеренно нет: обрезать список значит навсегда оставить хвост
+ * групп без оценки и молча — а молчание тут неотличимо от «победителей не нашлось».
+ * Вместо потолка — предупреждение в лог, по которому видно, что пора укладывать
+ * оценку в пакетные запросы.
+ */
+const SLOW_RUN_CANDIDATES = 500;
+
 const IDEMPOTENCY_SCOPE = 'creatives:ab';
+/**
+ * Прогон в dry-run занимает собственный ключ.
+ *
+ * DRY_RUN включён по умолчанию везде. С общим ключом неделя прогонов «вхолостую»
+ * забирала бы ключ боевого решения, и после перехода на DRY_RUN=false карточка по этим
+ * группам не пришла бы уже никогда: ключ живёт до решения человека, а решения не было.
+ */
+const DRY_RUN_SCOPE = 'creatives:ab:dry-run';
+const AB_SCOPES = [IDEMPOTENCY_SCOPE, DRY_RUN_SCOPE] as const;
 const KEY_TTL_DAYS = 30;
 
 export interface AbEvaluationOptions {
@@ -40,7 +60,7 @@ export interface AbEvaluationOptions {
 }
 
 export interface AbEvaluationSummary {
-  /** Групп, похожих на эксперимент (два и более объявления). */
+  /** Групп, похожих на эксперимент (два и более наших варианта). */
   adGroups: number;
   collecting: number;
   inconclusive: number;
@@ -62,6 +82,11 @@ export interface AbEvaluationSummary {
  * Чаще раза в сутки смысла нет: решение принимается по накопленным показам, а они за час
  * не меняют картину — зато каждый прогон это запрос статистики по каждой группе.
  *
+ * Эксперимент — это только те группы, где не меньше двух НАШИХ вариантов (`Ad.llmVariant`).
+ * Рукописные объявления клиента и всё, что приехало через ingestion (TZ §15), кандидатами
+ * не становятся: предлагать человеку выключить объявления, которых система не писала, она
+ * права не имеет.
+ *
  * Результат «есть победитель» превращается в заявку на паузу проигравших вариантов, и
  * уходит она человеку карточкой, а не в кабинет напрямую. Причина не в осторожности
  * вообще, а в цене ошибки: выключенное объявление перестаёт собирать показы, то есть
@@ -79,26 +104,11 @@ export async function runAbEvaluation(options: AbEvaluationOptions): Promise<AbE
   // и сравнение с моментом времени внутри суток отрезало бы сегодняшнюю строку.
   const to = startOfUtcDay(now);
   const from = new Date(to.getTime() - (windowDays - 1) * DAY_MS);
+  // Формула та же, что в `approval/create.ts#effectiveDryRun`: карточка уйдёт именно в
+  // этом режиме, а от режима зависит, какой ключ она занимает.
+  const dryRun = env.DRY_RUN || options.dryRun;
 
-  const groups = await prisma.adGroup.findMany({
-    where: {
-      status: AdGroupStatus.ACTIVE,
-      campaign: {
-        status: CampaignStatus.ACTIVE,
-        // Клиент на паузе или в архиве не должен получать карточки на свои кампании.
-        client: { status: ClientStatus.ACTIVE },
-        ...(options.clientId ? { clientId: options.clientId } : {}),
-      },
-    },
-    select: {
-      id: true,
-      name: true,
-      campaign: { select: { clientId: true, provider: true } },
-      _count: { select: { ads: true } },
-    },
-  });
-
-  const candidates = groups.filter((g) => g._count.ads >= MIN_ADS_IN_EXPERIMENT);
+  const candidates = await findExperimentGroups(options.clientId);
 
   const summary: AbEvaluationSummary = {
     adGroups: candidates.length,
@@ -116,6 +126,14 @@ export async function runAbEvaluation(options: AbEvaluationOptions): Promise<AbE
   const idempotency = createAbIdempotencyStore();
 
   for (const group of candidates) {
+    // clientId и provider в каждой строке: типичная причина падения — протухший токен
+    // конкретного кабинета, а по одному adGroupId в алерте непонятно, чей он.
+    const ctx = {
+      adGroupId: group.id,
+      clientId: group.campaign.clientId,
+      provider: group.campaign.provider,
+    };
+
     let experiment: AdExperiment;
     try {
       experiment = await evaluateAdExperiment(group.id, {
@@ -126,8 +144,15 @@ export async function runAbEvaluation(options: AbEvaluationOptions): Promise<AbE
       });
     } catch (err) {
       summary.failed += 1;
-      log.error({ adGroupId: group.id, err: describeError(err) }, 'A/B evaluation failed');
+      log.error({ ...ctx, err: describeError(err) }, 'A/B evaluation failed');
       continue;
+    }
+
+    if (experiment.adsWithoutStats.length > 0) {
+      log.warn(
+        { ...ctx, ads: experiment.adsWithoutStats.length, windowDays },
+        'ads in experiment have no stats for the whole window',
+      );
     }
 
     const { decision } = experiment;
@@ -143,23 +168,17 @@ export async function runAbEvaluation(options: AbEvaluationOptions): Promise<AbE
 
     summary.winners += 1;
     try {
-      const outcome = await requestLoserPause(experiment, group, {
-        dryRun: options.dryRun,
-        idempotency,
-      });
+      const outcome = await requestLoserPause(experiment, group, { dryRun, idempotency });
       summary.approvals += outcome.created;
       summary.approvalsDuplicate += outcome.duplicate;
       summary.unbuildable += outcome.unbuildable;
     } catch (err) {
       summary.approvalsFailed += 1;
-      log.error(
-        { adGroupId: group.id, err: describeError(err) },
-        'failed to create A/B approval card',
-      );
+      log.error({ ...ctx, err: describeError(err) }, 'failed to create A/B approval card');
     }
   }
 
-  log.info({ ...summary, dryRun: options.dryRun }, 'creative A/B evaluation finished');
+  log.info({ ...summary, dryRun }, 'creative A/B evaluation finished');
   return summary;
 }
 
@@ -167,6 +186,47 @@ interface GroupRow {
   id: string;
   name: string;
   campaign: { clientId: string; provider: Provider };
+}
+
+/**
+ * Группы, похожие на эксперимент.
+ *
+ * Отбор делает Postgres, а не память процесса: раньше сюда приезжали все активные группы
+ * всех клиентов, и `_count.ads >= 2` считался уже здесь — на кабинете с тысячей групп это
+ * тысяча лишних строк и столько же ненужных обходов.
+ */
+async function findExperimentGroups(clientId?: string): Promise<GroupRow[]> {
+  const grouped = await prisma.ad.groupBy({
+    by: ['adGroupId'],
+    where: {
+      llmVariant: { not: null },
+      adGroup: {
+        status: AdGroupStatus.ACTIVE,
+        campaign: {
+          status: CampaignStatus.ACTIVE,
+          // Клиент на паузе или в архиве не должен получать карточки на свои кампании.
+          client: { status: ClientStatus.ACTIVE },
+          ...(clientId ? { clientId } : {}),
+        },
+      },
+    },
+    _count: { _all: true },
+    having: { adGroupId: { _count: { gte: MIN_ADS_IN_EXPERIMENT } } },
+  });
+
+  if (grouped.length === 0) return [];
+  if (grouped.length >= SLOW_RUN_CANDIDATES) {
+    log.warn({ candidates: grouped.length }, 'A/B evaluation run is getting large');
+  }
+
+  return prisma.adGroup.findMany({
+    where: { id: { in: grouped.map((row) => row.adGroupId) } },
+    select: {
+      id: true,
+      name: true,
+      campaign: { select: { clientId: true, provider: true } },
+    },
+  });
 }
 
 interface PauseOutcome {
@@ -183,33 +243,33 @@ interface PauseDeps {
 /**
  * Заявка на паузу проигравших вариантов.
  *
+ * Проигравшие — те, кого сравнили с победителем и кто уступил (`losingVariantIds`), а не
+ * «все остальные». Вариант, не набравший минимума показов, в сравнении не участвовал:
+ * выключить его значит закрыть ему единственный путь набрать данные.
+ *
  * Паузим объявления, а не варианты: у площадки нет понятия «вариант текста», и один
- * вариант обычно живёт в нескольких объявлениях группы. Победитель в список не попадает
- * никогда — иначе тест выключил бы ровно тот текст, ради которого проводился.
+ * вариант обычно живёт в нескольких объявлениях группы.
  */
 async function requestLoserPause(
   experiment: AdExperiment,
   group: GroupRow,
   deps: PauseDeps,
 ): Promise<PauseOutcome> {
-  const winner = experiment.decision.winner;
-  if (winner === null) return { created: 0, duplicate: 0, unbuildable: 1 };
-
-  const loserAdIds = [...experiment.adsByVariant]
-    .filter(([variantId]) => variantId !== winner)
-    .flatMap(([, adIds]) => adIds);
+  const losers = losingVariantIds(experiment.decision);
+  const loserAdIds = losers.flatMap((variantId) => experiment.adsByVariant.get(variantId) ?? []);
   if (loserAdIds.length === 0) return { created: 0, duplicate: 0, unbuildable: 1 };
 
   const rows = await prisma.ad.findMany({
     where: { id: { in: loserAdIds } },
-    select: { id: true, externalId: true },
+    select: { id: true, externalId: true, title: true },
   });
-  // Сортировка не косметика: порядок строк из БД не гарантирован, а по этому списку
-  // считается ключ идемпотентности — при другом порядке он дал бы вторую карточку.
-  const externalIds = [...new Set(rows.map((row) => row.externalId).filter(Boolean))].sort();
+  // Заголовки берём только у адресатов паузы: объявление без внешнего id в карточку
+  // не попадёт, и называть его человеку значит обещать то, чего не произойдёт.
+  const addressed = rows.filter((row) => row.externalId.length > 0);
+  const externalIds = normalizeExternalIds(addressed.map((row) => row.externalId));
   if (externalIds.length === 0) {
     log.warn(
-      { adGroupId: group.id, losers: loserAdIds.length },
+      { adGroupId: group.id, clientId: group.campaign.clientId, losers: loserAdIds.length },
       'A/B winner found, but losing ads have no external ids',
     );
     return { created: 0, duplicate: 0, unbuildable: 1 };
@@ -223,12 +283,13 @@ async function requestLoserPause(
     externalIds,
     reason:
       `A/B-тест группы «${group.name}». ${experiment.decision.reason} ` +
-      `На паузу уходят проигравшие варианты: объявлений — ${externalIds.length}.`,
+      `На паузу уходят проигравшие объявления (${externalIds.length}): ` +
+      `${listTitles(addressed.map((row) => row.title))}.`,
   };
 
-  const key = abApprovalIdempotencyKey(group.id, winner, externalIds);
-  if ((await deps.idempotency.reserve(key, group.id)) === 'duplicate') {
-    log.info({ adGroupId: group.id, key }, 'A/B approval card already sent');
+  const key = abApprovalIdempotencyKey(group.id, externalIds, { dryRun: deps.dryRun });
+  if ((await deps.idempotency.reserve(key, group.id, deps.dryRun)) === 'duplicate') {
+    log.info({ adGroupId: group.id, clientId: group.campaign.clientId }, 'A/B card already sent');
     return { created: 0, duplicate: 1, unbuildable: 0 };
   }
 
@@ -238,38 +299,101 @@ async function requestLoserPause(
   } catch (err) {
     // Карточки нет — держать ключ занятым нельзя, иначе завтрашний прогон промолчит
     // и человек так и не узнает про победителя.
-    await deps.idempotency.release(key);
+    await deps.idempotency.release([key]);
     throw err;
   }
 }
 
+/** Заголовки объявлений для карточки: человек должен узнать текст, а не cuid. */
+function listTitles(titles: readonly string[]): string {
+  const unique = [...new Set(titles.filter((title) => title.trim().length > 0))];
+  const shown = unique.slice(0, 3).map((title) => `«${title}»`);
+  const rest = unique.length - shown.length;
+  return rest > 0 ? `${shown.join(', ')} и ещё ${rest}` : shown.join(', ');
+}
+
+/** Порядок и дубли не должны менять ключ: иначе та же заявка даст вторую карточку. */
+function normalizeExternalIds(ids: readonly string[]): string[] {
+  return [...new Set(ids.filter((id) => id.length > 0))].sort();
+}
+
 /**
- * Ключ карточки: группа + победитель + адресаты паузы.
+ * Ключ карточки: режим + группа + адресаты паузы.
  *
  * Даты в ключе намеренно нет, в отличие от оптимизатора (`optimizer/scheduled.ts`).
  * Там решение пересчитывается каждые сутки и назавтра оно другое, здесь — то же самое:
  * победитель, определённый вчера, останется победителем и завтра, и послезавтра. С
  * посуточным ключом клиент получал бы одну и ту же карточку каждую ночь, пока не нажмёт
- * кнопку. Меняется набор объявлений или победитель — меняется и ключ, карточка уйдёт.
+ * кнопку.
  *
- * По той же причине в ключ не входит текст заявки: в нём CTR и p-value, а они дрейфуют
- * от прогона к прогону, не меняя сути решения.
+ * Победителя в ключе нет по другой причине: ключ обязан опознавать ПРЕДЛАГАЕМОЕ
+ * ДЕЙСТВИЕ, а действие — это «выключить вот эти объявления». Две заявки на один и тот же
+ * набор объявлений — одна и та же заявка, чем бы её ни объясняли. Заодно такой ключ
+ * пересчитывается из самой карточки, и `releaseAbApprovalKeys` умеет его освободить,
+ * когда карточка истекла.
  */
 export function abApprovalIdempotencyKey(
   adGroupId: string,
-  winnerVariantId: string,
   externalIds: readonly string[],
+  opts: { dryRun: boolean },
 ): string {
   const digest = createHash('sha1')
-    .update([winnerVariantId, ...externalIds].join('\n'))
+    .update(normalizeExternalIds(externalIds).join('\u0000'))
     .digest('hex')
     .slice(0, 16);
-  return `${IDEMPOTENCY_SCOPE}:${adGroupId}:${digest}`;
+  return `${opts.dryRun ? DRY_RUN_SCOPE : IDEMPOTENCY_SCOPE}:${adGroupId}:${digest}`;
+}
+
+/**
+ * Освобождение ключа истёкшей карточки.
+ *
+ * Вешается на крон экспирации (`scheduler/handlers.ts`). Без этого решение теряется
+ * навсегда: ключ занят до решения человека, а решения не будет — карточка ушла в EXPIRED
+ * ночью, человек открыл телефон утром, и следующий прогон промолчит, потому что «уже
+ * отправляли». Освобождённый ключ означает ровно одно: завтра спросим ещё раз.
+ *
+ * Оба режима чистятся вместе: dry-run-ключ на ту же группу после истечения карточки
+ * не защищает уже ничего.
+ *
+ * @returns сколько ключей освобождено.
+ */
+export async function releaseAbApprovalKeys(approval: {
+  id: string;
+  payload: unknown;
+}): Promise<number> {
+  const parsed = approvalActionSchema.safeParse(approval.payload);
+  if (!parsed.success) return 0;
+  const action = parsed.data;
+  if (action.kind !== 'pause_entities' || action.level !== 'ad') return 0;
+
+  const externalIds = normalizeExternalIds(action.externalIds);
+  if (externalIds.length === 0) return 0;
+
+  // Группу берём из объявлений: в карточке живут только внешние id площадки.
+  const ads = await prisma.ad.findMany({
+    where: { externalId: { in: [...externalIds] } },
+    select: { adGroupId: true },
+  });
+  const adGroupIds = [...new Set(ads.map((row) => row.adGroupId))];
+  if (adGroupIds.length === 0) return 0;
+
+  const keys = adGroupIds.flatMap((adGroupId) => [
+    abApprovalIdempotencyKey(adGroupId, externalIds, { dryRun: false }),
+    abApprovalIdempotencyKey(adGroupId, externalIds, { dryRun: true }),
+  ]);
+  const released = await createAbIdempotencyStore().release(keys);
+  if (released > 0) {
+    log.info(
+      { approvalId: approval.id, adGroupIds, released },
+      'A/B idempotency keys released on expiry',
+    );
+  }
+  return released;
 }
 
 interface AbIdempotencyStore {
-  reserve(key: string, adGroupId: string): Promise<'reserved' | 'duplicate'>;
-  release(key: string): Promise<void>;
+  reserve(key: string, adGroupId: string, dryRun: boolean): Promise<'reserved' | 'duplicate'>;
+  release(keys: readonly string[]): Promise<number>;
 }
 
 /**
@@ -282,17 +406,20 @@ interface AbIdempotencyStore {
  *
  * Уникальность обеспечивает Postgres, а не проверка «сначала прочитать»: два воркера
  * иначе оба увидели бы пусто и оба отправили бы карточку.
+ *
+ * `expiresAt` не декоративен: просроченные строки удаляет крон экспирации
+ * (`scheduler/purge.ts`), поэтому TTL здесь — настоящий срок жизни ключа.
  */
 function createAbIdempotencyStore(
   db: Pick<typeof prisma, 'idempotencyKey'> = prisma,
 ): AbIdempotencyStore {
   return {
-    async reserve(key: string, adGroupId: string): Promise<'reserved' | 'duplicate'> {
+    async reserve(key: string, adGroupId: string, dryRun: boolean) {
       try {
         await db.idempotencyKey.create({
           data: {
             key,
-            scope: IDEMPOTENCY_SCOPE,
+            scope: dryRun ? DRY_RUN_SCOPE : IDEMPOTENCY_SCOPE,
             entityType: 'ADGROUP',
             entityId: adGroupId,
             expiresAt: new Date(Date.now() + KEY_TTL_DAYS * DAY_MS),
@@ -306,8 +433,13 @@ function createAbIdempotencyStore(
         throw err;
       }
     },
-    async release(key: string): Promise<void> {
-      await db.idempotencyKey.deleteMany({ where: { key } });
+    async release(keys: readonly string[]): Promise<number> {
+      // deleteMany, а не delete: освобождение зовут по пути ошибки и по истечении
+      // карточки, и «строки уже нет» там нормальный исход, а не новость.
+      const { count } = await db.idempotencyKey.deleteMany({
+        where: { key: { in: [...keys] }, scope: { in: [...AB_SCOPES] } },
+      });
+      return count;
     },
   };
 }

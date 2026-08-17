@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   adjustedAlpha,
   DEFAULT_AB_TEST,
+  losingVariantIds,
   selectWinner,
   type AbTestConfig,
   type VariantCounts,
@@ -183,6 +184,73 @@ describe('поправка на множественность', () => {
       variant('c', 5000, 90),
     ]);
     expect(decision.comparisons.every((c) => c.alphaAdjusted === 0.025)).toBe(true);
+  });
+});
+
+describe('кто именно проиграл', () => {
+  it('недобравший минимум показов проигравшим не считается', () => {
+    // «c» с 30 показами ни с кем не сравнивался: выключить его как проигравшего
+    // значит навсегда лишить его шанса набрать данные.
+    const decision = selectWinner([
+      variant('a', 1000, 50),
+      variant('b', 1000, 10),
+      variant('c', 30, 2),
+    ]);
+
+    expect(decision.winner).toBe('a');
+    expect(losingVariantIds(decision)).toEqual(['b']);
+  });
+
+  it('вариант вообще без показов в проигравшие не попадает', () => {
+    const decision = selectWinner([
+      variant('a', 1000, 50),
+      variant('b', 1000, 10),
+      variant('c', 0, 0),
+    ]);
+
+    expect(losingVariantIds(decision)).toEqual(['b']);
+  });
+
+  it('без победителя проигравших нет', () => {
+    const decision = selectWinner([variant('a', 500, 12), variant('b', 500, 10)]);
+
+    expect(decision.status).toBe('inconclusive');
+    expect(losingVariantIds(decision)).toEqual([]);
+  });
+});
+
+describe('имена вариантов в объяснении', () => {
+  function labelled(id: string, impressions: number, clicks: number, label: string): VariantCounts {
+    return { variantId: id, impressions, clicks, label };
+  }
+
+  it('победитель назван заголовком объявления, а не отпечатком текста', () => {
+    const decision = selectWinner([
+      labelled('t-9f3a1b2c3d4e', 1000, 50, 'Ремонт под ключ за 30 дней'),
+      labelled('t-aaaabbbbcccc', 1000, 10, 'Ремонт квартир недорого'),
+    ]);
+
+    expect(decision.status).toBe('winner');
+    expect(decision.reason).toContain('Ремонт под ключ за 30 дней');
+    expect(decision.reason).not.toContain('t-9f3a1b2c3d4e');
+  });
+
+  it('в отказе «нет значимой разницы» тоже стоят заголовки', () => {
+    const decision = selectWinner([
+      labelled('t-9f3a1b2c3d4e', 500, 12, 'Ремонт под ключ'),
+      labelled('t-aaaabbbbcccc', 500, 10, 'Ремонт недорого'),
+    ]);
+
+    expect(decision.reasonCode).toBe('NOT_SIGNIFICANT');
+    expect(decision.reason).toContain('Ремонт под ключ');
+    expect(decision.reason).not.toContain('t-');
+  });
+
+  it('без заголовка остаётся id варианта: выдумывать имя нечем', () => {
+    const decision = selectWinner([variant('a', 1000, 50), variant('b', 1000, 10)]);
+
+    expect(decision.reason).toContain('«a»');
+    expect(decision.variants[0]?.label).toBeNull();
   });
 });
 

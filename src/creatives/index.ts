@@ -15,6 +15,7 @@
 
 export {
   evaluateAdExperiment,
+  TEXT_REWRITE_ACTIONS,
   type AdExperiment,
   type AdExperimentOptions,
   type ExperimentStore,
@@ -22,6 +23,7 @@ export {
 export {
   adjustedAlpha,
   DEFAULT_AB_TEST,
+  losingVariantIds,
   selectWinner,
   type AbDecision,
   type AbReasonCode,
@@ -120,6 +122,7 @@ export {
 export {
   abApprovalIdempotencyKey,
   AB_WINDOW_DAYS,
+  releaseAbApprovalKeys,
   runAbEvaluation,
   type AbEvaluationOptions,
   type AbEvaluationSummary,

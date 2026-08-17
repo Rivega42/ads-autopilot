@@ -297,8 +297,8 @@ async function syncKeywords(
   const byExternal = new Map<string, string>();
   const byPhrase = new Map<string, string>();
   for (const row of existing) {
-    if (row.externalId) byExternal.set(`${row.adGroupId} ${row.externalId}`, row.id);
-    byPhrase.set(`${row.adGroupId} ${row.phrase}`, row.id);
+    if (row.externalId) byExternal.set(`${row.adGroupId}\u0000${row.externalId}`, row.id);
+    byPhrase.set(`${row.adGroupId}\u0000${row.phrase}`, row.id);
   }
 
   const remote = await adapter.listKeywords(ctx, adGroupExternalIds);
@@ -313,8 +313,8 @@ async function syncKeywords(
     }
     seenPerGroup.set(adGroupId, (seenPerGroup.get(adGroupId) ?? 0) + 1);
     const id =
-      byExternal.get(`${adGroupId} ${keyword.externalId}`) ??
-      byPhrase.get(`${adGroupId} ${keyword.phrase}`);
+      byExternal.get(`${adGroupId}\u0000${keyword.externalId}`) ??
+      byPhrase.get(`${adGroupId}\u0000${keyword.phrase}`);
 
     if (id) {
       await db.keyword.update({ where: { id }, data: keywordFields(keyword) });
