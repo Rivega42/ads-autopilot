@@ -9,10 +9,11 @@ import {
   remoteKeyword,
 } from '@/ingestion/__tests__/fake-adapter.js';
 import { FakePrisma, type FakeRow } from '@/ingestion/__tests__/fake-prisma.js';
+import { REWRITE_ACTION } from '@/moderation/repair.js';
 
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
-const { syncEntities } = await import('@/ingestion/entities.js');
+const { syncEntities, MODERATION_REWRITE_ACTION } = await import('@/ingestion/entities.js');
 
 const CLIENT = 'cl1';
 const CTX: ChannelContext = { clientId: CLIENT, credentials: {}, dryRun: true };
@@ -261,6 +262,131 @@ describe('syncEntities', () => {
     expect(result.adGroups.orphaned).toBe(1);
     expect(result.adGroups.upserted).toBe(1);
     expect(result.ads.orphaned).toBe(1);
+  });
+
+  it('знает то же имя действия журнала, что пишет модерация', () => {
+    // Константа продублирована, чтобы не тянуть в загрузку весь модуль модерации.
+    // Разъедься эти две строки — и заменённые баннеры молча вернулись бы в решения.
+    expect(MODERATION_REWRITE_ACTION).toBe(REWRITE_ACTION);
+  });
+
+  it('не заводит живую строку под баннер, который мы сами заменили при правке текста', async () => {
+    // Строка уже переехала на новый баннер: так делает `moderation/repair.ts`, когда VK
+    // создал замену, а удалить старый баннер не смог. Старый при этом остаётся в
+    // листинге — `VK_DEFAULT_STATUSES` включает `blocked`.
+    await syncEntities(
+      CLIENT,
+      'YANDEX_DIRECT',
+      deps(
+        fakeAdapter('YANDEX_DIRECT', { ...fullCabinet, ads: [remoteAd({ externalId: '301' })] }),
+      ),
+    );
+    const row = db.store.ad[0] as FakeRow;
+    await db.changeLog.create({
+      data: {
+        campaignId: db.store.campaign[0]?.['id'],
+        entityType: 'AD',
+        entityId: row['id'],
+        action: MODERATION_REWRITE_ACTION,
+        newValue: { externalIdBefore: '300', externalIdAfter: '301' },
+        actor: 'AI',
+      },
+    });
+
+    const withOrphan = fakeAdapter('YANDEX_DIRECT', {
+      ...fullCabinet,
+      ads: [remoteAd({ externalId: '301' }), remoteAd({ externalId: '300', status: 'BLOCKED' })],
+    });
+    const result = await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(withOrphan));
+
+    expect(result.ads.superseded).toBe(1);
+    const orphan = db.store.ad.find((ad) => ad['externalId'] === '300');
+    // Строка есть — её расход не должен потеряться, — но в решениях не участвует.
+    expect(orphan?.['status']).toBe('ARCHIVED');
+    expect(db.store.ad.find((ad) => ad['externalId'] === '301')?.['status']).toBe('ACTIVE');
+  });
+
+  it('гасит заменённый баннер, даже если кабинет отдаёт его работающим', async () => {
+    // Погасить старый баннер адаптер пытается сам, но попытка может не пройти. Тогда
+    // объявление крутится и тратит бюджет, а его строка попала бы и в оптимизатор, и в
+    // модерацию — то есть получила бы ещё одно переписывание.
+    await syncEntities(
+      CLIENT,
+      'YANDEX_DIRECT',
+      deps(
+        fakeAdapter('YANDEX_DIRECT', { ...fullCabinet, ads: [remoteAd({ externalId: '301' })] }),
+      ),
+    );
+    await db.changeLog.create({
+      data: {
+        entityType: 'AD',
+        entityId: db.store.ad[0]?.['id'],
+        action: MODERATION_REWRITE_ACTION,
+        newValue: { externalIdBefore: '300', externalIdAfter: '301' },
+        actor: 'AI',
+      },
+    });
+
+    const stillRunning = fakeAdapter('YANDEX_DIRECT', {
+      ...fullCabinet,
+      ads: [remoteAd({ externalId: '301' }), remoteAd({ externalId: '300', status: 'ON' })],
+    });
+    await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(stillRunning));
+
+    expect(db.store.ad.find((ad) => ad['externalId'] === '300')?.['status']).toBe('ARCHIVED');
+  });
+
+  it('чужая запись журнала не гасит объявление другой группы', async () => {
+    // externalId уникален только внутри группы, поэтому совпадение id из чужой замены
+    // не имеет права выключить работающее объявление.
+    const twoGroups = {
+      campaigns: [remoteCampaign()],
+      adGroups: [remoteAdGroup(), remoteAdGroup({ externalId: '201' })],
+      ads: [remoteAd(), remoteAd({ externalId: '399', adGroupExternalId: '201' })],
+    };
+    await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(fakeAdapter('YANDEX_DIRECT', twoGroups)));
+    const other = db.store.ad.find((ad) => ad['externalId'] === '399');
+    await db.changeLog.create({
+      data: {
+        entityType: 'AD',
+        entityId: other?.['id'],
+        action: MODERATION_REWRITE_ACTION,
+        newValue: { externalIdBefore: '300', externalIdAfter: '399' },
+        actor: 'AI',
+      },
+    });
+
+    const result = await syncEntities(
+      CLIENT,
+      'YANDEX_DIRECT',
+      deps(fakeAdapter('YANDEX_DIRECT', twoGroups)),
+    );
+
+    expect(result.ads.superseded).toBe(0);
+    expect(db.store.ad.every((ad) => ad['status'] === 'ACTIVE')).toBe(true);
+  });
+
+  it('журнал без смены id ничего не гасит', async () => {
+    // У Директа текст правится на месте: пары `externalIdBefore/After` в записи нет.
+    await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(fakeAdapter('YANDEX_DIRECT', fullCabinet)));
+    await db.changeLog.create({
+      data: {
+        entityType: 'AD',
+        entityId: db.store.ad[0]?.['id'],
+        action: MODERATION_REWRITE_ACTION,
+        newValue: { retries: 1 },
+        actor: 'AI',
+      },
+    });
+
+    const result = await syncEntities(
+      CLIENT,
+      'YANDEX_DIRECT',
+      deps(fakeAdapter('YANDEX_DIRECT', fullCabinet)),
+    );
+
+    expect(result.ads.superseded).toBe(0);
+    expect(db.store.ad[0]?.['status']).toBe('ACTIVE');
   });
 
   it('не затирает известный бюджет, когда площадка его не прислала', async () => {

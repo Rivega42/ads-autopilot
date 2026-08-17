@@ -1,9 +1,10 @@
 import {
   AdGroupStatus,
-  type AdStatus,
+  AdStatus,
   CampaignStatus,
   KeywordStatus,
   MatchType,
+  type Prisma,
   type PrismaClient,
   type Provider,
 } from '@prisma/client';
@@ -34,12 +35,17 @@ export interface LevelSyncCount {
   orphaned: number;
 }
 
+export interface AdSyncCount extends LevelSyncCount {
+  /** Баннеры, оставшиеся в кабинете после нашей же замены текста. */
+  superseded: number;
+}
+
 export interface EntitySyncResult {
   clientId: string;
   provider: Provider;
   campaigns: LevelSyncCount;
   adGroups: LevelSyncCount;
-  ads: LevelSyncCount;
+  ads: AdSyncCount;
   keywords: LevelSyncCount;
 }
 
@@ -219,22 +225,101 @@ async function syncAdGroups(
 }
 
 /**
+ * Действие журнала, которым модерация фиксирует переписывание объявления.
+ *
+ * Строка продублирована из `moderation/repair.ts` намеренно — тем же приёмом, что
+ * `TEXT_REWRITE_ACTIONS` в `creatives/ab/experiment.ts`: тянуть в загрузку весь
+ * модуль модерации (модель, Telegram, база правил) ради одной константы дороже,
+ * чем совпадение, закреплённое тестом.
+ */
+export const MODERATION_REWRITE_ACTION = 'moderation_rewrite';
+
+/** `ChangeLog.entityType` для объявления — тот же литерал, что пишет модерация. */
+const AD_ENTITY_TYPE = 'AD';
+
+/** Ключ объявления: `externalId` уникален только внутри своей группы. */
+function adKey(adGroupId: string, externalId: string): string {
+  // Разделитель — NUL: он не может встретиться ни в cuid, ни во внешнем id площадки.
+  return `${adGroupId}\u0000${externalId}`;
+}
+
+/** `newValue` записи `moderation_rewrite` → внешний id, который был заменён. */
+function replacedExternalId(value: Prisma.JsonValue | null): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const before = (value as Record<string, unknown>)['externalIdBefore'];
+  const after = (value as Record<string, unknown>)['externalIdAfter'];
+  if (typeof before !== 'string' || before === '' || before === after) return null;
+  return before;
+}
+
+/**
+ * Баннеры, которые мы сами заменили, правя текст объявления.
+ *
+ * У VK правка текста — это создание нового баннера и удаление старого. Когда удаление
+ * не проходит, адаптер гасит старый баннер, а модерация переводит строку на новый id.
+ * Но погашенный баннер из листинга не исчезает (`VK_DEFAULT_STATUSES` включает
+ * `blocked`), и его id больше не принадлежит ни одной строке — значит очередной синк
+ * завёл бы под него отдельное объявление со своим счётчиком попыток. Единственный
+ * сохранившийся след этой пары — `moderation_rewrite` в журнале, поэтому смотрим туда.
+ */
+async function supersededAdKeys(
+  db: PrismaClient,
+  locals: readonly { id: string; adGroupId: string }[],
+): Promise<Set<string>> {
+  const keys = new Set<string>();
+  if (locals.length === 0) return keys;
+
+  const groupByAdId = new Map(locals.map((row) => [row.id, row.adGroupId]));
+  const rewrites = await db.changeLog.findMany({
+    where: {
+      entityType: AD_ENTITY_TYPE,
+      entityId: { in: [...groupByAdId.keys()] },
+      action: MODERATION_REWRITE_ACTION,
+    },
+    select: { entityId: true, newValue: true },
+  });
+
+  for (const row of rewrites) {
+    const replaced = replacedExternalId(row.newValue);
+    const adGroupId = groupByAdId.get(row.entityId);
+    // Ключ обязательно с группой: тот же внешний id в соседней группе — чужое
+    // работающее объявление, и выключить его мы права не имеем.
+    if (replaced !== null && adGroupId !== undefined) keys.add(adKey(adGroupId, replaced));
+  }
+  return keys;
+}
+
+/**
  * Объявления: только upsert.
  *
  * Пропавшее из листинга объявление, в отличие от кампании и группы, в архив не
  * уезжает: у объявлений нет постраничного разреза, по которому предохранители
  * `archiveMissing` отличают чистку кабинета от оборванной пагинации. `Ad.status`
  * при этом обновляется на каждом прогоне — но только по тому, что кабинет прислал.
+ *
+ * Исключение — баннер, который мы сами заменили: его строка заводится (иначе расход
+ * живого объекта кабинета уехал бы в никуда — `ingestion/stats.ts` сопоставляет
+ * статистику по `externalId`), но сразу в `ARCHIVED`. Статус кабинета здесь не годится:
+ * попытка погасить старый баннер могла и не пройти, и тогда «работает» вернуло бы
+ * объявление-двойник и в выборки оптимизатора, и в модерацию — то есть оплатило бы ему
+ * ещё одно переписывание. Пометка идемпотентна: она выводится из журнала заново на
+ * каждом прогоне, а не запоминается в строке.
  */
 async function syncAds(
   db: PrismaClient,
   adapter: ChannelAdapter,
   ctx: ChannelContext,
   adGroupsByExternalId: Map<string, string>,
-): Promise<LevelSyncCount> {
-  const count = emptyCount();
+): Promise<AdSyncCount> {
+  const count: AdSyncCount = { ...emptyCount(), superseded: 0 };
   const adGroupExternalIds = [...adGroupsByExternalId.keys()];
   if (adGroupExternalIds.length === 0) return count;
+
+  const locals = await db.ad.findMany({
+    where: { adGroupId: { in: [...adGroupsByExternalId.values()] } },
+    select: { id: true, adGroupId: true },
+  });
+  const superseded = await supersededAdKeys(db, locals);
 
   const remote = await adapter.listAds(ctx, adGroupExternalIds);
   for (const ad of remote) {
@@ -243,7 +328,9 @@ async function syncAds(
       count.orphaned += 1;
       continue;
     }
-    const data = adFields(ad);
+    const replaced = superseded.has(adKey(adGroupId, ad.externalId));
+    if (replaced) count.superseded += 1;
+    const data = replaced ? { ...adFields(ad), status: AdStatus.ARCHIVED } : adFields(ad);
     await db.ad.upsert({
       where: { adGroupId_externalId: { adGroupId, externalId: ad.externalId } },
       create: { adGroupId, externalId: ad.externalId, ...data },

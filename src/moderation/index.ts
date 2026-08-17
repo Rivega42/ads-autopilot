@@ -24,14 +24,18 @@ export {
 export { describeFailure, recordFailure, type ModerationFailure } from '@/moderation/errors.js';
 export {
   pollAdModeration,
+  MAX_MISSING_ADS_PER_TARGET,
+  type MissingAd,
   type ModerationTarget,
   type PollResult,
   type RejectedAd,
 } from '@/moderation/poll.js';
 export {
+  escalateMissingAd,
   repairRejectedAd,
   ESCALATION_ACTION,
   MAX_MODERATION_RETRIES,
+  MISSING_ACTION,
   REWRITE_ACTION,
   type RepairContext,
   type RepairOutcome,

@@ -5,7 +5,7 @@ vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
 import { FakeDb } from '@/moderation/__tests__/fake-db.js';
 import { channelContext, fakeAdapter, remoteAd } from '@/moderation/__tests__/fakes.js';
-import { pollAdModeration } from '@/moderation/poll.js';
+import { MAX_MISSING_ADS_PER_TARGET, pollAdModeration } from '@/moderation/poll.js';
 
 const TARGET = { clientId: 'cl1', provider: Provider.YANDEX_DIRECT };
 
@@ -35,7 +35,14 @@ describe('pollAdModeration', () => {
     });
 
     const result = await pollAdModeration(empty.asDb(), TARGET, channelContext(false), adapter);
-    expect(result).toEqual({ polled: 0, updated: 0, orphaned: 0, reclaimed: 0, rejected: [] });
+    expect(result).toEqual({
+      polled: 0,
+      updated: 0,
+      orphaned: 0,
+      reclaimed: 0,
+      rejected: [],
+      missing: [],
+    });
   });
 
   it('считает чужие объявления сиротами, а не своими', async () => {
@@ -196,6 +203,103 @@ describe('pollAdModeration', () => {
     // переписывание стоит двух вызовов модели и заводит в кабинете новый баннер.
     expect(result.polled).toBe(1);
     expect(result.rejected).toEqual([]);
+  });
+
+  /**
+   * Строка, у которой потерялся внешний id: процесс умер между успешной отправкой
+   * замены и записью нового id. Опрос ходит от объявлений кабинета, поэтому изнутри
+   * цикла такую строку не увидеть никогда.
+   */
+  function seedLostAd(id: string, patch: Record<string, unknown> = {}): void {
+    db.seedAd({
+      id,
+      adGroupId: 'g1',
+      externalId: `снесён-${id}`,
+      title: 'Ремонт стиральных машин',
+      body: 'Мастер приедет сегодня.',
+      moderationStatus: ModerationStatus.REJECTED,
+      moderationReason: 'Превосходная степень без подтверждения',
+      moderationRetries: 1,
+      ...patch,
+    });
+  }
+
+  describe('строки, которых нет в листинге', () => {
+    it('находит строку с потерянным id, когда группа ответила', async () => {
+      seedLostAd('ad1');
+      // Живое объявление той же группы: значит ответ по группе доехал целиком.
+      db.seedAd({ id: 'ad2', adGroupId: 'g1', externalId: 'a2' });
+
+      const result = await poll([
+        remoteAd({ externalId: 'a2', adGroupExternalId: 'ext-1', moderationStatus: 'ACCEPTED' }),
+      ]);
+
+      expect(result.missing).toHaveLength(1);
+      expect(result.missing[0]).toMatchObject({
+        id: 'ad1',
+        externalId: 'снесён-ad1',
+        campaignId: 'c1',
+        campaignName: 'Поиск',
+        retries: 1,
+        reason: 'Превосходная степень без подтверждения',
+        ad: { title: 'Ремонт стиральных машин', text: 'Мастер приедет сегодня.' },
+      });
+    });
+
+    it('молчит про группу, из которой не приехало ни одного объявления', async () => {
+      seedLostAd('ad1');
+
+      // Пустой ответ по группе — это «до неё не доехало», а не «объявлений нет».
+      const result = await poll([]);
+
+      expect(result.missing).toEqual([]);
+    });
+
+    it('не считает пропажей строку, которую мы ни разу не переписывали', async () => {
+      // Внешний id теряет только наша собственная замена текста. Если объявления нет
+      // в кабинете, а попыток не было, — его удалил клиент, и это не повод звать человека.
+      seedLostAd('ad1', { moderationRetries: 0, moderationStatus: ModerationStatus.APPROVED });
+      db.seedAd({ id: 'ad2', adGroupId: 'g1', externalId: 'a2' });
+
+      const result = await poll([
+        remoteAd({ externalId: 'a2', adGroupExternalId: 'ext-1', moderationStatus: 'ACCEPTED' }),
+      ]);
+
+      expect(result.missing).toEqual([]);
+    });
+
+    it('не считает пропажей выключенное объявление', async () => {
+      seedLostAd('ad1', { status: AdStatus.ARCHIVED });
+      db.seedAd({ id: 'ad2', adGroupId: 'g1', externalId: 'a2' });
+
+      const result = await poll([
+        remoteAd({ externalId: 'a2', adGroupExternalId: 'ext-1', moderationStatus: 'ACCEPTED' }),
+      ]);
+
+      expect(result.missing).toEqual([]);
+    });
+
+    it('не считает пропажей свежий захват: замена прямо сейчас в полёте', async () => {
+      seedLostAd('ad1', { moderationStatus: ModerationStatus.REWRITING });
+      db.seedAd({ id: 'ad2', adGroupId: 'g1', externalId: 'a2' });
+
+      const result = await poll([
+        remoteAd({ externalId: 'a2', adGroupExternalId: 'ext-1', moderationStatus: 'ACCEPTED' }),
+      ]);
+
+      expect(result.missing).toEqual([]);
+    });
+
+    it('при слишком многих пропажах молчит: так листинг врёт, а не мы потеряли строки', async () => {
+      for (let i = 0; i <= MAX_MISSING_ADS_PER_TARGET; i++) seedLostAd(`ad${i}`);
+      db.seedAd({ id: 'alive', adGroupId: 'g1', externalId: 'a2' });
+
+      const result = await poll([
+        remoteAd({ externalId: 'a2', adGroupExternalId: 'ext-1', moderationStatus: 'ACCEPTED' }),
+      ]);
+
+      expect(result.missing).toEqual([]);
+    });
   });
 
   it('берёт тексты с площадки, а не из нашей БД', async () => {

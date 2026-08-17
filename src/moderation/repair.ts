@@ -8,7 +8,7 @@ import { classifyRejection } from '@/moderation/classify.js';
 import type { ModerationDb, ModerationDeps } from '@/moderation/deps.js';
 import { describeFailure, recordFailure } from '@/moderation/errors.js';
 import type { EscalationCause, ModerationEscalation } from '@/moderation/escalate.js';
-import type { ModerationTarget, RejectedAd } from '@/moderation/poll.js';
+import type { MissingAd, ModerationTarget, RejectedAd } from '@/moderation/poll.js';
 import { rewriteRejectedAd } from '@/moderation/rewrite.js';
 import type { AdText, ClassifiedRejection } from '@/moderation/types.js';
 
@@ -24,6 +24,7 @@ export const MAX_MODERATION_RETRIES = 3;
 
 export const REWRITE_ACTION = 'moderation_rewrite';
 export const ESCALATION_ACTION = 'moderation_escalated';
+export const MISSING_ACTION = 'moderation_missing';
 
 export interface RepairContext {
   deps: ModerationDeps;
@@ -278,6 +279,74 @@ async function escalate(
     'moderation escalated to human',
   );
   return { status: 'escalated', cause: input.cause };
+}
+
+/**
+ * Строка указывает на объявление, которого нет в листинге кабинета.
+ *
+ * Чинить нечего: нового id не осталось нигде — он ушёл вместе с процессом, который
+ * умер между отправкой замены и записью. Поэтому единственное действие — позвать
+ * человека и убрать строку из решений.
+ *
+ * `ARCHIVED`, а не удаление и не пауза в кабинете: пока строка числится работающей, её
+ * показы считает A/B, а оптимизатор предлагает по ней паузу — на объект, которого нет.
+ * Пометка сама себя чинит: если объявление всё-таки вернётся в листинг, ближайшая
+ * загрузка (`ingestion/entities.ts`) вернёт строке статус кабинета. Она же и дедуплицирует
+ * письма — выключенную строку `pollAdModeration` в пропажи больше не отдаёт.
+ *
+ * Порядок «сначала доставка, потом записи» тот же, что в `escalate`: недоставленное
+ * письмо обязано повториться на следующем прогоне, а не остаться разобранным молча.
+ */
+export async function escalateMissingAd(rc: RepairContext, ad: MissingAd): Promise<RepairOutcome> {
+  const { deps, target } = rc;
+  const cause: EscalationCause = 'ad_missing';
+
+  await deps.escalate({
+    clientId: target.clientId,
+    clientName: rc.client.name,
+    chatId: rc.client.chatId,
+    channel: target.provider,
+    campaignName: ad.campaignName,
+    adId: ad.id,
+    adExternalId: ad.externalId,
+    retries: ad.retries,
+    reason: ad.reason,
+    classification: null,
+    ad: ad.ad,
+    problems: [
+      `объявления ${ad.externalId} нет в листинге кабинета ${target.provider}`,
+      'похоже, замена текста ушла в кабинет, а новый id записать не успели: восстановить его нечем',
+      'строка помечена как не работающая — если объявление вернётся в листинг, ближайшая загрузка вернёт ей статус кабинета',
+    ],
+    cause,
+  });
+
+  await deps.db.changeLog.create({
+    data: {
+      campaignId: ad.campaignId,
+      entityType: 'AD',
+      entityId: ad.id,
+      action: MISSING_ACTION,
+      prevValue: toJson({ ...ad.ad, externalId: ad.externalId }),
+      newValue: toJson({ externalId: ad.externalId, retries: ad.retries, cause }),
+      reason: `Модерация: ${cause}`,
+      actor: ChangeActor.AI,
+      provider: target.provider,
+    },
+  });
+
+  // Сверка со статусом: строку мог выключить синк между опросом и этой записью — тогда
+  // решение уже принято кабинетом, и переписывать его нам незачем.
+  await deps.db.ad.updateMany({
+    where: { id: ad.id, status: AdStatus.ACTIVE },
+    data: { status: AdStatus.ARCHIVED },
+  });
+
+  log.warn(
+    { adId: ad.id, clientId: target.clientId, externalId: ad.externalId, retries: ad.retries },
+    'ad row points at a banner the cabinet no longer lists',
+  );
+  return { status: 'escalated', cause };
 }
 
 /**

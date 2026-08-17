@@ -2,8 +2,11 @@ import { AdStatus, ModerationStatus, type Provider } from '@prisma/client';
 
 import type { ChannelAdapter, ChannelContext, RemoteAd } from '@/channels/types.js';
 import { toModerationStatus } from '@/ingestion/mapping.js';
+import { logger } from '@/logger.js';
 import type { ModerationDb } from '@/moderation/deps.js';
 import type { AdText } from '@/moderation/types.js';
+
+const log = logger.child({ scope: 'moderation:poll' });
 
 /**
  * Шаг 1 из TZ §13.4: опрос статусов модерации по кабинетам.
@@ -36,6 +39,27 @@ export interface RejectedAd {
   ad: AdText;
 }
 
+/**
+ * Строка, которая указывает на объявление, отсутствующее в листинге кабинета.
+ *
+ * Появляется, когда процесс умер между успешной отправкой замены и записью нового id:
+ * у VK правка текста удаляет старый баннер, новый id ушёл вместе с процессом, и
+ * восстановить его нечем. Изнутри цикла по объявлениям кабинета такую строку не увидеть
+ * никогда — поэтому её ищет отдельный проход, а зовёт человека прогон.
+ */
+export interface MissingAd {
+  id: string;
+  externalId: string;
+  campaignId: string;
+  campaignName: string;
+  /** Сколько раз это объявление уже переписывалось. */
+  retries: number;
+  /** Последняя известная причина отказа. */
+  reason: string;
+  /** Тексты из нашей БД: кабинет по этому id уже ничего не отдаёт. */
+  ad: AdText;
+}
+
 export interface PollResult {
   polled: number;
   /** Строк, у которых статус или причина реально изменились. */
@@ -45,7 +69,22 @@ export interface PollResult {
   /** Строк, снятых с зависшего `REWRITING`. Ненулевое значение — след падения процесса. */
   reclaimed: number;
   rejected: RejectedAd[];
+  /** Строки, чьего объявления нет в листинге. Пусто, когда листингу нельзя верить. */
+  missing: MissingAd[];
 }
+
+/**
+ * Сколько потерянных строк в одном кабинете считаем правдой.
+ *
+ * Внешний id теряется в одном-единственном месте: между захватом строки и записью
+ * нового id, а захват держится ровно на одно объявление за раз (`repairRejectedAd`
+ * работает последовательно). Значит один убитый процесс уносит одну строку, и даже
+ * несколько падений подряд дают единицы. Пачка сразу — это не столько потерянных
+ * объявлений, а неполный листинг: оборванная пагинация, фильтр статусов, ошибка
+ * кабинета на середине. Отправить по такому листингу веер писем — гарантированно
+ * приучить человека их не читать, поэтому молчим и пишем `warn`.
+ */
+export const MAX_MISSING_ADS_PER_TARGET = 3;
 
 /**
  * Сколько строка имеет право числиться в `REWRITING`.
@@ -62,6 +101,8 @@ interface LocalAd {
   id: string;
   adGroupId: string;
   externalId: string;
+  title: string;
+  body: string;
   status: AdStatus;
   moderationStatus: ModerationStatus;
   moderationReason: string | null;
@@ -119,6 +160,55 @@ function remoteText(ad: RemoteAd): AdText {
 }
 
 /**
+ * Строки, чьего объявления в листинге не оказалось.
+ *
+ * Три условия отсекают временное отсутствие от настоящей потери:
+ *
+ *  • группа, из которой не приехало ни одного объявления, не рассматривается вовсе —
+ *    это тот же предохранитель, что у архивации в `ingestion/entities.ts`: пустой ответ
+ *    по группе означает «до неё не доехало», а не «объявлений там нет»;
+ *  • строка должна нести след нашей же попытки переписать (`REJECTED` и счётчик больше
+ *    нуля). Внешний id теряется только в замене текста, которую делаем мы; объявление,
+ *    которое мы не трогали, пропало из кабинета по воле клиента — это работа загрузки, а
+ *    не повод писать человеку. Заодно отсекается только что созданное объявление: у него
+ *    попыток нет;
+ *  • живой захват (`REWRITING`) пропускаем: там прямо сейчас идёт замена, и у VK старого
+ *    баннера в этот момент уже нет — нормальное состояние, а не пропажа.
+ *
+ * Выключенные строки не рассматриваются: они ничего не показывают и денег не тратят,
+ * а уже отданная человеку строка помечена именно так (см. `escalateMissingAd`) — иначе
+ * одно и то же письмо уходило бы каждые полчаса.
+ */
+function collectMissing(
+  locals: readonly LocalAd[],
+  groupById: ReadonlyMap<string, LocalGroup>,
+  answeredGroupIds: ReadonlySet<string>,
+  seenKeys: ReadonlySet<string>,
+): MissingAd[] {
+  const missing: MissingAd[] = [];
+  for (const local of locals) {
+    if (!answeredGroupIds.has(local.adGroupId)) continue;
+    if (seenKeys.has(key(local.adGroupId, local.externalId))) continue;
+    if (local.status !== AdStatus.ACTIVE) continue;
+    if (local.moderationStatus !== ModerationStatus.REJECTED) continue;
+    if (local.moderationRetries <= 0) continue;
+
+    const group = groupById.get(local.adGroupId);
+    if (!group) continue;
+    missing.push({
+      id: local.id,
+      externalId: local.externalId,
+      campaignId: group.campaignId,
+      campaignName: group.campaign.name,
+      retries: local.moderationRetries,
+      reason: local.moderationReason ?? '',
+      ad: { title: local.title, text: local.body },
+    });
+  }
+  return missing;
+}
+
+/**
  * Обходит объявления одного кабинета и приводит `Ad.moderationStatus` к тому,
  * что говорит площадка.
  *
@@ -143,7 +233,14 @@ export async function pollAdModeration(
   adapter: ChannelAdapter,
   options: PollOptions = {},
 ): Promise<PollResult> {
-  const result: PollResult = { polled: 0, updated: 0, orphaned: 0, reclaimed: 0, rejected: [] };
+  const result: PollResult = {
+    polled: 0,
+    updated: 0,
+    orphaned: 0,
+    reclaimed: 0,
+    rejected: [],
+    missing: [],
+  };
   const now = options.now ?? ((): Date => new Date());
   const staleBefore = new Date(now().getTime() - REWRITING_STALE_MS);
 
@@ -171,6 +268,8 @@ export async function pollAdModeration(
       id: true,
       adGroupId: true,
       externalId: true,
+      title: true,
+      body: true,
       status: true,
       moderationStatus: true,
       moderationReason: true,
@@ -182,12 +281,18 @@ export async function pollAdModeration(
 
   const remote = await adapter.listAds(ctx, [...groupByExternalId.keys()]);
 
+  const answeredGroupIds = new Set<string>();
+  const seenKeys = new Set<string>();
+
   for (const ad of remote) {
     const group = groupByExternalId.get(ad.adGroupExternalId);
     if (!group) {
       result.orphaned += 1;
       continue;
     }
+    answeredGroupIds.add(group.id);
+    seenKeys.add(key(group.id, ad.externalId));
+
     const local = localByKey.get(key(group.id, ad.externalId));
     if (!local) {
       result.orphaned += 1;
@@ -231,6 +336,17 @@ export async function pollAdModeration(
       reason: reason ?? '',
       ad: remoteText(ad),
     });
+  }
+
+  const groupById = new Map(groups.map((group) => [group.id, group]));
+  const missing = collectMissing(locals, groupById, answeredGroupIds, seenKeys);
+  if (missing.length > MAX_MISSING_ADS_PER_TARGET) {
+    log.warn(
+      { ...target, missing: missing.length, limit: MAX_MISSING_ADS_PER_TARGET },
+      'too many local ads absent from the listing, treating the listing as incomplete',
+    );
+  } else {
+    result.missing = missing;
   }
 
   return result;

@@ -23,7 +23,8 @@ export type EscalationCause =
   | 'rewrite_failed'
   | 'channel_unsupported'
   | 'apply_failed'
-  | 'external_id_taken';
+  | 'external_id_taken'
+  | 'ad_missing';
 
 const CAUSE_TITLE: Readonly<Record<EscalationCause, string>> = {
   retries_exhausted: 'три переписанных варианта подряд получили отказ',
@@ -31,6 +32,7 @@ const CAUSE_TITLE: Readonly<Record<EscalationCause, string>> = {
   channel_unsupported: 'канал не умеет обновлять текст объявления',
   apply_failed: 'отправка переписанного текста в кабинет не удалась',
   external_id_taken: 'внешний id нового объявления занят другой строкой в нашей БД',
+  ad_missing: 'объявления с таким id в кабинете больше нет',
 };
 
 export interface ModerationEscalation {

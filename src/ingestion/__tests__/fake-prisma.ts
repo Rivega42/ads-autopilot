@@ -26,6 +26,7 @@ export type ModelName =
   | 'keyword'
   | 'campaignStat'
   | 'searchQueryStat'
+  | 'changeLog'
   | 'errorLog';
 
 type Store = Record<ModelName, FakeRow[]>;
@@ -66,6 +67,7 @@ const DEFAULTS: Partial<Record<ModelName, FakeRow>> = {
     conversionSource: 'PLATFORM',
   },
   searchQueryStat: { impressions: 0, clicks: 0, spend: 0, conversions: 0, negated: false },
+  changeLog: { campaignId: null, prevValue: null, newValue: null, reason: null, provider: null },
   errorLog: { context: {} },
 };
 
@@ -287,6 +289,7 @@ export class FakePrisma {
     keyword: [],
     campaignStat: [],
     searchQueryStat: [],
+    changeLog: [],
     errorLog: [],
   };
 
@@ -302,6 +305,7 @@ export class FakePrisma {
   readonly keyword = new FakeModel('keyword', this.store, this.next);
   readonly campaignStat = new FakeModel('campaignStat', this.store, this.next);
   readonly searchQueryStat = new FakeModel('searchQueryStat', this.store, this.next);
+  readonly changeLog = new FakeModel('changeLog', this.store, this.next);
   readonly errorLog = new FakeModel('errorLog', this.store, this.next);
 
   seed(model: ModelName, rows: FakeRow[]): void {

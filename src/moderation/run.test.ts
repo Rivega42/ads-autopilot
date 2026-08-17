@@ -1,4 +1,4 @@
-import { ClientStatus, ModerationStatus, Provider } from '@prisma/client';
+import { AdStatus, ClientStatus, ModerationStatus, Provider } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
@@ -8,6 +8,7 @@ import { AuthError } from '@/lib/errors.js';
 import { FakeDb } from '@/moderation/__tests__/fake-db.js';
 import { fakeAdapter, queueRunner, remoteAd } from '@/moderation/__tests__/fakes.js';
 import type { ModerationEscalation } from '@/moderation/escalate.js';
+import { MISSING_ACTION } from '@/moderation/repair.js';
 import { listModerationTargets, runModerationCheck } from '@/moderation/run.js';
 import type { AdRewriteDraft, RejectionClassificationDraft } from '@/moderation/schema.js';
 
@@ -269,6 +270,69 @@ describe('runModerationCheck', () => {
     expect(summary.deferred).toBe(0);
     expect(escalations).toEqual([]);
     expect(db.adOf('ad1').title).toBe(REWRITE.title);
+  });
+
+  describe('строка без объявления в кабинете', () => {
+    /** Процесс умер между отправкой замены и записью нового id: id указывает в пустоту. */
+    function seedLostAd(): void {
+      db.seedAd({
+        id: 'lost',
+        adGroupId: 'g-cl1',
+        externalId: 'снесён-при-замене',
+        title: 'Ремонт стиральных машин',
+        body: 'Мастер приедет сегодня.',
+        moderationStatus: ModerationStatus.REJECTED,
+        moderationReason: 'Превосходная степень без подтверждения',
+        moderationRetries: 1,
+      });
+    }
+
+    it('зовёт человека и убирает строку из решений', async () => {
+      seedLostAd();
+
+      const summary = await runModerationCheck(options().opts);
+
+      expect(summary.missing).toBe(1);
+      const escalation = escalations.find((e) => e.cause === 'ad_missing');
+      expect(escalation).toMatchObject({
+        adId: 'lost',
+        adExternalId: 'снесён-при-замене',
+        clientName: 'Ромашка',
+        chatId: '111',
+      });
+      // Строка указывает на баннер, которого нет: пока она числится работающей, её
+      // показы считает A/B, а оптимизатор предлагает по ней паузу.
+      expect(db.adOf('lost').status).toBe(AdStatus.ARCHIVED);
+      expect(db.changeLogs.some((row) => row.action === MISSING_ACTION)).toBe(true);
+    });
+
+    it('второй прогон письмо не повторяет', async () => {
+      seedLostAd();
+      await runModerationCheck(options().opts);
+      escalations.length = 0;
+
+      const summary = await runModerationCheck(options().opts);
+
+      expect(summary.missing).toBe(0);
+      expect(escalations).toEqual([]);
+    });
+
+    it('недоставленное письмо не помечает строку разобранной', async () => {
+      seedLostAd();
+      const { opts } = options();
+
+      const summary = await runModerationCheck({
+        ...opts,
+        escalate: async (): Promise<void> => {
+          throw new Error('Telegram 502');
+        },
+      });
+
+      expect(summary.failures.some((f) => f.stage === 'missing:lost')).toBe(true);
+      // Строка не тронута — следующий прогон обязан попробовать ещё раз.
+      expect(db.adOf('lost').status).toBe(AdStatus.ACTIVE);
+      expect(db.changeLogs.some((row) => row.action === MISSING_ACTION)).toBe(false);
+    });
   });
 
   it('не трогает объявления, которые прямо сейчас переписывает другой прогон', async () => {

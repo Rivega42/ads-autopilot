@@ -5,8 +5,13 @@ import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 import { resolveDeps, type ModerationDb, type ModerationDeps } from '@/moderation/deps.js';
 import { describeFailure, recordFailure, type ModerationFailure } from '@/moderation/errors.js';
-import { pollAdModeration, type ModerationTarget, type RejectedAd } from '@/moderation/poll.js';
-import { repairRejectedAd, type RepairContext } from '@/moderation/repair.js';
+import {
+  pollAdModeration,
+  type MissingAd,
+  type ModerationTarget,
+  type RejectedAd,
+} from '@/moderation/poll.js';
+import { escalateMissingAd, repairRejectedAd, type RepairContext } from '@/moderation/repair.js';
 import { RULES_COUNT } from '@/moderation/rules.js';
 
 const log = logger.child({ scope: 'moderation:run' });
@@ -48,6 +53,8 @@ export interface ModerationRunSummary {
   statusUpdated: number;
   /** Строк, снятых с зависшего `REWRITING`. Ненулевое — след упавшего прогона. */
   reclaimed: number;
+  /** Строк, чьего объявления нет в листинге кабинета: по каждой позвали человека. */
+  missing: number;
   rejected: number;
   rewritten: number;
   /** Посчитано и показано планом, но не отправлено из-за dry-run. */
@@ -102,6 +109,7 @@ export async function runModerationCheck(
     adsPolled: 0,
     statusUpdated: 0,
     reclaimed: 0,
+    missing: 0,
     rejected: 0,
     rewritten: 0,
     planned: 0,
@@ -124,6 +132,7 @@ export async function runModerationCheck(
     {
       targets: summary.targets,
       ok: summary.ok,
+      missing: summary.missing,
       rejected: summary.rejected,
       rewritten: summary.rewritten,
       escalated: summary.escalated,
@@ -141,6 +150,7 @@ async function checkTarget(
   repairsLeft: number,
 ): Promise<number> {
   let rejected: RejectedAd[];
+  let missing: MissingAd[];
   let rc: RepairContext;
 
   try {
@@ -153,11 +163,24 @@ async function checkTarget(
     summary.reclaimed += poll.reclaimed;
     summary.rejected += poll.rejected.length;
     rejected = poll.rejected;
+    missing = poll.missing;
 
     rc = { deps, target, ctx, adapter, client: await loadClient(deps, target.clientId) };
   } catch (err) {
     await fail(deps, target, 'poll', err, summary);
     return repairsLeft;
+  }
+
+  // Потерянные строки идут до починок и мимо потолка: письмо не стоит ни вызова модели,
+  // ни операции в кабинете, а их число само по себе ограничено (`MAX_MISSING_ADS_PER_TARGET`).
+  for (const ad of missing) {
+    try {
+      const outcome = await escalateMissingAd(rc, ad);
+      tally(summary, outcome);
+      if (outcome.status === 'escalated') summary.missing += 1;
+    } catch (err) {
+      await fail(deps, target, `missing:${ad.id}`, err, summary);
+    }
   }
 
   let left = repairsLeft;
