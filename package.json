@@ -33,6 +33,7 @@
     "start:worker": "node dist/apps/worker.js",
     "start:bot": "node dist/apps/bot.js",
     "test:evals": "vitest run tests/ai-evals",
+    "test:e2e": "vitest run --config tests/e2e/vitest.config.ts",
     "cli": "tsx src/apps/cli.ts"
   },
   "dependencies": {

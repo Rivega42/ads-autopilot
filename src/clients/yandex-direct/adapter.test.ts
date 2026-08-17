@@ -116,6 +116,14 @@ describe('writes when dry run is off', () => {
     const res = await adapterOf(transport).addNegativeKeywords(ctxOf(false), '5', ['бесплатно']);
 
     expect(transport.calls).toHaveLength(2);
+    // Фикстура обязана отвечать ровно на то, что спросили: Директ отдаёт только
+    // запрошенные поля, а `campaignSchema` требует Name. Пока эта сверка
+    // отсутствовала, мок возвращал Name, которого в настоящем ответе не было бы,
+    // и разбор падал только в проде — минус-слова не доезжали вообще.
+    const requested = params(transport.calls[0])['FieldNames'] as string[];
+    expect(requested).toContain('Name');
+    expect(requested).toContain('NegativeKeywords');
+
     expect(params(transport.calls[1])['Campaigns']).toEqual([
       { Id: 5, NegativeKeywords: { Items: ['даром', 'бесплатно'] } },
     ]);

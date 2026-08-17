@@ -349,7 +349,10 @@ export class YandexDirectAdapter implements ChannelAdapter {
     // Полная замена — единственная операция в API, поэтому читаем текущий список.
     const [campaign] = await getCampaigns(http, {
       ids: [campaignId],
-      fieldNames: ['Id', 'NegativeKeywords'],
+      // `Name` запрашивается не потому, что он нужен здесь, а потому, что Директ
+      // отдаёт ровно запрошенные поля, а `campaignSchema` считает Name обязательным:
+      // без него разбор ответа падает и минус-слова не доезжают вообще.
+      fieldNames: ['Id', 'Name', 'NegativeKeywords'],
       textCampaignFieldNames: [],
       unifiedCampaignFieldNames: [],
     });

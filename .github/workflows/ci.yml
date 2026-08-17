@@ -93,6 +93,16 @@ jobs:
           DATABASE_URL: postgresql://test:test@localhost:5432/ads_autopilot_test
           REDIS_URL: redis://localhost:6379
 
+      # Сценарный прогон конвейера на тех же живых сервисах. Он ловит другое,
+      # чем юнит-тесты: первый же его запуск нашёл, что минус-слова не доезжали
+      # до Директа вообще — фикстура юнит-теста отвечала полем, которого в
+      # настоящем ответе не было бы. Свою базу заводит сам.
+      - run: pnpm test:e2e
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/ads_autopilot_test
+          E2E_DATABASE_URL: postgresql://test:test@localhost:5432/ads_e2e
+          E2E_REDIS_URL: redis://localhost:6379
+
   # Дашборд — отдельный пакет workspace: корневой vitest не подхватывает
   # web/lib/**/*.test.ts, а корневой typecheck не знает про JSX. Без этой job'ы
   # правки в web/ не проверялись ничем.
