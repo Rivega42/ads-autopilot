@@ -5,4 +5,7 @@ allowBuilds:
   '@prisma/engines': true
   esbuild: true
   msgpackr-extract: false
+  # msw ставит свой service worker в public/ — он нужен только браузерным
+  # сценариям, а у нас перехват идёт в Node. Скрипт установки не запускаем.
+  msw: false
   prisma: true

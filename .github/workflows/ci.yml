@@ -1,14 +1,25 @@
 name: CI
 
+# main в push-триггерах нет намеренно: там этот же воркфлоу вызывает publish.yml
+# как reusable (`uses: ./.github/workflows/ci.yml`) — он же гейт публикации. Два
+# триггера дали бы два одинаковых прогона на каждый коммит в main. Заодно
+# проверки появились на тегах v*, где их не было вовсе: publish на теге тоже
+# сначала зовёт этот воркфлоу.
 on:
   push:
-    branches: [main, develop]
+    branches: [develop]
   pull_request:
     branches: [main, develop]
+  workflow_call:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Отменяем только устаревшие прогоны PR. Вызванный из publish.yml прогон —
+  # это гейт публикации, и отмена на полпути читалась бы как красный CI.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint-and-typecheck:
@@ -118,12 +129,12 @@ jobs:
   # Образ ломается иначе, чем тесты: alias'ы `@/`, отсутствие workspace-манифестов
   # и незагенерённый клиент Prisma видны только при реальной сборке.
   #
-  # На push в main эта job пропускается: там ровно те же две цели собирает и
-  # публикует publish.yml, и второй прогон — это лишние ~10 минут ради образа,
-  # который никуда не поедет. На PR и на develop она остаётся единственной
-  # проверкой сборки, и права на реестр ей не нужны.
+  # На main и на тегах эта job пропускается: там ровно те же две цели сразу после
+  # проверок собирает publish.yml, и второй прогон — это лишние ~10 минут ради
+  # образа, который никуда не поедет. На PR и на develop она остаётся
+  # единственной проверкой сборки, и права на реестр ей не нужны.
   docker:
-    if: github.ref != 'refs/heads/main'
+    if: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,8 +1,11 @@
 node_modules/
 dist/
 .env
-.env.local
-.env.*.local
+# Всё, что рядом с .env: web/.env.local, дампы, временные копии вида .env.aB12Cd,
+# которые rollback.sh создаёт при правке. Каталог деплоя — это git-checkout, и
+# такая копия секретов иначе попадает в `git status` и в `git add -A`.
+.env.*
+!.env.example
 *.log
 .DS_Store
 .vscode/
