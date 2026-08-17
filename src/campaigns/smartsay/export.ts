@@ -160,6 +160,22 @@ function structureMarkdown(): string {
     lines.push('', `## ${campaign.name}`, '', campaign.note, '');
     lines.push(`**Регионы:** ${campaign.regions.join(', ')}`, '');
 
+    const modifiers = campaign.bidModifiers ?? [];
+    if (modifiers.length > 0) {
+      lines.push('**Корректировки ставок:**', '');
+      for (const modifier of modifiers) {
+        const target =
+          modifier.kind === 'region'
+            ? `регион «${modifier.region}»`
+            : modifier.kind === 'age'
+              ? `возраст ${modifier.age}`
+              : 'мобильные';
+        const shift = modifier.percent === 0 ? 'не показывать' : `${modifier.percent - 100}%`;
+        lines.push(`- ${target}: ${shift} — ${modifier.note}`);
+      }
+      lines.push('');
+    }
+
     for (const group of campaign.groups) {
       lines.push(`### ${group.name}`, '');
       if (group.note !== undefined) lines.push(`> ${group.note}`, '');

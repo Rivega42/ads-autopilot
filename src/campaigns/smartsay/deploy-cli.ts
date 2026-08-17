@@ -6,6 +6,7 @@
  *   pnpm campaign:deploy --apply --counter 123   заливка в production
  *   pnpm campaign:deploy --priority 1            только первый эшелон
  *   pnpm campaign:deploy --no-images             без загрузки картинок
+ *   pnpm campaign:deploy --apply --force         залить поверх, не проверяя дубли
  *
  * По умолчанию — холостой прогон. Реальная отправка только по явному --apply:
  * промахнуться мимо флага дороже, чем лишний раз его напечатать.
@@ -72,6 +73,7 @@ async function main(): Promise<void> {
     ...(counter === undefined ? {} : { counterIds: [Number.parseInt(counter, 10)] }),
     ...(priorities === undefined ? {} : { onlyPriority: priorities }),
     ...(flag('no-images') ? {} : { imagesByCampaign: loadCreatives() }),
+    ...(flag('force') ? { skipExisting: false } : {}),
     log: out,
   };
 

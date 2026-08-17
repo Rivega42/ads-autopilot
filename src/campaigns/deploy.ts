@@ -81,6 +81,13 @@ export interface DeployOptions {
   readonly urlParams?: string;
   readonly onlyPriority?: readonly (1 | 2 | 3)[];
   /**
+   * Пропускать кампании, которые в аккаунте уже есть.
+   * Заливка не транзакционна: упади она на середине из-за исчерпанных баллов
+   * или отказа Директа — повторный запуск без этой проверки создал бы вторые
+   * копии уже залитых кампаний, и чистить пришлось бы руками.
+   */
+  readonly skipExisting?: boolean;
+  /**
    * ID условий ретаргетинга по имени кампании. Их источник — сегменты Метрики,
    * поэтому до установки счётчика их не существует.
    */
@@ -129,6 +136,19 @@ function landingUrl(site: string, path: string, urlParams: string | undefined): 
   return `${site}${path}${separator}${urlParams}`;
 }
 
+interface CampaignsGetResult {
+  readonly Campaigns?: readonly { readonly Name: string }[];
+}
+
+/** Имена уже залитых кампаний: защита от дублей при повторном запуске. */
+async function fetchCampaignNames(transport: Transport): Promise<Set<string>> {
+  const result = await transport.request<CampaignsGetResult>('campaigns', 'get', {
+    SelectionCriteria: {},
+    FieldNames: ['Id', 'Name'],
+  });
+  return new Set((result.Campaigns ?? []).map((c) => c.Name));
+}
+
 interface AddResult {
   readonly AddResults: readonly { readonly Id?: number; readonly Errors?: unknown[] }[];
 }
@@ -155,6 +175,12 @@ export async function deployAccount(
       ? account.campaigns
       : account.campaigns.filter((c) => options.onlyPriority?.includes(c.priority) === true);
 
+  const existingNames =
+    options.skipExisting === false ? new Set<string>() : await fetchCampaignNames(transport);
+  if (existingNames.size > 0) {
+    log(`В аккаунте уже есть кампаний: ${existingNames.size}`);
+  }
+
   const regionNames = [...new Set(wanted.flatMap((c) => c.regions))];
   const regionIds = await resolveRegionIds(transport, regionNames);
   log(`Регионы разрешены: ${regionNames.length}`);
@@ -171,6 +197,11 @@ export async function deployAccount(
   let adCount = 0;
 
   for (const campaign of wanted) {
+    if (existingNames.has(campaign.name)) {
+      log(`пропуск: ${campaign.name} — уже есть в аккаунте`);
+      continue;
+    }
+
     const retargetingLists = options.retargetingListIds?.[campaign.name] ?? [];
     if (campaign.placement === 'retargeting' && retargetingLists.length === 0) {
       // У группы должно быть хоть одно условие показа. Ретаргетинг без сегментов
@@ -304,7 +335,10 @@ export class DryRunTransport implements Transport {
   private readonly recorded: RecordedCall[] = [];
   private nextId = 1_000_001;
 
-  constructor(private readonly geoRegions: readonly Record<string, unknown>[] = []) {}
+  constructor(
+    private readonly geoRegions: readonly Record<string, unknown>[] = [],
+    private readonly existingCampaigns: readonly { readonly Name: string }[] = [],
+  ) {}
 
   /**
    * Холостой прогон без доступа к API: справочник регионов подменяется заглушкой
@@ -335,6 +369,9 @@ export class DryRunTransport implements Transport {
 
     if (service === 'dictionaries') {
       return { GeoRegions: this.geoRegions } as TResult;
+    }
+    if (method === 'get') {
+      return { Campaigns: this.existingCampaigns } as TResult;
     }
 
     const collection = Object.values(params)[0];

@@ -82,7 +82,9 @@ describe('deployAccount', () => {
 
   it('создаёт кампании остановленными: в payload нет включения показов', async () => {
     const result = await deploy();
-    const campaignCalls = result.calls.filter((c) => c.service === 'campaigns');
+    const campaignCalls = result.calls.filter(
+      (c) => c.service === 'campaigns' && c.method === 'add',
+    );
 
     for (const call of campaignCalls) {
       expect(JSON.stringify(call.params)).not.toContain('"State":"ON"');
@@ -93,7 +95,7 @@ describe('deployAccount', () => {
   it('выключает сети в поисковых кампаниях и поиск в сетевых', async () => {
     const result = await deploy();
     const payloads = result.calls
-      .filter((c) => c.service === 'campaigns')
+      .filter((c) => c.service === 'campaigns' && c.method === 'add')
       .map((c) => (c.params.Campaigns as Record<string, unknown>[])[0]);
 
     for (const payload of payloads) {
@@ -115,7 +117,7 @@ describe('deployAccount', () => {
   it('переводит недельный бюджет в микроединицы', async () => {
     const result = await deploy([1]);
     const adults = result.calls
-      .filter((c) => c.service === 'campaigns')
+      .filter((c) => c.service === 'campaigns' && c.method === 'add')
       .map((c) => (c.params.Campaigns as Record<string, unknown>[])[0])
       .find((p) => (p?.Name as string).includes('Взрослые'));
 
@@ -129,10 +131,8 @@ describe('deployAccount', () => {
     const result = await deploy([1]);
 
     const campaignPayload = (
-      result.calls.find((c) => c.service === 'campaigns')?.params.Campaigns as Record<
-        string,
-        unknown
-      >[]
+      result.calls.find((c) => c.service === 'campaigns' && c.method === 'add')?.params
+        .Campaigns as Record<string, unknown>[]
     )[0];
     expect((campaignPayload?.TextCampaign as Record<string, unknown>).CounterIds).toEqual({
       Items: [99999999],
@@ -153,6 +153,39 @@ describe('deployAccount', () => {
       (c) => c.priority === 1 && c.placement !== 'retargeting',
     );
     expect(result.campaigns).toHaveLength(firstWave.length);
+  });
+
+  it('не заливает кампанию повторно, если она уже есть в аккаунте', async () => {
+    const already = SMARTSAY_ACCOUNT.campaigns.filter((c) => c.priority === 1).slice(0, 2);
+    const transport = new DryRunTransport(
+      GEO,
+      already.map((c) => ({ Name: c.name })),
+    );
+
+    const result = await deployAccount(transport, SMARTSAY_ACCOUNT, {
+      ...OPTIONS,
+      onlyPriority: [1],
+    });
+
+    for (const skipped of already) {
+      expect(result.campaigns.some((c) => c.name === skipped.name)).toBe(false);
+    }
+    expect(
+      result.calls.filter((c) => c.service === 'campaigns' && c.method === 'add'),
+    ).toHaveLength(result.campaigns.length);
+  });
+
+  it('по skipExisting: false заливает поверх, не спрашивая аккаунт', async () => {
+    const transport = new DryRunTransport(GEO, [{ Name: 'SS | Поиск | Бренд' }]);
+
+    const result = await deployAccount(transport, SMARTSAY_ACCOUNT, {
+      ...OPTIONS,
+      onlyPriority: [1],
+      skipExisting: false,
+    });
+
+    expect(result.campaigns.some((c) => c.name === 'SS | Поиск | Бренд')).toBe(true);
+    expect(result.calls.some((c) => c.method === 'get' && c.service === 'campaigns')).toBe(false);
   });
 
   it('пропускает ретаргетинг, пока нет сегментов Метрики', async () => {
@@ -211,7 +244,7 @@ describe('deployAccount', () => {
 
   it('создаёт объекты в порядке зависимостей: кампания раньше групп, группы раньше фраз', async () => {
     const result = await deploy([1]);
-    const order = result.calls.map((c) => c.service);
+    const order = result.calls.filter((c) => c.method === 'add').map((c) => c.service);
     const at = (service: string) => order.indexOf(service);
 
     // Набор быстрых ссылок нужен объявлениям, поэтому создаётся до всего.
