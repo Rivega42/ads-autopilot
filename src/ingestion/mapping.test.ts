@@ -53,6 +53,14 @@ describe('статусы площадок', () => {
     expect(toCampaignStatus('MODERATION')).toBe('DRAFT');
   });
 
+  it('остановку по мониторингу считает паузой, а не работой', () => {
+    // Директ гасит показы сам, когда сайт не отвечает. Пока значения не было
+    // в словаре, оно уходило в дефолт ACTIVE, и оптимизатор двигал ставки
+    // кампании, которая уже ничего не откручивает.
+    expect(toCampaignStatus('OFF_BY_MONITORING')).toBe('PAUSED');
+    expect(toAdGroupStatus('OFF_BY_MONITORING')).toBe('PAUSED');
+  });
+
   it('понимает словарь VK', () => {
     expect(toCampaignStatus('active')).toBe('ACTIVE');
     expect(toCampaignStatus('blocked')).toBe('PAUSED');

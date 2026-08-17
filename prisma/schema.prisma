@@ -49,6 +49,17 @@ enum AdGroupStatus {
   ARCHIVED
 }
 
+/// Отдельный enum, а не переиспользование AdGroupStatus: набор значений сейчас
+/// совпадает, но объявление — единственный уровень, у которого жизненный цикл
+/// уже соседствует с модерацией, и первое же расхождение (DRAFT до отправки в
+/// кабинет) иначе стало бы правкой статуса группы. Так же разведены ClientStatus
+/// и KeywordStatus при одинаковом наборе значений.
+enum AdStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
 enum AdFormat {
   TEXT
   IMAGE
@@ -232,6 +243,13 @@ model Ad {
   imageUrl          String?
   videoUrl          String?
   cta               String?
+  /// Крутится ли объявление в кабинете. Это не то же самое, что moderationStatus:
+  /// одобренное модерацией объявление бывает выключено, а выключенное — отклонено.
+  /// Источник — листинг площадки (`Ad.State` у Директа, `banner.status` у VK);
+  /// собственные паузы сюда не пишутся, их подхватывает ближайший синк сущностей.
+  /// ACTIVE по умолчанию — «статус неизвестен, считаем работающим»: спрятать живое
+  /// объявление из A/B и отчётов дороже, чем лишний раз предложить его паузу.
+  status            AdStatus         @default(ACTIVE)
   moderationStatus  ModerationStatus @default(PENDING)
   moderationReason  String?
   moderationRetries Int              @default(0)
@@ -244,6 +262,9 @@ model Ad {
   creative Creative? @relation(fields: [creativeId], references: [id], onDelete: SetNull)
 
   @@unique([adGroupId, externalId])
+  /// Составной, а не отдельный по status: и A/B (`creatives/ab`), и оптимизатор
+  /// читают объявления группы с фильтром по статусу, а по одному статусу выборки нет.
+  @@index([adGroupId, status])
   @@index([moderationStatus])
 }
 

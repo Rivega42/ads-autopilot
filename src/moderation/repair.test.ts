@@ -154,6 +154,15 @@ describe('repairRejectedAd: штатное переписывание', () => {
     );
   });
 
+  it('не трогает внешний id там, где площадка правит объявление на месте', async () => {
+    const h = harness();
+
+    await repairRejectedAd(h.rc, rejected());
+
+    // Директ отвечает на Ads.update без нового id — подменять `Ad.externalId` нечем.
+    expect(db.adOf('ad1').externalId).toBe('9');
+  });
+
   it('пишет в ChangeLog, чем и по каким правилам заменён текст', async () => {
     await repairRejectedAd(harness().rc, rejected());
 
@@ -308,26 +317,38 @@ describe('repairRejectedAd: эскалация', () => {
 });
 
 /** Стенд VK: подменяется только транспорт, адаптер настоящий. */
-function vkHarness(): { adapter: VkAdsAdapter; calls: { method: string; url: string }[] } {
+function vkHarness(over: { deleteFails?: boolean } = {}): {
+  adapter: VkAdsAdapter;
+  calls: { method: string; url: string }[];
+} {
   const calls: { method: string; url: string }[] = [];
   const transport: VkTransport = async (config) => {
     const method = config.method ?? 'GET';
-    calls.push({ method, url: config.url ?? '' });
-    const data =
-      method === 'GET'
-        ? {
-            count: 1,
-            items: [
-              {
-                id: 9,
-                ad_group_id: 4,
-                status: 'rejected',
-                textblocks: { title_25: { text: 'Лучший ремонт' } },
-                url: 'https://example.ru',
-              },
-            ],
-          }
-        : { id: 10, ad_group_id: 4 };
+    const url = config.url ?? '';
+    calls.push({ method, url });
+    if (method === 'GET') {
+      return {
+        status: 200,
+        data: {
+          count: 1,
+          items: [
+            {
+              id: 9,
+              ad_group_id: 4,
+              status: 'rejected',
+              textblocks: { title_25: { text: 'Лучший ремонт' } },
+              url: 'https://example.ru',
+            },
+          ],
+        },
+        headers: {},
+      };
+    }
+    if (method === 'DELETE' && over.deleteFails) {
+      return { status: 500, data: { error: { message: 'banner is locked' } }, headers: {} };
+    }
+    // mass_action — это гашение осиротевшего баннера внутри адаптера, не создание.
+    const data = url.includes('mass_action') ? [{ id: 9 }] : { id: 10, ad_group_id: 4 };
     return { status: 200, data, headers: {} };
   };
   const adapter = new VkAdsAdapter({
@@ -368,6 +389,58 @@ describe('repairRejectedAd в VK', () => {
       `DELETE ${VK_PATHS.banners}/9.json`,
     ]);
     expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.PENDING);
+  });
+
+  it('переводит Ad.externalId на созданный баннер', async () => {
+    const vk = vkHarness();
+    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, rewrites: [VK_REWRITE] });
+
+    await repairRejectedAd(h.rc, rejected());
+
+    // Старый баннер удалён: строка со старым id не сопоставилась бы ни со статистикой
+    // (`ingestion/stats.ts` индексирует по externalId), ни с опросом модерации.
+    expect(db.adOf('ad1').externalId).toBe('10');
+    expect(db.changeLogs.find((row) => row.action === REWRITE_ACTION)?.newValue).toMatchObject({
+      externalIdBefore: '9',
+      externalIdAfter: '10',
+    });
+  });
+
+  it('при частичном отказе сохраняет id уже созданного баннера', async () => {
+    const vk = vkHarness({ deleteFails: true });
+    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, rewrites: [VK_REWRITE] });
+
+    await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow(/replaced by 10/);
+
+    const ad = db.adOf('ad1');
+    // Замена уже показывается и тратит бюджет — потеряв её id, мы потеряли бы
+    // единственное живое объявление группы.
+    expect(ad.externalId).toBe('10');
+    expect(ad.moderationStatus).toBe(ModerationStatus.REJECTED);
+    expect(ad.moderationRetries).toBe(1);
+    // Человеку нужен id того баннера, который сейчас крутится, а не удаляемого.
+    expect(escalations[0]).toMatchObject({ cause: 'apply_failed', adExternalId: '10' });
+    expect(escalations[0]?.problems.join(' ')).toContain('10');
+  });
+
+  it('не роняет прогон, когда новый id уже занят другой строкой', async () => {
+    db.seedAd({ id: 'ad2', adGroupId: 'g1', externalId: '10' });
+    const vk = vkHarness();
+    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, rewrites: [VK_REWRITE] });
+
+    const outcome = await repairRejectedAd(h.rc, rejected());
+
+    expect(outcome).toMatchObject({ status: 'rewritten' });
+    const ad = db.adOf('ad1');
+    // Слить две строки автоматика не вправе, поэтому id остаётся старым, но тексты
+    // и статус сохраняются: иначе объявление зависло бы в REWRITING.
+    expect(ad.externalId).toBe('9');
+    expect(ad.title).toBe(VK_REWRITE.title);
+    expect(ad.moderationStatus).toBe(ModerationStatus.PENDING);
+    // Молча терять расхождение нельзя: строка в ErrorLog поднимает алерт Роману.
+    expect(db.errorLogs).toHaveLength(1);
+    expect(db.errorLogs[0]?.scope).toBe('moderation:external-id:ad1');
+    expect(db.errorLogs[0]?.message).toContain('10');
   });
 
   it('при dryRun не отправляет ни одной записи и ничего не пишет в БД', async () => {

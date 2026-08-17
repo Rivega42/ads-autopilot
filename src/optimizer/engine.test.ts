@@ -425,7 +425,7 @@ describe('runOptimizer', () => {
 
   it('carries the title of an ad into the decision', async () => {
     const db = createDb({
-      ads: [{ id: 'ad-1', title: 'Ремонт под ключ за 30 дней' }],
+      ads: [{ id: 'ad-1', title: 'Ремонт под ключ за 30 дней', status: 'ACTIVE' }],
       stats: statsOver(
         'ad-1',
         3,
@@ -436,6 +436,34 @@ describe('runOptimizer', () => {
     const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW });
 
     expect(run.allowed[0]?.label).toBe('Ремонт под ключ за 30 дней');
+  });
+
+  it.each(['PAUSED', 'ARCHIVED'])(
+    'не предлагает паузу объявлению со статусом %s',
+    async (status) => {
+      const db = createDb({
+        ads: [{ id: 'ad-1', title: 'Ремонт под ключ за 30 дней', status }],
+        stats: statsOver(
+          'ad-1',
+          3,
+          { impressions: 600, clicks: 30, spend: 6000, conversions: 0 },
+          'AD',
+        ),
+      });
+      const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW });
+
+      expect(run.proposed).toEqual([]);
+    },
+  );
+
+  it('не предлагает паузу уже выключенной фразе', async () => {
+    const db = createDb({
+      keywords: [{ id: 'kw-1', phrase: 'ремонт', bid: '10.00', status: 'PAUSED' }],
+      stats: statsOver('kw-1', 3, { impressions: 600, clicks: 30, spend: 6000, conversions: 0 }),
+    });
+    const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW });
+
+    expect(run.proposed.filter((d) => d.action === 'PAUSE')).toEqual([]);
   });
 
   it('skips the child lookups when the campaign has no ad groups', async () => {

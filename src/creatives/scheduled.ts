@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto';
 
-import { AdGroupStatus, CampaignStatus, ClientStatus, Prisma, type Provider } from '@prisma/client';
+import {
+  AdGroupStatus,
+  AdStatus,
+  CampaignStatus,
+  ClientStatus,
+  Prisma,
+  type Provider,
+} from '@prisma/client';
 
 import { evaluateAdExperiment, type AdExperiment } from './ab/experiment.js';
 import { losingVariantIds, type AbTestConfig } from './ab/select.js';
@@ -200,6 +207,10 @@ async function findExperimentGroups(clientId?: string): Promise<GroupRow[]> {
     by: ['adGroupId'],
     where: {
       llmVariant: { not: null },
+      // Тот же фильтр, что и в `evaluateAdExperiment`: иначе группа, где из двух
+      // вариантов один выключен, каждую ночь считалась бы экспериментом и уходила
+      // в оценку ради заведомого «сравнивать не с чем».
+      status: AdStatus.ACTIVE,
       adGroup: {
         status: AdGroupStatus.ACTIVE,
         campaign: {

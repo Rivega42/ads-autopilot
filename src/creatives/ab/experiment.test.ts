@@ -1,4 +1,4 @@
-import { StatEntityType } from '@prisma/client';
+import { AdStatus, StatEntityType } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 
 import { evaluateAdExperiment, TEXT_REWRITE_ACTIONS, type ExperimentStore } from './experiment.js';
@@ -11,6 +11,8 @@ interface AdRow {
   llmVariant: string | null;
   title?: string;
   createdAt?: Date;
+  /** Не задан — объявление работает: так же читает строку и Postgres, где колонка NOT NULL. */
+  status?: AdStatus;
 }
 
 interface StatRow {
@@ -28,6 +30,7 @@ interface ChangeRow {
 
 interface Where {
   llmVariant?: unknown;
+  status?: AdStatus;
   action?: { in: string[] };
   appliedAt?: { gte: Date };
   entityId?: { in: string[] };
@@ -44,9 +47,14 @@ function storeOf(
     ad: {
       findMany: vi.fn((args: { where: Where }) => {
         capturedAd = args.where;
-        // Фильтр «только наши варианты» обязан работать в БД, но мок обязан
-        // вести себя так же, иначе тест проверял бы не то, что уедет в Postgres.
-        const rows = args.where.llmVariant ? ads.filter((ad) => ad.llmVariant !== null) : ads;
+        // Фильтры «только наши варианты» и «только работающие» обязаны работать в БД,
+        // но мок обязан вести себя так же, иначе тест проверял бы не то, что уедет в Postgres.
+        const byVariant = args.where.llmVariant ? ads.filter((ad) => ad.llmVariant !== null) : ads;
+        const wanted = args.where.status;
+        const rows =
+          wanted === undefined
+            ? byVariant
+            : byVariant.filter((ad) => (ad.status ?? AdStatus.ACTIVE) === wanted);
         return Promise.resolve(rows);
       }),
     },
@@ -124,6 +132,27 @@ describe('evaluateAdExperiment', () => {
 
     expect(adWhere()).toMatchObject({ llmVariant: { not: null } });
     expect([...result.adsByVariant.keys()]).toEqual(['v-a']);
+    expect(result.decision.reasonCode).toBe('NOT_ENOUGH_VARIANTS');
+  });
+
+  it('выключенное объявление участником эксперимента не считает', async () => {
+    const { db, adWhere } = storeOf(
+      [
+        { id: 'ad-1', llmVariant: 'v-a' },
+        { id: 'ad-2', llmVariant: 'v-b', status: AdStatus.PAUSED },
+      ],
+      [
+        { entityId: 'ad-1', impressions: 1000, clicks: 50 },
+        { entityId: 'ad-2', impressions: 1000, clicks: 10 },
+      ],
+    );
+
+    const result = await evaluateAdExperiment('ag-1', { from: FROM, to: TO, db });
+
+    expect(adWhere()).toMatchObject({ status: AdStatus.ACTIVE });
+    expect([...result.adsByVariant.keys()]).toEqual(['v-a']);
+    // Статистика выключенного варианта не должна попасть в счётчики победителя.
+    expect(result.decision.variants.map((v) => v.variantId)).toEqual(['v-a']);
     expect(result.decision.reasonCode).toBe('NOT_ENOUGH_VARIANTS');
   });
 

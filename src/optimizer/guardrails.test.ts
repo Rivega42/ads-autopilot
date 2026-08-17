@@ -349,6 +349,7 @@ describe('property: no rule output escapes the guardrails', () => {
       conversions: Math.floor(random() * 5),
       days: Math.floor(random() * 10),
       currentBid: random() < 0.15 ? null : Math.round(random() * 50000) / 100,
+      status: 'ACTIVE',
     }));
 
     const searchQueries: SearchQueryMetrics[] = Array.from(

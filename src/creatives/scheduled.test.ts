@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { AdStatus, Prisma } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as ApprovalModule from '@/approval/index.js';
@@ -17,6 +17,7 @@ interface AdRow {
   externalId: string;
   title: string;
   llmVariant: string | null;
+  status: AdStatus;
 }
 
 interface StatRow {
@@ -74,11 +75,12 @@ const h = vi.hoisted(() => {
         ),
       },
       ad: {
-        groupBy: vi.fn(async (args: { where: { llmVariant?: unknown } }) => {
+        groupBy: vi.fn(async (args: { where: { llmVariant?: unknown; status?: AdStatus } }) => {
           state.groupByArgs = args;
           const counted = new Map<string, number>();
           for (const ad of state.ads as AdRow[]) {
             if (args.where.llmVariant && ad.llmVariant === null) continue;
+            if (args.where.status !== undefined && ad.status !== args.where.status) continue;
             counted.set(ad.adGroupId, (counted.get(ad.adGroupId) ?? 0) + 1);
           }
           return [...counted]
@@ -91,12 +93,14 @@ const h = vi.hoisted(() => {
             id?: { in: string[] };
             externalId?: { in: string[] };
             llmVariant?: unknown;
+            status?: AdStatus;
           };
           const ads = state.ads as AdRow[];
           if (where.adGroupId !== undefined) {
             return ads
               .filter((ad) => ad.adGroupId === where.adGroupId)
               .filter((ad) => !where.llmVariant || ad.llmVariant !== null)
+              .filter((ad) => where.status === undefined || ad.status === where.status)
               .map((ad) => ({ id: ad.id, llmVariant: ad.llmVariant, title: ad.title }));
           }
           if (where.externalId !== undefined) {
@@ -180,13 +184,19 @@ function group(overrides: Partial<GroupRow> = {}): GroupRow {
   };
 }
 
-function ad(id: string, variant: string | null, adGroupId = 'ag-1'): AdRow {
+function ad(
+  id: string,
+  variant: string | null,
+  adGroupId = 'ag-1',
+  status: AdStatus = AdStatus.ACTIVE,
+): AdRow {
   return {
     id,
     adGroupId,
     externalId: `ext-${id}`,
     title: `Заголовок ${id}`,
     llmVariant: variant,
+    status,
   };
 }
 
@@ -328,10 +338,20 @@ describe('runAbEvaluation: чужие объявления', () => {
       by: ['adGroupId'],
       where: {
         llmVariant: { not: null },
+        status: 'ACTIVE',
         adGroup: { status: 'ACTIVE', campaign: { status: 'ACTIVE', client: { status: 'ACTIVE' } } },
       },
       having: { adGroupId: { _count: { gte: 2 } } },
     });
+  });
+
+  it('выключенное объявление в кандидаты не считается', async () => {
+    h.state.ads = [ad('ad-1', 'v-a'), ad('ad-2', 'v-b', 'ag-1', AdStatus.PAUSED)];
+
+    const summary = await runAbEvaluation({ dryRun: false, now: NOW });
+
+    expect(summary.adGroups).toBe(0);
+    expect(h.createApproval).not.toHaveBeenCalled();
   });
 
   it('фильтр по клиенту доезжает до запроса', async () => {

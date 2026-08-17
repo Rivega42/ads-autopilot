@@ -83,12 +83,26 @@ interface AdWhere {
 }
 
 interface AdData {
+  externalId?: string;
   title?: string;
   body?: string;
   moderationStatus?: ModerationStatus;
   moderationReason?: string | null;
   moderationRetries?: number;
   llmVariant?: string | null;
+}
+
+/**
+ * Ответ Postgres на нарушение `@@unique([adGroupId, externalId])` в том виде, в каком
+ * его отдаёт Prisma. Код здесь важнее класса: вызывающий код опознаёт конфликт по нему.
+ */
+export class FakeUniqueViolation extends Error {
+  readonly code = 'P2002';
+
+  constructor(target: string) {
+    super(`Unique constraint failed on the fields: (${target})`);
+    this.name = 'PrismaClientKnownRequestError';
+  }
 }
 
 function matchStatus(filter: StatusFilter | undefined, value: ModerationStatus): boolean {
@@ -213,6 +227,16 @@ export class FakeDb {
 
     update: async (args: { where: { id: string }; data: AdData }): Promise<AdRow> => {
       const ad = this.adOf(args.where.id);
+      const externalId = args.data.externalId;
+      if (
+        externalId !== undefined &&
+        this.ads.some(
+          (row) =>
+            row.id !== ad.id && row.adGroupId === ad.adGroupId && row.externalId === externalId,
+        )
+      ) {
+        throw new FakeUniqueViolation('adGroupId, externalId');
+      }
       Object.assign(ad, args.data, { updatedAt: new Date() });
       return { ...ad };
     },

@@ -58,6 +58,10 @@ const CAMPAIGN_STATUS: Record<string, CampaignStatus> = {
   PREACCEPTED: CampaignStatus.ACTIVE,
   SERVING: CampaignStatus.ACTIVE,
   OFF: CampaignStatus.PAUSED,
+  // Директ сам остановил показы: сайт не отвечает. Реклама не крутится, поэтому
+  // ACTIVE по умолчанию тут врал бы — оптимизатор считал бы кампанию работающей
+  // и двигал ставки по цифрам, которых больше не будет.
+  OFF_BY_MONITORING: CampaignStatus.PAUSED,
   PAUSED: CampaignStatus.PAUSED,
   SUSPENDED: CampaignStatus.PAUSED,
   STOPPED: CampaignStatus.PAUSED,
@@ -77,6 +81,9 @@ const ADGROUP_STATUS: Record<string, AdGroupStatus> = {
   ACCEPTED: AdGroupStatus.ACTIVE,
   PREACCEPTED: AdGroupStatus.ACTIVE,
   OFF: AdGroupStatus.PAUSED,
+  // Значение приходит от кампании, но эту же таблицу переиспользуют группы и
+  // объявления: пусть лучше сработает лишний раз, чем показы сочтутся живыми.
+  OFF_BY_MONITORING: AdGroupStatus.PAUSED,
   PAUSED: AdGroupStatus.PAUSED,
   SUSPENDED: AdGroupStatus.PAUSED,
   BLOCKED: AdGroupStatus.PAUSED,

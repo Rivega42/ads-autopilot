@@ -1,5 +1,6 @@
 import {
   AdGroupStatus,
+  AdStatus,
   CampaignStatus,
   KeywordStatus,
   MatchType,
@@ -219,9 +220,10 @@ async function syncAdGroups(
 /**
  * Объявления: только upsert.
  *
- * У модели `Ad` нет колонки жизненного цикла — единственный статус там про
- * модерацию, и писать в него «архив» значило бы соврать про решение площадки.
- * Пропавшее объявление остаётся в БД как есть; см. отчёт по задаче.
+ * Пропавшее из листинга объявление, в отличие от кампании и группы, в архив не
+ * уезжает: у объявлений нет постраничного разреза, по которому предохранители
+ * `archiveMissing` отличают чистку кабинета от оборванной пагинации. `Ad.status`
+ * при этом обновляется на каждом прогоне — но только по тому, что кабинет прислал.
  */
 async function syncAds(
   db: PrismaClient,
@@ -257,6 +259,7 @@ function adFields(ad: RemoteAd): {
   title: string;
   body: string;
   imageUrl: string | null;
+  status: AdStatus;
   moderationStatus: ReturnType<typeof toModerationStatus>;
   moderationReason: string | null;
 } {
@@ -265,9 +268,28 @@ function adFields(ad: RemoteAd): {
     title: ad.title,
     body: ad.text,
     imageUrl: ad.imageUrl ?? null,
+    status: toAdStatus(ad.status),
     moderationStatus: toModerationStatus(ad.moderationStatus),
     moderationReason: ad.moderationReason ?? null,
   };
+}
+
+const AD_STATUS_BY_ADGROUP_STATUS: Record<AdGroupStatus, AdStatus> = {
+  [AdGroupStatus.ACTIVE]: AdStatus.ACTIVE,
+  [AdGroupStatus.PAUSED]: AdStatus.PAUSED,
+  [AdGroupStatus.ARCHIVED]: AdStatus.ARCHIVED,
+};
+
+/**
+ * Статус объявления из кабинета.
+ *
+ * Разбор переиспользован у группы: и Директ (`Ad.State`), и VK (`banner.status`)
+ * присылают на всех уровнях одни и те же слова (ON/OFF/SUSPENDED/ARCHIVED), а вторая
+ * копия таблицы соответствий разъезжалась бы с первой молча. Перевод в свой enum —
+ * плата за то, что уровни могут разойтись значениями, не ломая друг друга.
+ */
+function toAdStatus(raw: string): AdStatus {
+  return AD_STATUS_BY_ADGROUP_STATUS[toAdGroupStatus(raw)];
 }
 
 /**

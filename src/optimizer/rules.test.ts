@@ -22,6 +22,7 @@ function entity(overrides: Partial<EntityMetrics> = {}): EntityMetrics {
     conversions: 1,
     days: 7,
     currentBid: 10,
+    status: 'ACTIVE',
     ...overrides,
   };
 }
@@ -174,6 +175,40 @@ describe('pauseHighCpaEntities (impressions > 500 AND CPA > 3× target)', () => 
       targets(),
     );
     expect(decisions[0]?.entityType).toBe('AD');
+  });
+
+  it.each(['PAUSED', 'ARCHIVED'] as const)('never pauses an already %s entity', (status) => {
+    const decisions = pauseHighCpaEntities(
+      input([
+        entity({
+          entityType: 'AD',
+          entityId: 'ad-1',
+          impressions: 600,
+          spend: 5000,
+          conversions: 0,
+          status,
+        }),
+      ]),
+      targets(),
+    );
+    expect(decisions).toEqual([]);
+  });
+
+  it('пауза предлагается, когда статус неизвестен', () => {
+    const decisions = pauseHighCpaEntities(
+      input([
+        entity({
+          entityType: 'AD',
+          entityId: 'ad-1',
+          impressions: 600,
+          spend: 5000,
+          conversions: 0,
+          status: null,
+        }),
+      ]),
+      targets(),
+    );
+    expect(decisions).toHaveLength(1);
   });
 
   it.each(['CAMPAIGN', 'ADGROUP'] as const)('never pauses a whole %s', (entityType) => {

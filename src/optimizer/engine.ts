@@ -13,6 +13,7 @@ import type {
   Decision,
   DecisionLayer,
   EntityMetrics,
+  EntityStatusName,
   HandoverModeName,
   Numeric,
   OptimizationTargets,
@@ -46,6 +47,7 @@ export interface AdRecord {
   id: string;
   /** Заголовок объявления — подпись для карточки апрува. Необязателен: фикстуры его не несут. */
   title?: string | null;
+  status: string;
 }
 
 export interface CampaignStatRecord {
@@ -252,7 +254,11 @@ export async function runOptimizer(
   for (const keyword of keywords) labelByEntityId.set(keyword.id, keyword.phrase);
   for (const ad of ads) if (ad.title) labelByEntityId.set(ad.id, ad.title);
 
-  const aggregates = aggregateStats(stats, bidByKeywordId, labelByEntityId);
+  const statusByEntityId = new Map<string, EntityStatusName | null>();
+  for (const keyword of keywords) statusByEntityId.set(keyword.id, toEntityStatus(keyword.status));
+  for (const ad of ads) statusByEntityId.set(ad.id, toEntityStatus(ad.status));
+
+  const aggregates = aggregateStats(stats, bidByKeywordId, labelByEntityId, statusByEntityId);
   const entities = aggregates.filter((entity) => entity.entityId !== campaign.id);
 
   const targetCpaSource = resolveTargetCpaSource(campaign, options.fallbackTargetCpa ?? null);
@@ -389,10 +395,21 @@ function buildGuardrailContext(
   };
 }
 
+/**
+ * Строковый статус строки БД → значение, с которым работают правила.
+ *
+ * Незнакомое слово даёт null («не знаем»), а не «выключено»: колонка новая, и
+ * старая строка не должна выпадать из оптимизации из-за пропуска в переводе.
+ */
+export function toEntityStatus(raw: string | null | undefined): EntityStatusName | null {
+  return raw === 'ACTIVE' || raw === 'PAUSED' || raw === 'ARCHIVED' ? raw : null;
+}
+
 function aggregateStats(
   stats: readonly CampaignStatRecord[],
   bidByKeywordId: ReadonlyMap<string, number | null>,
   labelByEntityId: ReadonlyMap<string, string>,
+  statusByEntityId: ReadonlyMap<string, EntityStatusName | null>,
 ): EntityMetrics[] {
   const byEntity = new Map<string, EntityMetrics & { dates: Set<string> }>();
 
@@ -408,6 +425,7 @@ function aggregateStats(
       conversions: 0,
       days: 0,
       currentBid: bidByKeywordId.get(row.entityId) ?? null,
+      status: statusByEntityId.get(row.entityId) ?? null,
       dates: new Set<string>(),
     };
 

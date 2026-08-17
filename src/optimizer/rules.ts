@@ -72,6 +72,9 @@ export function pauseHighCpaEntities(input: RuleInput, targets: OptimizationTarg
 
   for (const entity of input.entities) {
     if (!PAUSABLE_ENTITY_TYPES.has(entity.entityType)) continue;
+    // Выключенное в кабинете уже не откручивается: карточка «поставить на паузу»
+    // по нему возвращалась бы каждую ночь, пока статистика не выпадет из окна.
+    if (entity.status !== null && entity.status !== 'ACTIVE') continue;
     if (entity.impressions <= minImpressions) continue;
 
     const { cpa } = deriveMetrics(entity);

@@ -121,6 +121,38 @@ describe('syncEntities', () => {
     expect(db.store.keyword.find((k) => k['externalId'] === '401')?.['status']).toBe('ARCHIVED');
   });
 
+  it.each([
+    { remote: 'ON', stored: 'ACTIVE' },
+    { remote: 'OFF', stored: 'PAUSED' },
+    { remote: 'SUSPENDED', stored: 'PAUSED' },
+    { remote: 'ARCHIVED', stored: 'ARCHIVED' },
+    // Незнакомое слово площадки — «работает»: спрятать живое объявление дороже.
+    { remote: 'СОВСЕМ_НОВЫЙ_СТАТУС', stored: 'ACTIVE' },
+  ])('статус объявления $remote из кабинета пишется как $stored', async ({ remote, stored }) => {
+    const adapter = fakeAdapter('YANDEX_DIRECT', {
+      ...fullCabinet,
+      ads: [remoteAd({ status: remote })],
+    });
+
+    await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(adapter));
+
+    expect(db.store.ad[0]?.['status']).toBe(stored);
+  });
+
+  it('выключение объявления в кабинете доезжает до строки при повторном прогоне', async () => {
+    await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(fakeAdapter('YANDEX_DIRECT', fullCabinet)));
+    expect(db.store.ad[0]?.['status']).toBe('ACTIVE');
+
+    const paused = fakeAdapter('YANDEX_DIRECT', {
+      ...fullCabinet,
+      ads: [remoteAd({ status: 'OFF' })],
+    });
+    await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(paused));
+
+    expect(db.store.ad).toHaveLength(1);
+    expect(db.store.ad[0]?.['status']).toBe('PAUSED');
+  });
+
   it('не архивирует ничего, когда кабинет ответил пустым списком', async () => {
     await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(fakeAdapter('YANDEX_DIRECT', fullCabinet)));
 

@@ -1,4 +1,4 @@
-import { StatEntityType, type PrismaClient } from '@prisma/client';
+import { AdStatus, StatEntityType, type PrismaClient } from '@prisma/client';
 
 import { selectWinner, type AbDecision, type AbTestConfig, type VariantCounts } from './select.js';
 
@@ -60,13 +60,18 @@ export interface AdExperiment {
  * Рукописное объявление клиента (и всё, что приехало через ingestion, TZ §15) вариантом
  * не считается: предлагать человеку выключить объявление, которого мы не писали и о
  * котором ничего не знаем, система права не имеет.
+ *
+ * И только работающие: выключенное в кабинете объявление больше никого не обслуживает,
+ * но его показы остаются в 30-дневном окне ещё месяц. Считая их, тест сравнивал бы
+ * победителя с вариантом, которого в эфире уже нет, — и заодно каждую ночь предлагал бы
+ * выключить то, что выключено.
  */
 export async function evaluateAdExperiment(
   adGroupId: string,
   opts: AdExperimentOptions,
 ): Promise<AdExperiment> {
   const ads = await opts.db.ad.findMany({
-    where: { adGroupId, llmVariant: { not: null } },
+    where: { adGroupId, llmVariant: { not: null }, status: AdStatus.ACTIVE },
     select: { id: true, llmVariant: true, title: true },
   });
 

@@ -76,6 +76,12 @@ export interface EntityMetrics {
   /** Number of distinct days with statistics inside the window, not the window length. */
   days: number;
   currentBid: number | null;
+  /**
+   * Жизненный цикл сущности в кабинете. null — статуса у этого уровня нет или он
+   * неизвестен; такая сущность считается работающей, потому что это ровно то
+   * поведение, что было до появления колонки.
+   */
+  status: EntityStatusName | null;
 }
 
 export interface SearchQueryMetrics {
