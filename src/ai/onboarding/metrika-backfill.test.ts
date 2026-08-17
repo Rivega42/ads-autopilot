@@ -1,7 +1,16 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const h = vi.hoisted(() => ({
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
 
 // Настоящий PrismaClient здесь не нужен: хранилище всегда приходит аргументом.
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
+vi.mock('@/logger.js', () => ({
+  logger: { child: () => ({ info: h.info, warn: h.warn, error: h.error, debug: vi.fn() }) },
+}));
 
 const { backfillMetrikaConfig } = await import('./metrika-backfill.js');
 
@@ -61,13 +70,17 @@ const BRIEF_WITH_METRIKA = {
   conversionGoals: [{ name: 'заявка' }],
 };
 
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
 describe('backfillMetrikaConfig', () => {
   it('переносит настройку Метрики из готового брифа в карточку клиента', async () => {
     const { db, rows } = harness([client({ id: 'cl1', brief: { data: BRIEF_WITH_METRIKA } })]);
 
-    const result = await backfillMetrikaConfig({ db });
+    const result = await backfillMetrikaConfig({ db, apply: true });
 
-    expect(result).toMatchObject({ scanned: 1, updated: 1, skipped: 0 });
+    expect(result).toMatchObject({ scanned: 1, configured: 1, goalOnly: [], skipped: 0 });
     expect(rows[0]).toMatchObject({
       metrikaCounterId: 12_345_678,
       metrikaGoalId: 555,
@@ -75,14 +88,23 @@ describe('backfillMetrikaConfig', () => {
     });
   });
 
+  it('без --apply ничего не пишет, но показывает, что сделал бы', async () => {
+    const { db, rows } = harness([client({ id: 'cl1', brief: { data: BRIEF_WITH_METRIKA } })]);
+
+    const result = await backfillMetrikaConfig({ db });
+
+    expect(result).toMatchObject({ scanned: 1, configured: 1, applied: false });
+    expect(rows[0]).toMatchObject({ metrikaCounterId: null, metrikaGoalId: null });
+  });
+
   it('второй прогон ничего не пишет', async () => {
     const { db } = harness([client({ id: 'cl1', brief: { data: BRIEF_WITH_METRIKA } })]);
 
-    await backfillMetrikaConfig({ db });
-    const second = await backfillMetrikaConfig({ db });
+    await backfillMetrikaConfig({ db, apply: true });
+    const second = await backfillMetrikaConfig({ db, apply: true });
 
     // Клиент со счётчиком в отбор уже не попадает — иначе это был бы вечный апдейт.
-    expect(second).toMatchObject({ scanned: 0, updated: 0 });
+    expect(second).toMatchObject({ scanned: 0, configured: 0, goalOnly: [] });
   });
 
   it('не затирает то, что уже проставлено руками', async () => {
@@ -95,7 +117,7 @@ describe('backfillMetrikaConfig', () => {
       }),
     ]);
 
-    await backfillMetrikaConfig({ db });
+    await backfillMetrikaConfig({ db, apply: true });
 
     expect(rows[0]).toMatchObject({
       metrikaCounterId: 12_345_678,
@@ -104,7 +126,7 @@ describe('backfillMetrikaConfig', () => {
     });
   });
 
-  it('берёт цель из целевых действий, если блока Метрики в брифе нет', async () => {
+  it('цель без счётчика считает отдельно: конверсии от такой записи не поедут', async () => {
     // Брифы, собранные до вопроса про Метрику: счётчика в них нет и взяться ему неоткуда.
     const { db, rows } = harness([
       client({
@@ -113,10 +135,14 @@ describe('backfillMetrikaConfig', () => {
       }),
     ]);
 
-    const result = await backfillMetrikaConfig({ db });
+    const result = await backfillMetrikaConfig({ db, apply: true });
 
-    expect(result).toMatchObject({ updated: 1 });
+    expect(result).toMatchObject({ scanned: 1, configured: 0, goalOnly: ['cl1'] });
     expect(rows[0]).toMatchObject({ metrikaCounterId: null, metrikaGoalId: 777 });
+    expect(h.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ clientId: 'cl1' }),
+      expect.stringContaining('incomplete'),
+    );
   });
 
   it('несколько целей в брифе оставляет человеку, а не выбирает сам', async () => {
@@ -134,7 +160,7 @@ describe('backfillMetrikaConfig', () => {
       }),
     ]);
 
-    const result = await backfillMetrikaConfig({ db });
+    const result = await backfillMetrikaConfig({ db, apply: true });
 
     expect(result.ambiguous).toEqual(['cl1']);
     expect(rows[0]?.metrikaGoalId).toBeNull();
@@ -145,9 +171,9 @@ describe('backfillMetrikaConfig', () => {
       client({ id: 'cl1', brief: { data: { conversionGoals: [{ name: 'заявка' }] } } }),
     ]);
 
-    const result = await backfillMetrikaConfig({ db });
+    const result = await backfillMetrikaConfig({ db, apply: true });
 
-    expect(result).toMatchObject({ scanned: 1, updated: 0, skipped: 1 });
+    expect(result).toMatchObject({ scanned: 1, configured: 0, goalOnly: [], skipped: 1 });
     expect(rows[0]?.metrikaGoalId).toBeNull();
   });
 
@@ -159,19 +185,28 @@ describe('backfillMetrikaConfig', () => {
       }),
     ]);
 
-    expect(await backfillMetrikaConfig({ db })).toMatchObject({ updated: 0, skipped: 1 });
+    expect(await backfillMetrikaConfig({ db, apply: true })).toMatchObject({
+      configured: 0,
+      goalOnly: [],
+      skipped: 1,
+    });
     expect(rows[0]?.metrikaGoalId).toBeNull();
   });
 
-  it('битые данные брифа не роняют прогон по остальным клиентам', async () => {
+  it('битые данные брифа не роняют прогон, но и не молчат', async () => {
     const { db, rows } = harness([
       client({ id: 'cl1', brief: { data: 'не json-объект' } }),
       client({ id: 'cl2', brief: { data: BRIEF_WITH_METRIKA } }),
     ]);
 
-    const result = await backfillMetrikaConfig({ db });
+    const result = await backfillMetrikaConfig({ db, apply: true });
 
-    expect(result).toMatchObject({ scanned: 2, updated: 1, skipped: 1 });
+    expect(result).toMatchObject({ scanned: 2, configured: 1, skipped: 1 });
     expect(rows[1]?.metrikaCounterId).toBe(12_345_678);
+    // Молча пропущенный клиент выглядит как клиент без Метрики и теряется навсегда.
+    expect(h.error).toHaveBeenCalledWith(
+      expect.objectContaining({ clientId: 'cl1' }),
+      expect.stringContaining('brief data'),
+    );
   });
 });

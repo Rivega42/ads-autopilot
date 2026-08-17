@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -94,6 +95,17 @@ function readPromptFile(name: PromptName): string {
   }
 
   throw new PromptError(`Prompt file "${name}.md" not found`, { name, tried });
+}
+
+/**
+ * Отпечаток текста промпта — до подстановки переменных.
+ *
+ * Нужен eval-наборам: версия промпта — это строка, которую можно поправить рукой и
+ * получить зелёный прогон на устаревших записях (так и случилось при переходе на
+ * 1.1.0). Отпечаток меняется вместе с текстом и рукой не подделывается.
+ */
+export function promptFingerprint(name: PromptName): string {
+  return createHash('sha256').update(readPromptFile(name)).digest('hex').slice(0, 16);
 }
 
 /** Сбрасывает кеш файлов. Нужен тестам и hot-reload, в проде не вызывается. */

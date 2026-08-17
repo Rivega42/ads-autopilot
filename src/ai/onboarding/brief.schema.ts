@@ -201,19 +201,59 @@ export const MONEY_BRIEF_FIELDS = [
 export type MoneyBriefField = (typeof MONEY_BRIEF_FIELDS)[number];
 
 /**
- * Поля, которые нельзя заполнить «по смыслу»: без дословной цитаты клиента значение
- * отбрасывается. Кроме денег сюда входит счётчик Метрики — правдоподобный, но
- * выдуманный номер приписал бы клиенту чужие конверсии, а по ним двигаются ставки.
+ * Поля, которые нельзя заполнить «по смыслу»: каждое число в них модель обязана
+ * подтвердить цитатой клиента, содержащей это же число, иначе значение отбрасывается
+ * (`updates.ts`). Кроме денег сюда входят номер счётчика и id цели Метрики:
+ * правдоподобный, но выдуманный номер приписал бы клиенту чужие конверсии, а
+ * выдуманный id цели решил бы за него, что вообще считать заявкой.
+ *
+ * `conversionGoals` в списке из-за `metrikaGoalId`: он уезжает в `Client.metrikaGoalId`
+ * ровно так же, как id из блока Метрики (`metrika-config.ts`).
  */
 export const EVIDENCE_BRIEF_FIELDS = [
   ...MONEY_BRIEF_FIELDS,
   'metrika',
+  'conversionGoals',
 ] as const satisfies readonly BriefField[];
 
 export type EvidenceBriefField = (typeof EVIDENCE_BRIEF_FIELDS)[number];
 
 export function requiresEvidence(field: string): field is EvidenceBriefField {
   return (EVIDENCE_BRIEF_FIELDS as readonly string[]).includes(field);
+}
+
+function positiveNumbers(values: readonly unknown[]): number[] {
+  return values.filter((value): value is number => typeof value === 'number' && value > 0);
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+/**
+ * Числа поля, которые обязана подтверждать цитата клиента.
+ *
+ * Пустой список означает «подтверждать нечего»: название цели («заявка с формы»)
+ * клиент диктует словами, и переспрашивать его из-за отсутствующей цитаты значило бы
+ * зациклить интервью на поле, на которое он уже ответил. Опасны здесь только цифры.
+ *
+ * @param field - поле из `EVIDENCE_BRIEF_FIELDS`
+ * @param value - значение, которое модель пытается записать
+ */
+export function evidenceNumbers(field: EvidenceBriefField, value: unknown): number[] {
+  switch (field) {
+    case 'targetCpaRub':
+    case 'dailyBudgetRub':
+      return positiveNumbers([value]);
+    case 'metrika': {
+      const metrika = record(value);
+      return positiveNumbers([metrika['counterId'], metrika['goalId']]);
+    }
+    case 'conversionGoals': {
+      const goals = Array.isArray(value) ? value : [];
+      return positiveNumbers(goals.map((goal) => record(goal)['metrikaGoalId']));
+    }
+  }
 }
 
 /**
@@ -264,10 +304,18 @@ export function briefWarnings(brief: ClientBriefData): string[] {
     );
   }
 
-  if (brief.metrika == null) {
+  // `null` и отсутствие ключа — разные факты о клиенте. Первое он сказал сам,
+  // второе означает лишь, что бриф собран до появления вопроса про Метрику, и
+  // приписывать ему отказ нельзя.
+  if (brief.metrika === null) {
     warnings.push(
       'Метрики нет: конверсии считает сама площадка по своей модели атрибуции, ' +
         'CPA в отчёте будет её.',
+    );
+  } else if (brief.metrika === undefined) {
+    warnings.push(
+      'Про Яндекс.Метрику клиента не спрашивали: бриф собран до этого вопроса. ' +
+        'Загрузка конверсий выключена, пока не известен счётчик — спроси и заполни.',
     );
   }
 

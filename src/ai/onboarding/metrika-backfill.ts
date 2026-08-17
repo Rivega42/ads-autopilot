@@ -1,7 +1,12 @@
 import { BriefStatus, type PrismaClient } from '@prisma/client';
 
-import { metrikaConfigFromBrief, metrikaConfigPatch } from './metrika-config.js';
-import { parseDraft } from './state.js';
+import { briefDraftSchema } from './brief.schema.js';
+import {
+  INCOMPLETE_METRIKA_CONFIG,
+  isMetrikaConfigComplete,
+  metrikaConfigFromBrief,
+  metrikaConfigPatch,
+} from './metrika-config.js';
 
 import { prisma } from '@/db/prisma.js';
 import { logger } from '@/logger.js';
@@ -18,6 +23,13 @@ import { logger } from '@/logger.js';
  * В зашифрованном `Credential` её нет и не было: туда пишутся только токены, а
  * схемы payload (`schemas/credentials.ts`, `yandexCredentialsSchema`) выбрасывают
  * все посторонние ключи, поэтому и переносить оттуда нечего.
+ *
+ * Отбор (`metrikaCounterId: null` + завершённый бриф) — это ровно легаси-клиенты, у
+ * которых блока `metrika` в брифе физически быть не может: поле появилось в схеме
+ * позже, а zod стрипает всё, чего в схеме не было. Поэтому типичный результат такого
+ * прогона — записанная цель без счётчика, то есть по-прежнему выключенные конверсии.
+ * Счёт ведётся раздельно именно поэтому: «обновлено: 40» прочиталось бы как
+ * «Метрика включена у сорока клиентов».
  */
 
 const log = logger.child({ scope: 'ai:onboarding:metrika-backfill' });
@@ -28,15 +40,25 @@ export interface MetrikaBackfillOptions {
   db?: MetrikaBackfillStore;
   /** Потолок клиентов за прогон: сверка идёт построчно и в БД не спешит. */
   limit?: number;
+  /** Без него прогон только считает, что сделал бы: массовая запись — не побочный эффект просмотра. */
+  apply?: boolean;
 }
 
 export interface MetrikaBackfillResult {
   scanned: number;
-  updated: number;
+  /** Клиенты, у которых после записи есть и счётчик, и цель: конверсии поедут. */
+  configured: number;
+  /**
+   * Клиенты, которым записана только цель. Загрузка конверсий у них остаётся
+   * выключенной: без номера счётчика цель никуда не ведёт.
+   */
+  goalOnly: string[];
   /** Клиенты, чей бриф про Метрику ничего не знает: писать нечего. */
   skipped: number;
   /** Клиенты, где бриф называет несколько целей — выбор за человеком. */
   ambiguous: string[];
+  /** false — прогон ничего не писал (`apply` не передан). */
+  applied: boolean;
 }
 
 const DEFAULT_LIMIT = 500;
@@ -53,7 +75,15 @@ export async function backfillMetrikaConfig(
   options: MetrikaBackfillOptions = {},
 ): Promise<MetrikaBackfillResult> {
   const db = options.db ?? prisma;
-  const result: MetrikaBackfillResult = { scanned: 0, updated: 0, skipped: 0, ambiguous: [] };
+  const apply = options.apply ?? false;
+  const result: MetrikaBackfillResult = {
+    scanned: 0,
+    configured: 0,
+    goalOnly: [],
+    skipped: 0,
+    ambiguous: [],
+    applied: apply,
+  };
 
   const rows = await db.client.findMany({
     where: { metrikaCounterId: null, brief: { status: BriefStatus.COMPLETE } },
@@ -69,7 +99,18 @@ export async function backfillMetrikaConfig(
   for (const row of rows) {
     result.scanned += 1;
 
-    const { config, ambiguousGoalIds } = metrikaConfigFromBrief(parseDraft(row.brief?.data));
+    const parsed = briefDraftSchema.safeParse(row.brief?.data ?? {});
+    if (!parsed.success) {
+      // Молча пропущенный клиент неотличим от клиента без Метрики и теряется навсегда.
+      log.error(
+        { clientId: row.id, issues: parsed.error.issues.map((i) => i.path.join('.')) },
+        'brief data does not parse: cannot read metrika config, client skipped',
+      );
+      result.skipped += 1;
+      continue;
+    }
+
+    const { config, ambiguousGoalIds } = metrikaConfigFromBrief(parsed.data);
     if (ambiguousGoalIds.length > 0) result.ambiguous.push(row.id);
 
     const patch = metrikaConfigPatch(config);
@@ -81,20 +122,36 @@ export async function backfillMetrikaConfig(
       continue;
     }
 
-    // Условие повторяет прочитанные пустоты: между чтением и записью строку мог
-    // заполнить человек или параллельный прогон, и его значение должно победить.
-    const guard = Object.fromEntries(Object.keys(patch).map((column) => [column, null]));
-    const { count } = await db.client.updateMany({
-      where: { id: row.id, metrikaCounterId: null, ...guard },
-      data: patch,
-    });
+    if (apply) {
+      // Условие повторяет прочитанные пустоты: между чтением и записью строку мог
+      // заполнить человек или параллельный прогон, и его значение должно победить.
+      const guard = Object.fromEntries(Object.keys(patch).map((column) => [column, null]));
+      const { count } = await db.client.updateMany({
+        where: { id: row.id, metrikaCounterId: null, ...guard },
+        data: patch,
+      });
 
-    if (count === 0) {
-      result.skipped += 1;
-      continue;
+      if (count === 0) {
+        result.skipped += 1;
+        continue;
+      }
     }
-    result.updated += 1;
-    log.info({ clientId: row.id, ...patch }, 'metrika config backfilled from the brief');
+
+    // Счётчик у отобранных строк пуст по условию выборки, поэтому полнота зависит
+    // от патча; цель могла уже стоять в карточке — тогда патч её и не трогает.
+    const written = {
+      metrikaCounterId: patch.metrikaCounterId ?? null,
+      metrikaGoalId: row.metrikaGoalId ?? patch.metrikaGoalId ?? null,
+      metrikaAttribution: patch.metrikaAttribution ?? null,
+    };
+
+    if (isMetrikaConfigComplete(written)) {
+      result.configured += 1;
+      log.info({ clientId: row.id, apply, ...patch }, 'metrika config backfilled from the brief');
+    } else {
+      result.goalOnly.push(row.id);
+      log.warn({ clientId: row.id, apply, ...written }, INCOMPLETE_METRIKA_CONFIG);
+    }
   }
 
   if (result.ambiguous.length > 0) {
@@ -105,7 +162,13 @@ export async function backfillMetrikaConfig(
   }
 
   log.info(
-    { scanned: result.scanned, updated: result.updated, skipped: result.skipped },
+    {
+      scanned: result.scanned,
+      configured: result.configured,
+      goalOnly: result.goalOnly.length,
+      skipped: result.skipped,
+      apply,
+    },
     'metrika config backfill finished',
   );
   return result;

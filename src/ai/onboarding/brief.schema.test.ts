@@ -4,6 +4,7 @@ import {
   briefDraftSchema,
   briefWarnings,
   clientBriefSchema,
+  evidenceNumbers,
   missingBriefFields,
   parseCompleteBrief,
   requiresEvidence,
@@ -166,7 +167,15 @@ describe('briefWarnings', () => {
 
   it('замечает отказ от Метрики', () => {
     // Не ошибка, но человек должен знать: CPA будет считать сама площадка.
-    expect(briefWarnings({ ...FULL, metrika: null }).join(' ')).toContain('Метрик');
+    expect(briefWarnings({ ...FULL, metrika: null }).join(' ')).toContain('Метрики нет');
+  });
+
+  it('различает «Метрики нет» и «не спрашивали»', () => {
+    // Легаси-бриф собран до появления вопроса: приписывать клиенту отказ нельзя.
+    const { metrika: _metrika, ...neverAsked } = FULL;
+    const warning = briefWarnings(neverAsked).join(' ');
+    expect(warning).toContain('не спрашивали');
+    expect(warning).not.toContain('Метрики нет');
   });
 
   it('на чистом брифе молчит', () => {
@@ -175,11 +184,35 @@ describe('briefWarnings', () => {
 });
 
 describe('requiresEvidence', () => {
-  it('покрывает деньги и счётчик Метрики', () => {
+  it('покрывает деньги, счётчик Метрики и цели конверсий', () => {
     expect(requiresEvidence('targetCpaRub')).toBe(true);
     expect(requiresEvidence('dailyBudgetRub')).toBe(true);
     // Выдуманный счётчик — это чужие конверсии, по которым потом двигаются ставки.
     expect(requiresEvidence('metrika')).toBe(true);
+    // id цели из целевых действий уезжает в Client.metrikaGoalId ровно так же.
+    expect(requiresEvidence('conversionGoals')).toBe(true);
     expect(requiresEvidence('product')).toBe(false);
+  });
+});
+
+describe('evidenceNumbers', () => {
+  it('для денег — само значение', () => {
+    expect(evidenceNumbers('targetCpaRub', 2_000)).toEqual([2_000]);
+    expect(evidenceNumbers('dailyBudgetRub', 5_000)).toEqual([5_000]);
+  });
+
+  it('для блока Метрики — и счётчик, и id цели', () => {
+    expect(evidenceNumbers('metrika', { counterId: 12_345_678, goalId: 44_001 })).toEqual([
+      12_345_678, 44_001,
+    ]);
+    expect(evidenceNumbers('metrika', { counterId: 12_345_678 })).toEqual([12_345_678]);
+    // Модель атрибуции — не число: подтверждать в ней нечего.
+    expect(evidenceNumbers('metrika', { counterId: 1, attribution: 'LASTSIGN' })).toEqual([1]);
+  });
+
+  it('для целей конверсий — только id, но не названия', () => {
+    const goals = [{ name: 'заявка', metrikaGoalId: 44_001 }, { name: 'звонок' }];
+    expect(evidenceNumbers('conversionGoals', goals)).toEqual([44_001]);
+    expect(evidenceNumbers('conversionGoals', [{ name: 'заявка' }])).toEqual([]);
   });
 });

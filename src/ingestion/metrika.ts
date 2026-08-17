@@ -108,9 +108,19 @@ export function readMetrikaSettings(
 
   const settings: MetrikaSettings = { counterId, goalId, token };
   const attribution = str(config.metrikaAttribution);
-  if (attribution && (ATTRIBUTIONS as readonly string[]).includes(attribution)) {
+  if (attribution === undefined) return settings;
+
+  if ((ATTRIBUTIONS as readonly string[]).includes(attribution)) {
     settings.attribution = attribution as MetrikaClientOptions['attribution'];
+    return settings;
   }
+
+  // Молчать нельзя: запрос уедет с умолчанием клиента (LASTSIGN), конверсии
+  // приедут по другой модели, чем просил человек, и расхождение спишут на Метрику.
+  log.warn(
+    { counterId, goalId, attribution, known: ATTRIBUTIONS },
+    'unknown value in Client.metrikaAttribution, falling back to the LASTSIGN default',
+  );
   return settings;
 }
 

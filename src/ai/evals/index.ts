@@ -12,6 +12,7 @@ export {
   type MemoryBriefStore,
   type MemoryClientStore,
 } from './memory-store.js';
+export { describeEvalTrust, type BaselineSource, type EvalTrust } from './provenance.js';
 export { runEvalCase, type ReplayOptions } from './replay.js';
 export {
   aggregateScore,
@@ -23,6 +24,13 @@ export {
   type CaseScore,
   type EvalBaseline,
   type EvalCheck,
+  type PromptStamp,
   type Regression,
 } from './score.js';
-export type { EvalCase, EvalExpectation, EvalRunResult, ScriptedTurn } from './types.js';
+export type {
+  EvalCase,
+  EvalExpectation,
+  EvalRecordingSource,
+  EvalRunResult,
+  ScriptedTurn,
+} from './types.js';

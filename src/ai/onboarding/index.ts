@@ -7,6 +7,7 @@
 export {
   briefWarnings,
   clientBriefSchema,
+  evidenceNumbers,
   briefDraftSchema,
   briefFieldSchema,
   metrikaBriefSchema,
@@ -40,9 +41,11 @@ export {
   type RunInterviewTurn,
 } from './interview.js';
 export {
+  isMetrikaConfigComplete,
   metrikaConfigFromBrief,
   metrikaConfigPatch,
   saveMetrikaConfig,
+  INCOMPLETE_METRIKA_CONFIG,
   type ClientConfigStore,
   type MetrikaBriefConfig,
   type MetrikaConfigPatch,
@@ -65,6 +68,7 @@ export {
 export {
   applyTurnUpdates,
   quoteFound,
+  quoteMentionsNumber,
   type AppliedUpdates,
   type RejectedUpdate,
 } from './updates.js';

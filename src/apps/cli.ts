@@ -29,8 +29,8 @@ function printUsage(): void {
       '  ingest              загрузить сущности и статистику из кабинетов',
       '  search-queries      загрузить поисковые запросы',
       '  optimize            показать решения оптимизатора',
-      '  creatives           сгенерировать тексты объявлений для клиента',
-      '  backfill-metrika    проставить настройки Метрики из готовых брифов',
+      '  creatives           сгенерировать тексты объявлений (платно, нужен --apply)',
+      '  backfill-metrika    проставить настройки Метрики из готовых брифов (нужен --apply)',
       '',
       'Опции:',
       '  --client <id>       ограничить одним клиентом',
@@ -38,7 +38,7 @@ function printUsage(): void {
       '  --segment <имя>     сегмент для creatives (по умолчанию — горячий спрос)',
       '  --help',
       '',
-      'Без --apply ни одна команда ничего не пишет в рекламные кабинеты.',
+      'Без --apply ни одна команда ничего не пишет и не тратит деньги.',
       '',
     ].join('\n'),
   );
@@ -193,10 +193,20 @@ function emptyAggregate(adGroupId: string, query: string) {
 /**
  * Генерация текстов объявлений вручную.
  *
- * Картинки отсюда не заказываются: провайдер и форматы выбирает вызывающий, а
- * набор баннеров стоит до $0.15 — такое решение не принимают флагом по умолчанию.
+ * Требует `--apply`, хотя в кабинет ничего не пишет. Причина в другом ресурсе:
+ * `DRY_RUN` защищает рекламные кабинеты, но не кошелёк — генерация текстов идёт
+ * в LLM по-настоящему при любом его значении. Команда, которая тратит деньги
+ * просто от того, что её набрали, — ловушка; остальные команды CLI приучают,
+ * что без `--apply` ничего не происходит.
+ *
+ * Картинки отсюда не заказываются вовсе: провайдер и форматы выбирает вызывающий,
+ * а набор баннеров стоит до $0.15 — такое решение не принимают флагом по умолчанию.
  */
-async function cmdCreatives(clientId: string | undefined, segmentName: string | undefined) {
+async function cmdCreatives(
+  clientId: string | undefined,
+  segmentName: string | undefined,
+  apply: boolean,
+) {
   if (!clientId) {
     process.stdout.write('Нужен --client <id>: сегмент генерируется под конкретный бриф.\n');
     process.exitCode = 1;
@@ -225,6 +235,15 @@ async function cmdCreatives(clientId: string | undefined, segmentName: string | 
   }
 
   const name = segmentName ?? 'Горячий спрос';
+
+  if (!apply) {
+    process.stdout.write(
+      `Клиент ${clientId}, сегмент «${name}» — бриф готов, генерировать можно.\n` +
+        'Запрос к модели платный и DRY_RUN его не останавливает, поэтому нужен --apply.\n',
+    );
+    return;
+  }
+
   const set = await generateCreativeSetOnDemand({
     clientId,
     brief: parsed.data,
@@ -239,17 +258,40 @@ async function cmdCreatives(clientId: string | undefined, segmentName: string | 
     process.stdout.write(`  ✗ отклонён: ${r.reason}\n`);
   }
   for (const w of set.warnings) process.stdout.write(`  ! ${w}\n`);
-  process.stdout.write(`Стоимость: $${set.totalCostUsd.toFixed(4)}, dryRun=${set.dryRun}\n`);
+  // Про dry-run здесь не пишем: строка «dryRun=true» рядом с суммой читается как
+  // «денег не потрачено», а модель уже оплачена.
+  process.stdout.write(`Модель оплачена: $${set.totalCostUsd.toFixed(4)}\n`);
 }
 
-async function cmdBackfillMetrika(): Promise<void> {
-  const result = await backfillMetrikaConfig();
+async function cmdBackfillMetrika(apply: boolean): Promise<void> {
+  const result = await backfillMetrikaConfig({ apply });
+  const verb = apply ? 'записано' : 'будет записано';
+
   process.stdout.write(
-    `Просмотрено: ${result.scanned}, обновлено: ${result.updated}, пропущено: ${result.skipped}\n`,
+    apply
+      ? 'Прогон с записью в БД.\n'
+      : 'Черновой прогон: в БД ничего не пишется (нужен --apply).\n',
   );
+  process.stdout.write(`Просмотрено брифов: ${result.scanned}\n`);
+  process.stdout.write(
+    `Метрика включится (счётчик + цель), ${verb}: ${result.configured}\n` +
+      `Пропущено (в брифе про Метрику ничего нет): ${result.skipped}\n`,
+  );
+
+  if (result.goalOnly.length > 0) {
+    // Главная строка вывода: без счётчика загрузка конверсий не включается, и
+    // «обновлено: 40» без этой оговорки читается как «Метрика заработала».
+    process.stdout.write(
+      `\n⚠️  Только цель, без счётчика — у ${result.goalOnly.length} клиентов.\n` +
+        '   КОНВЕРСИИ ИЗ МЕТРИКИ У НИХ ПО-ПРЕЖНЕМУ НЕ ЗАГРУЖАЮТСЯ: нужен номер\n' +
+        '   счётчика (Client.metrikaCounterId) — спросить у клиента и вписать руками.\n',
+    );
+    for (const id of result.goalOnly) process.stdout.write(`  • ${id}\n`);
+  }
+
   if (result.ambiguous.length > 0) {
     process.stdout.write(
-      `Неоднозначная цель у ${result.ambiguous.length} клиентов — заполнить руками:\n`,
+      `\nНеоднозначная цель у ${result.ambiguous.length} клиентов — заполнить руками:\n`,
     );
     for (const id of result.ambiguous) process.stdout.write(`  • ${id}\n`);
   }
@@ -291,10 +333,10 @@ async function main(): Promise<void> {
       await cmdOptimize(values.client, values.apply);
       break;
     case 'creatives':
-      await cmdCreatives(values.client, values.segment);
+      await cmdCreatives(values.client, values.segment, values.apply);
       break;
     case 'backfill-metrika':
-      await cmdBackfillMetrika();
+      await cmdBackfillMetrika(values.apply);
       break;
     default:
       process.stdout.write(`Неизвестная команда: ${command}\n\n`);

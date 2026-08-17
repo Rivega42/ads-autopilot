@@ -43,11 +43,12 @@ const FULL_BRIEF: ClientBriefData = {
 };
 
 /** Ответ клиента, из которого все требующие цитаты значения действительно находятся. */
-const QUOTED_ANSWER = 'CPA 2000, бюджет 5000 на канал, счётчик 12345678';
+const QUOTED_ANSWER = 'CPA 2000, бюджет 5000 на канал, счётчик 12345678, цель 555';
 const QUOTED_EVIDENCE = {
   targetCpaRub: 'CPA 2000',
   dailyBudgetRub: 'бюджет 5000',
-  metrika: '12345678',
+  // Цитата обязана содержать оба числа блока: и счётчик, и id цели-заявки.
+  metrika: 'счётчик 12345678, цель 555',
 };
 
 interface Scripted {
@@ -367,7 +368,7 @@ describe('handleAnswer', () => {
     ]);
 
     await startInterview(CLIENT, { db: store.db, run });
-    const step = await handleAnswer(CLIENT, 'CPA 3000, бюджет 1000, счётчик 12345678', {
+    const step = await handleAnswer(CLIENT, 'CPA 3000, бюджет 1000, счётчик 12345678, цель 555', {
       db: store.db,
       run,
     });

@@ -5,7 +5,12 @@ import type { MetrikaGoalStat } from '@/clients/metrika.js';
 import { FakePrisma } from '@/ingestion/__tests__/fake-prisma.js';
 import type { MetrikaSettings, MetrikaSource } from '@/ingestion/metrika.js';
 
+const h = vi.hoisted(() => ({ warn: vi.fn() }));
+
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
+vi.mock('@/logger.js', () => ({
+  logger: { child: () => ({ warn: h.warn, info: vi.fn(), debug: vi.fn(), error: vi.fn() }) },
+}));
 
 const { directCampaignId, readMetrikaSettings, syncMetrikaConversions } =
   await import('@/ingestion/metrika.js');
@@ -89,6 +94,15 @@ describe('readMetrikaSettings', () => {
     expect(
       readMetrikaSettings({ ...CONFIG, metrikaAttribution: 'КАК-НИБУДЬ' }, CREDENTIALS),
     ).not.toHaveProperty('attribution');
+  });
+
+  it('о незнакомой модели атрибуции говорит вслух, а не уезжает молча на умолчание', () => {
+    readMetrikaSettings({ ...CONFIG, metrikaAttribution: 'КАК-НИБУДЬ' }, CREDENTIALS);
+
+    expect(h.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ attribution: 'КАК-НИБУДЬ' }),
+      expect.stringContaining('metrikaAttribution'),
+    );
   });
 });
 

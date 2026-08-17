@@ -1,3 +1,4 @@
+import type { BaselineSource } from './provenance.js';
 import type { EvalCase, EvalRunResult } from './types.js';
 
 import type { BriefField, ClientBriefDraft } from '@/ai/onboarding/brief.schema.js';
@@ -26,10 +27,23 @@ export interface CaseScore {
 export interface EvalBaseline {
   /** Версия промпта, на которой записан baseline. */
   promptVersion: string;
+  /** Отпечаток текста промпта: версию правят рукой, отпечаток — нет. */
+  promptFingerprint: string;
+  /**
+   * Чем получен baseline. `offline-replay` — прогоном записанных ходов: такие цифры
+   * годятся как защита от регрессий в коде, но не как оценка модели.
+   */
+  source: BaselineSource;
   recordedAt: string;
   /** caseId → score. */
   cases: Record<string, number>;
   aggregate: number;
+}
+
+/** Чем снят baseline или записаны ходы — общий штамп для сравнения и записи. */
+export interface PromptStamp {
+  promptVersion: string;
+  promptFingerprint: string;
 }
 
 export interface Regression {
@@ -123,11 +137,13 @@ export function aggregateScore(scores: readonly CaseScore[]): number {
 
 export function buildBaseline(
   scores: readonly CaseScore[],
-  promptVersion: string,
+  stamp: PromptStamp & { source: BaselineSource },
   now: Date = new Date(),
 ): EvalBaseline {
   return {
-    promptVersion,
+    promptVersion: stamp.promptVersion,
+    promptFingerprint: stamp.promptFingerprint,
+    source: stamp.source,
     recordedAt: now.toISOString(),
     cases: Object.fromEntries(scores.map((s) => [s.caseId, round(s.score)])),
     aggregate: round(aggregateScore(scores)),
@@ -140,7 +156,7 @@ const TOLERANCE = 1e-6;
 export function compareToBaseline(
   scores: readonly CaseScore[],
   baseline: EvalBaseline,
-  promptVersion: string,
+  stamp: PromptStamp,
 ): BaselineComparison {
   const regressions: Regression[] = [];
   const unknownCases: string[] = [];
@@ -160,7 +176,11 @@ export function compareToBaseline(
     regressions,
     unknownCases,
     aggregate: { baseline: baseline.aggregate, current: round(aggregateScore(scores)) },
-    promptChanged: baseline.promptVersion !== promptVersion,
+    // Текст промпта тоже считается правкой: bump версии — необязательный ритуал,
+    // а baseline устаревает от самого изменения текста.
+    promptChanged:
+      baseline.promptVersion !== stamp.promptVersion ||
+      baseline.promptFingerprint !== stamp.promptFingerprint,
   };
 }
 

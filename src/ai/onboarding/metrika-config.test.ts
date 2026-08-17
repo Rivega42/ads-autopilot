@@ -5,7 +5,8 @@ import type { ClientBriefData } from './brief.schema.js';
 // Настоящий PrismaClient здесь не нужен: хранилище всегда приходит аргументом.
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
-const { metrikaConfigFromBrief, saveMetrikaConfig } = await import('./metrika-config.js');
+const { isMetrikaConfigComplete, metrikaConfigFromBrief, saveMetrikaConfig } =
+  await import('./metrika-config.js');
 
 const CLIENT = 'cl1';
 
@@ -171,7 +172,7 @@ describe('saveMetrikaConfig', () => {
     expect(store.updates).toEqual([]);
   });
 
-  it('в брифе, собранном до вопроса про Метрику, берёт цель из целевых действий', async () => {
+  it('бриф без счётчика даёт заведомо неполную настройку, а не включённую Метрику', async () => {
     const store = clientStore();
     const { metrika: _metrika, ...legacy } = BRIEF;
     const brief: ClientBriefData = {
@@ -179,9 +180,41 @@ describe('saveMetrikaConfig', () => {
       conversionGoals: [{ name: 'заявка', metrikaGoalId: 555 }],
     };
 
-    await saveMetrikaConfig(CLIENT, brief, store.db);
+    const saved = await saveMetrikaConfig(CLIENT, brief, store.db);
 
-    // Счётчика в таких брифах нет — его проставят руками или следующим интервью.
+    // Цель записывается — она пригодится, когда счётчик проставят руками. Но
+    // загрузка конверсий требует обоих значений, и вызывающий обязан это видеть.
     expect(store.updates).toEqual([{ id: CLIENT, metrikaGoalId: 555 }]);
+    expect(saved).not.toBeNull();
+    expect(saved && isMetrikaConfigComplete(saved)).toBe(false);
+  });
+});
+
+describe('isMetrikaConfigComplete', () => {
+  it('полной считается только пара «счётчик + цель»', () => {
+    expect(
+      isMetrikaConfigComplete({
+        metrikaCounterId: 12_345_678,
+        metrikaGoalId: 555,
+        metrikaAttribution: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('одна цель без счётчика — это выключенная загрузка конверсий', () => {
+    expect(
+      isMetrikaConfigComplete({
+        metrikaCounterId: null,
+        metrikaGoalId: 555,
+        metrikaAttribution: 'LASTSIGN',
+      }),
+    ).toBe(false);
+    expect(
+      isMetrikaConfigComplete({
+        metrikaCounterId: 12_345_678,
+        metrikaGoalId: null,
+        metrikaAttribution: null,
+      }),
+    ).toBe(false);
   });
 });

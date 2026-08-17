@@ -5,6 +5,7 @@ import type { Provider } from '@prisma/client';
 import { applyDecisions, type ApplyReport, type IdempotencyStore } from './apply.js';
 import { runOptimizer } from './engine.js';
 import type { OptimizerRun } from './engine.js';
+import { describeFailure, recordFailure } from './errors.js';
 import type { ApprovalRequest } from './policy.js';
 import { createApplyDb, createPlatformWriter, createPrismaIdempotencyStore } from './runtime.js';
 import { toApprovalActions, type ApprovalTarget } from './to-approval.js';
@@ -205,9 +206,9 @@ export async function runScheduledOptimization(
       });
     } catch (err) {
       summary.failed += 1;
-      log.error(
-        { campaignId: campaign.id, err: describeError(err) },
-        'optimizer failed for campaign',
+      await recordFailure(
+        prisma,
+        describeFailure(campaign.clientId, campaign.provider, campaign.id, 'run', err),
       );
       continue;
     }
@@ -249,7 +250,10 @@ export async function runScheduledOptimization(
       await markNegated(campaign.id, report);
     } catch (err) {
       summary.failed += 1;
-      log.error({ campaignId: campaign.id, err: describeError(err) }, 'apply failed');
+      await recordFailure(
+        prisma,
+        describeFailure(campaign.clientId, campaign.provider, campaign.id, 'apply', err),
+      );
     }
 
     for (const request of run.approvals) {
@@ -264,10 +268,10 @@ export async function runScheduledOptimization(
         summary.approvalsFailed += outcome.unbuildable;
       } catch (err) {
         summary.approvalsFailed += 1;
-        log.error(
-          { campaignId: campaign.id, kind: request.kind, err: describeError(err) },
-          'failed to create approval card',
-        );
+        await recordFailure(prisma, {
+          ...describeFailure(campaign.clientId, campaign.provider, campaign.id, 'approval', err),
+          message: `карточка ${request.kind}: ${describeError(err)}`,
+        });
       }
     }
   }

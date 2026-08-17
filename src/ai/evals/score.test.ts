@@ -10,10 +10,14 @@ import {
 } from './score.js';
 import type { EvalCase, EvalRunResult } from './types.js';
 
+const STAMP = { promptVersion: '1.0.0', promptFingerprint: 'aaaaaaaaaaaaaaaa' };
+
 const evalCase: EvalCase = {
   id: 'demo',
   description: 'демо-кейс',
   promptVersion: '1.0.0',
+  promptFingerprint: 'aaaaaaaaaaaaaaaa',
+  source: 'live',
   persona: {},
   style: 'коротко',
   answers: ['Курсы английского'],
@@ -76,40 +80,58 @@ describe('scoreCase', () => {
 describe('compareToBaseline', () => {
   const baseline: EvalBaseline = {
     promptVersion: '1.0.0',
+    promptFingerprint: 'aaaaaaaaaaaaaaaa',
+    source: 'live',
     recordedAt: '2026-08-08T00:00:00.000Z',
     cases: { demo: 1, other: 0.5 },
     aggregate: 0.75,
   };
 
   it('молчит, когда не стало хуже', () => {
-    const comparison = compareToBaseline([scoreCase(evalCase, result())], baseline, '1.0.0');
+    const comparison = compareToBaseline([scoreCase(evalCase, result())], baseline, STAMP);
     expect(comparison.regressions).toEqual([]);
     expect(comparison.promptChanged).toBe(false);
   });
 
   it('показывает регрессию с обеими цифрами', () => {
     const worse = scoreCase(evalCase, result({ outcome: 'needs_human' }));
-    const comparison = compareToBaseline([worse], baseline, '1.0.0');
+    const comparison = compareToBaseline([worse], baseline, STAMP);
     expect(comparison.regressions).toEqual([{ caseId: 'demo', baseline: 1, current: worse.score }]);
   });
 
   it('отмечает, что промпт правили без нового baseline', () => {
-    const comparison = compareToBaseline([scoreCase(evalCase, result())], baseline, '1.1.0');
-    expect(comparison.promptChanged).toBe(true);
+    const bumped = { ...STAMP, promptVersion: '1.1.0' };
+    expect(compareToBaseline([scoreCase(evalCase, result())], baseline, bumped).promptChanged).toBe(
+      true,
+    );
+  });
+
+  it('замечает правку текста промпта даже без смены версии', () => {
+    // Ровно так набор и обманули: версию в baseline поправили рукой, текст — нет.
+    const edited = { ...STAMP, promptFingerprint: 'bbbbbbbbbbbbbbbb' };
+    expect(compareToBaseline([scoreCase(evalCase, result())], baseline, edited).promptChanged).toBe(
+      true,
+    );
   });
 
   it('не сравнивает кейсы, которых в baseline нет', () => {
     const fresh = scoreCase({ ...evalCase, id: 'new' }, result({ caseId: 'new' }));
-    expect(compareToBaseline([fresh], baseline, '1.0.0').unknownCases).toEqual(['new']);
+    expect(compareToBaseline([fresh], baseline, STAMP).unknownCases).toEqual(['new']);
   });
 });
 
 describe('buildBaseline', () => {
-  it('записывает версию промпта и округлённые оценки', () => {
+  it('записывает версию промпта, его отпечаток, происхождение и округлённые оценки', () => {
     const scores = [scoreCase(evalCase, result())];
-    const baseline = buildBaseline(scores, '2.0.0', new Date('2026-08-08T10:00:00Z'));
+    const baseline = buildBaseline(
+      scores,
+      { promptVersion: '2.0.0', promptFingerprint: 'cccccccccccccccc', source: 'offline-replay' },
+      new Date('2026-08-08T10:00:00Z'),
+    );
     expect(baseline).toEqual({
       promptVersion: '2.0.0',
+      promptFingerprint: 'cccccccccccccccc',
+      source: 'offline-replay',
       recordedAt: '2026-08-08T10:00:00.000Z',
       cases: { demo: 1 },
       aggregate: 1,

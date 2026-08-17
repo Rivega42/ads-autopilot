@@ -7,14 +7,16 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import {
   buildBaseline,
   compareToBaseline,
+  describeEvalTrust,
   runEvalCase,
   scoreCase,
   type CaseScore,
   type EvalBaseline,
   type EvalCase,
   type EvalRunResult,
+  type EvalTrust,
 } from '@/ai/evals/index.js';
-import { PROMPT_VERSION } from '@/ai/prompt-loader.js';
+import { promptFingerprint, PROMPT_VERSION } from '@/ai/prompt-loader.js';
 
 /**
  * Eval-набор AI-онбординга (CLAUDE.md §8).
@@ -23,6 +25,12 @@ import { PROMPT_VERSION } from '@/ai/prompt-loader.js';
  * модель не вызывается, ключи не нужны, `pnpm test` остаётся бесплатным. Проверяется
  * всё, что стоит между моделью и БД: разбор ответов, защита от выдуманных цифр,
  * условие завершения интервью.
+ *
+ * Чего офлайн-прогон НЕ проверяет — сам промпт. Поэтому набор в каждом прогоне
+ * говорит, на чём он стоит: заголовок с происхождением фикстур уезжает в имя теста
+ * и в stderr (`ai/evals/provenance.ts`). Красным он становится там, где враньё
+ * поправимо: снятая пометка происхождения или фикстуры, записанные на другом
+ * тексте промпта.
  *
  * Живой прогон (стоит денег, нужны ключи провайдера):
  *   AI_EVALS_LIVE=1 npx vitest run tests/ai-evals
@@ -41,6 +49,8 @@ const RECORD = process.env.AI_EVALS_RECORD === '1';
 const UPDATE_BASELINE = process.env.AI_EVALS_UPDATE_BASELINE === '1';
 
 const PROMPT = PROMPT_VERSION['onboarding-interview'];
+const FINGERPRINT = promptFingerprint('onboarding-interview');
+const STAMP = { promptVersion: PROMPT, promptFingerprint: FINGERPRINT };
 
 function loadCases(): EvalCase[] {
   return readdirSync(FIXTURES_DIR)
@@ -61,7 +71,17 @@ const cases = loadCases();
 const results = new Map<string, EvalRunResult>();
 const scores: CaseScore[] = [];
 
+const trust: EvalTrust = describeEvalTrust({
+  live: LIVE,
+  cases,
+  baseline: loadBaseline(),
+  promptFingerprint: FINGERPRINT,
+});
+
 beforeAll(async () => {
+  // Баннер печатается всегда: зелёный набор не должен молча сходить за доказательство.
+  process.stderr.write(trust.banner);
+
   for (const evalCase of cases) {
     const result = await runEvalCase(evalCase, { live: LIVE });
     results.set(evalCase.id, result);
@@ -71,6 +91,8 @@ beforeAll(async () => {
       const updated: EvalCase = {
         ...evalCase,
         promptVersion: PROMPT,
+        promptFingerprint: FINGERPRINT,
+        source: 'live',
         recorded: result.recorded,
         answers: result.answers,
       };
@@ -84,7 +106,12 @@ beforeAll(async () => {
   }
 
   if (UPDATE_BASELINE) {
-    const baseline = buildBaseline(scores, PROMPT);
+    // Происхождение baseline проставляет код, а не человек: baseline, снятый с
+    // реплея, обязан выглядеть как baseline, снятый с реплея.
+    const baseline = buildBaseline(scores, {
+      ...STAMP,
+      source: LIVE ? 'live' : 'offline-replay',
+    });
     writeFileSync(BASELINE_PATH, `${JSON.stringify(baseline, null, 2)}\n`, 'utf8');
   }
 }, 600_000);
@@ -105,6 +132,17 @@ describe('онбординг: eval-набор', () => {
     });
   }
 
+  // Имя теста — единственное, что видно в выводе CI всегда. Поэтому в нём стоит
+  // не «провенанс ок», а прямая оценка того, чему этот прогон вообще свидетель.
+  it(`чему верить в этом прогоне — ${trust.headline}`, () => {
+    // Красным становится только снятая пометка: вечно падающий тест выключат, а
+    // выключенный набор хуже честного предупреждения.
+    expect(
+      trust.unmarked,
+      'фикстура без source/promptFingerprint: происхождение записей неизвестно',
+    ).toEqual([]);
+  });
+
   it('фикстуры записаны на текущей версии промпта', () => {
     // Офлайн-прогон не проверяет саму модель: если промпт поменяли, а фикстуры нет,
     // зелёный набор ничего не доказывает. Здесь это видно явно.
@@ -112,12 +150,19 @@ describe('онбординг: eval-набор', () => {
     expect(stale, `перезапиши фикстуры: AI_EVALS_LIVE=1 AI_EVALS_RECORD=1`).toEqual([]);
   });
 
+  it('фикстуры записаны на текущем ТЕКСТЕ промпта', () => {
+    // Версию можно поправить рукой — так набор и обманули при переходе на 1.1.0.
+    // Отпечаток текста рукой не подделаешь: удали из промпта блок про Метрику —
+    // и этот тест покраснеет, даже если версия осталась прежней.
+    expect(trust.stale, `перезапиши фикстуры: AI_EVALS_LIVE=1 AI_EVALS_RECORD=1`).toEqual([]);
+  });
+
   it('нет регрессии относительно baseline', () => {
     const baseline = loadBaseline();
     expect(baseline, 'baseline не записан: AI_EVALS_UPDATE_BASELINE=1').not.toBeNull();
     if (!baseline) return;
 
-    const comparison = compareToBaseline(scores, baseline, PROMPT);
+    const comparison = compareToBaseline(scores, baseline, STAMP);
     expect(comparison.regressions).toEqual([]);
     expect(comparison.aggregate.current).toBeGreaterThanOrEqual(comparison.aggregate.baseline);
     expect(comparison.unknownCases, 'новые кейсы без baseline').toEqual([]);

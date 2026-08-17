@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { interviewTurnSchema } from './turn.schema.js';
-import { applyTurnUpdates, normalizeQuote, quoteFound } from './updates.js';
+import { applyTurnUpdates, normalizeQuote, quoteFound, quoteMentionsNumber } from './updates.js';
 
 const CLIENT_SAID = ['Курсы английского для айтишников', 'Готов платить 2000 ₽ за заявку'];
 
@@ -26,6 +26,33 @@ describe('quoteFound', () => {
 
   it('не считает подтверждением односимвольную цитату', () => {
     expect(quoteFound('2', ['2000 рублей'])).toBe(false);
+  });
+});
+
+describe('quoteMentionsNumber', () => {
+  it('находит число, записанное с разделителями тысяч', () => {
+    expect(quoteMentionsNumber('2 000 ₽', 2_000)).toBe(true);
+    // Неразрывный пробел прилетает из копипасты — цитата от этого честнее не станет.
+    expect(quoteMentionsNumber('2\u00a0000 ₽', 2_000)).toBe(true);
+    expect(quoteMentionsNumber('счётчик 12.345.678', 12_345_678)).toBe(true);
+    expect(quoteMentionsNumber('12 345 678', 12_345_678)).toBe(true);
+  });
+
+  it('понимает «тыщи» и «к», как их пишут клиенты', () => {
+    expect(quoteMentionsNumber('5 тыщ в день', 5_000)).toBe(true);
+    expect(quoteMentionsNumber('до 3 тысяч', 3_000)).toBe(true);
+    expect(quoteMentionsNumber('по 2к за заявку', 2_000)).toBe(true);
+    expect(quoteMentionsNumber('1 млн в месяц', 1_000_000)).toBe(true);
+  });
+
+  it('не находит числа, которого в цитате нет', () => {
+    expect(quoteMentionsNumber('12345678', 44_001)).toBe(false);
+    expect(quoteMentionsNumber('счётчик', 99_999_999)).toBe(false);
+    expect(quoteMentionsNumber('2000 ₽', 3_000)).toBe(false);
+  });
+
+  it('не принимает часть числа за само число', () => {
+    expect(quoteMentionsNumber('44001', 4_400)).toBe(false);
   });
 });
 
@@ -87,6 +114,88 @@ describe('applyTurnUpdates', () => {
       [...CLIENT_SAID, 'Счётчик 12345678'],
     );
     expect(result.draft.metrika).toEqual({ counterId: 12_345_678 });
+  });
+
+  it('отбрасывает счётчик, цитата для которого его не содержит', () => {
+    // Клиент сказал «номер сейчас не помню» — слово «счётчик» в его ответе есть,
+    // а номера нет: цитата обязана содержать само значение, иначе это не цитата.
+    const result = applyTurnUpdates(
+      {},
+      turn({
+        updates: { metrika: { counterId: 99_999_999 } },
+        evidence: { metrika: 'счётчик' },
+      }),
+      [...CLIENT_SAID, 'Счётчик номер сейчас не помню'],
+    );
+    expect(result.draft.metrika).toBeUndefined();
+    expect(result.rejected[0]).toMatchObject({ field: 'metrika', reason: 'value-not-quoted' });
+  });
+
+  it('отбрасывает блок Метрики, если цитата подтверждает только счётчик', () => {
+    // Цитата одна на весь объект, а цель — это то, что система считает заявкой:
+    // по ней двигаются ставки, и её тоже должен был назвать клиент.
+    const result = applyTurnUpdates(
+      {},
+      turn({
+        updates: { metrika: { counterId: 12_345_678, goalId: 44_001 } },
+        evidence: { metrika: '12345678' },
+      }),
+      [...CLIENT_SAID, 'Счётчик 12345678, цель заявка с формы — 44001'],
+    );
+    expect(result.draft.metrika).toBeUndefined();
+    expect(result.rejected[0]).toMatchObject({ reason: 'value-not-quoted' });
+  });
+
+  it('принимает счётчик с целью, когда цитата содержит оба числа', () => {
+    const result = applyTurnUpdates(
+      {},
+      turn({
+        updates: { metrika: { counterId: 12_345_678, goalId: 44_001 } },
+        evidence: { metrika: 'счётчик 12345678, цель заявка с формы — 44001' },
+      }),
+      [...CLIENT_SAID, 'Да, счётчик 12345678, цель заявка с формы — 44001'],
+    );
+    expect(result.draft.metrika).toEqual({ counterId: 12_345_678, goalId: 44_001 });
+    expect(result.rejected).toEqual([]);
+  });
+
+  it('снимает id цели, который клиент не называл, но оставляет саму цель', () => {
+    // Названия целей клиент диктует словами, и переспрашивать их из-за выдуманного
+    // id — значит зациклить интервью на поле, на которое он уже ответил.
+    const result = applyTurnUpdates(
+      {},
+      turn({ updates: { conversionGoals: [{ name: 'заявка', metrikaGoalId: 44_001 }] } }),
+      CLIENT_SAID,
+    );
+    expect(result.draft.conversionGoals).toEqual([{ name: 'заявка' }]);
+    expect(result.rejected[0]).toMatchObject({
+      field: 'conversionGoals',
+      reason: 'no-evidence',
+      value: [44_001],
+    });
+  });
+
+  it('оставляет id цели, названный клиентом', () => {
+    const result = applyTurnUpdates(
+      {},
+      turn({
+        updates: { conversionGoals: [{ name: 'заявка', metrikaGoalId: 44_001 }] },
+        evidence: { conversionGoals: 'цель заявка — 44001' },
+      }),
+      [...CLIENT_SAID, 'Цель заявка — 44001'],
+    );
+    expect(result.draft.conversionGoals).toEqual([{ name: 'заявка', metrikaGoalId: 44_001 }]);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it('цели без id цитаты не требуют', () => {
+    const result = applyTurnUpdates(
+      {},
+      turn({ updates: { conversionGoals: [{ name: 'заявка с формы' }, { name: 'звонок' }] } }),
+      CLIENT_SAID,
+    );
+    expect(result.draft.conversionGoals).toEqual([{ name: 'заявка с формы' }, { name: 'звонок' }]);
+    expect(result.rejected).toEqual([]);
   });
 
   it('«Метрики нет» цитаты не требует', () => {

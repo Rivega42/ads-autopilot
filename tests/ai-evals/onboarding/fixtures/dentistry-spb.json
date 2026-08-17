@@ -2,6 +2,8 @@
   "id": "dentistry-spb",
   "description": "Стоматология в СПб: общий бюджет на всю рекламу, минус-город, конкурентов не знает",
   "promptVersion": "1.1.0",
+  "promptFingerprint": "dcebd26d024bf9f6",
+  "source": "handwritten",
   "style": "по-деловому, сухо",
   "persona": {
     "продукт": "стоматология в Санкт-Петербурге, имплантация и виниры",

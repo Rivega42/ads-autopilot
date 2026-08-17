@@ -36,11 +36,24 @@ export interface EvalExpectation {
   maxTurns?: number;
 }
 
+/**
+ * Как получены записанные ходы. `handwritten` — их сочинил или правил человек:
+ * прогонять такой кейс офлайн можно, но о качестве промпта он не говорит ничего,
+ * и набор обязан сказать об этом вслух (`provenance.ts`).
+ */
+export type EvalRecordingSource = 'live' | 'handwritten';
+
 export interface EvalCase {
   id: string;
   description: string;
   /** Версия промпта, под которой записаны `recorded`. Несовпадение = фикстуры устарели. */
   promptVersion: string;
+  /**
+   * Отпечаток ТЕКСТА промпта на момент записи. Версию можно поправить рукой и
+   * получить зелёный набор на устаревших записях — отпечаток так не подделать.
+   */
+  promptFingerprint: string;
+  source: EvalRecordingSource;
   /** Факты о клиенте: в live-режиме по ним отвечает модель-персона. */
   persona: Record<string, unknown>;
   /** Манера речи персоны — вторая переменная промпта персоны. */

@@ -11,7 +11,7 @@ import {
 import { parseDraft } from '@/ai/onboarding/state.js';
 import { interviewTurnSchema, personaReplySchema } from '@/ai/onboarding/turn.schema.js';
 import type { InterviewTurn } from '@/ai/onboarding/turn.schema.js';
-import { loadPrompt } from '@/ai/prompt-loader.js';
+import { loadPrompt, promptHeader, PROMPT_VERSION } from '@/ai/prompt-loader.js';
 import { runAgent, type AgentRun, type LlmMessage } from '@/clients/llm/index.js';
 import { describeError } from '@/lib/errors.js';
 
@@ -79,9 +79,25 @@ export async function runEvalCase(
   }
 }
 
+const INTERVIEW_PROMPT = 'onboarding-interview';
+
 function recordedRun(evalCase: EvalCase, observed: ScriptedTurn[]): RunInterviewTurn {
   let index = 0;
-  return (_opts) => {
+  const expectedHeader = promptHeader(INTERVIEW_PROMPT, PROMPT_VERSION[INTERVIEW_PROMPT]);
+
+  return (opts) => {
+    // Ход берётся из записи, но системный промпт всё равно обязан быть тем самым:
+    // иначе прогон «проверяет» интервью, собранное вообще другим текстом. Совпадение
+    // самого текста с записью проверяет отпечаток в фикстуре (`provenance.ts`).
+    if (opts.system === undefined || !opts.system.includes(expectedHeader)) {
+      return Promise.reject(
+        new Error(
+          `eval "${evalCase.id}": интервью ушло в модель без промпта ${expectedHeader}. ` +
+            'Записанные ходы к такому прогону отношения не имеют.',
+        ),
+      );
+    }
+
     const scripted = evalCase.recorded[index];
     index += 1;
     if (scripted === undefined) {

@@ -2,6 +2,8 @@
   "id": "english-courses",
   "description": "Кооперативный клиент из TZ §13.1: курсы английского для айтишников, бюджет на канал",
   "promptVersion": "1.1.0",
+  "promptFingerprint": "dcebd26d024bf9f6",
+  "source": "handwritten",
   "style": "дружелюбно, короткими фразами",
   "persona": {
     "продукт": "курсы английского для айтишников",
@@ -173,7 +175,7 @@
         }
       },
       "evidence": {
-        "metrika": "12345678"
+        "metrika": "счётчик 12345678, цель заявка с формы — 44001"
       },
       "done": true
     }

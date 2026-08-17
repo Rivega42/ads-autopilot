@@ -75,6 +75,22 @@ export function metrikaConfigFromBrief(brief: ClientBriefData | ClientBriefDraft
   };
 }
 
+/**
+ * Поедут ли по такой конфигурации конверсии.
+ *
+ * Загрузка (`ingestion/metrika.ts`) требует и счётчика, и цели: записанная в одиночку
+ * цель выглядит как настроенная Метрика, но не включает ничего. Предикат общий,
+ * чтобы этот факт не пришлось помнить каждому, кто пишет конфигурацию.
+ */
+export function isMetrikaConfigComplete(config: MetrikaBriefConfig): boolean {
+  return config.metrikaCounterId !== null && config.metrikaGoalId !== null;
+}
+
+/** Текст предупреждения о неполной конфигурации — один на все места записи. */
+export const INCOMPLETE_METRIKA_CONFIG =
+  'metrika config is incomplete: conversions stay off until both ' +
+  'Client.metrikaCounterId and Client.metrikaGoalId are set';
+
 /** Апдейт из известного: колонка, про которую бриф молчит, не должна обнуляться. */
 export function metrikaConfigPatch(config: MetrikaBriefConfig): MetrikaConfigPatch {
   const patch: MetrikaConfigPatch = {};
@@ -116,14 +132,9 @@ export async function saveMetrikaConfig(
 
   await db.client.update({ where: { id: clientId }, data: patch, select: { id: true } });
 
-  if (config.metrikaCounterId === null || config.metrikaGoalId === null) {
-    // Загрузка требует и счётчика, и цели. Без этой строки «настройка записана»
-    // читалось бы как «конверсии поедут».
-    log.warn(
-      { clientId, ...config },
-      'metrika config from the brief is incomplete: conversions stay off until both ' +
-        'Client.metrikaCounterId and Client.metrikaGoalId are set',
-    );
+  if (!isMetrikaConfigComplete(config)) {
+    // Без этой строки «настройка записана» читалось бы как «конверсии поедут».
+    log.warn({ clientId, ...config }, INCOMPLETE_METRIKA_CONFIG);
   } else {
     log.info({ clientId, ...config }, 'metrika config saved from the brief');
   }

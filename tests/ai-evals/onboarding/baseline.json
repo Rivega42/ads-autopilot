@@ -1,6 +1,8 @@
 {
   "promptVersion": "1.1.0",
-  "recordedAt": "2026-08-08T14:08:03.074Z",
+  "promptFingerprint": "dcebd26d024bf9f6",
+  "source": "offline-replay",
+  "recordedAt": "2026-08-17T06:10:38.818Z",
   "cases": {
     "dentistry-spb": 1,
     "english-courses": 1,
