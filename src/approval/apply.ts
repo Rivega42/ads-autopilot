@@ -75,16 +75,16 @@ export async function applyApproval(approvalId: string, approvedBy: string): Pro
     }
 
     const stale = await precondition(ctx, action);
-    if (stale) return fail(row, approvedBy, stale);
+    if (stale) return fail(row, approvedBy, stale, action);
   } catch (err) {
-    return fail(row, approvedBy, describeError(err));
+    return fail(row, approvedBy, describeError(err), action);
   }
 
   let result;
   try {
     result = await executeAction({ ...ctx, dryRun }, action);
   } catch (err) {
-    return fail(row, approvedBy, describeError(err));
+    return fail(row, approvedBy, describeError(err), action);
   }
 
   // ── дальше изменение уже в кабинете: только фиксация факта ──────────────────
@@ -172,8 +172,10 @@ async function fail(
   approval: PendingApproval,
   approvedBy: string,
   error: string,
+  action?: ApprovalAction,
 ): Promise<ApplyOutcome> {
   log.error({ approvalId: approval.id, err: error }, 'approval apply failed');
+  await recordApprovalFailure(approval, error, action);
   try {
     await prisma.pendingApproval.update({
       where: { id: approval.id },
@@ -184,6 +186,38 @@ async function fail(
   }
   await editCard(approval, { kind: 'failed', by: approvedBy, error });
   return { status: 'FAILED', error };
+}
+
+/**
+ * Дублирует отказ в `ErrorLog`.
+ *
+ * `PendingApproval.error` описывает одну заявку, а алерт про всплеск ошибок
+ * (ТЗ §3.6) считает строки `ErrorLog`. Пока апрувы туда не писали, серия отказов
+ * на одном канале — протухший токен, лежащее API — не поднимала тревогу вовсе:
+ * человек видел разъехавшиеся карточки и не понимал, что сломалось одно и то же.
+ *
+ * Никогда не бросает: заявка уже провалена, и вторая ошибка поверх первой лишь
+ * скроет исходную причину.
+ */
+async function recordApprovalFailure(
+  approval: PendingApproval,
+  error: string,
+  action?: ApprovalAction,
+): Promise<void> {
+  try {
+    await prisma.errorLog.create({
+      data: {
+        clientId: approval.clientId,
+        provider: action?.channel ?? null,
+        scope: 'approval:apply',
+        code: action?.kind ?? 'UNPARSED_PAYLOAD',
+        message: error,
+        context: { approvalId: approval.id, kind: approval.kind },
+      },
+    });
+  } catch (err) {
+    log.error({ approvalId: approval.id, err: describeError(err) }, 'cannot persist to ErrorLog');
+  }
 }
 
 /**

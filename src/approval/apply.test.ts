@@ -32,12 +32,14 @@ const h = vi.hoisted(() => {
   const state: {
     row: Row | null;
     changeLogs: Record<string, unknown>[];
+    errorLogs: Record<string, unknown>[];
     updateError: string | null;
     changeLogError: string | null;
     negatedError: string | null;
   } = {
     row: null,
     changeLogs: [],
+    errorLogs: [],
     updateError: null,
     changeLogError: null,
     negatedError: null,
@@ -80,6 +82,12 @@ const h = vi.hoisted(() => {
         updateMany: vi.fn(async (_args: unknown) => {
           if (state.negatedError) throw new Error(state.negatedError);
           return { count: 2 };
+        }),
+      },
+      errorLog: {
+        create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          state.errorLogs.push(data);
+          return data;
         }),
       },
     },
@@ -181,6 +189,7 @@ function negatedUpdate(): unknown {
 beforeEach(() => {
   vi.clearAllMocks();
   h.state.changeLogs = [];
+  h.state.errorLogs = [];
   h.state.updateError = null;
   h.state.changeLogError = null;
   h.state.negatedError = null;
@@ -518,5 +527,43 @@ describe('applyApproval', () => {
     h.listCampaigns.mockRejectedValue(new Error('502 Bad Gateway'));
     expect((await applyApproval('ap1', '@roman')).status).toBe('APPLIED');
     expect(h.setBudgets).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('журнал ошибок', () => {
+  it('провал применения попадает в ErrorLog с каналом и видом действия', async () => {
+    seed();
+    h.setBudgets.mockRejectedValue(new Error('502 Bad Gateway'));
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out.status).toBe('FAILED');
+    // Алерт про всплеск ошибок (ТЗ §3.6) считает строки ErrorLog: без этой записи
+    // серия отказов на одном канале не поднимает тревогу вовсе.
+    expect(h.state.errorLogs).toHaveLength(1);
+    expect(h.state.errorLogs[0]).toMatchObject({
+      clientId: 'cl1',
+      provider: 'YANDEX_DIRECT',
+      scope: 'approval:apply',
+      code: 'budget_change',
+    });
+  });
+
+  it('нечитаемый payload тоже журналируется, хоть канал и неизвестен', async () => {
+    seed({ payload: { kind: 'из будущего' } });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out.status).toBe('FAILED');
+    expect(h.state.errorLogs[0]).toMatchObject({
+      provider: null,
+      code: 'UNPARSED_PAYLOAD',
+    });
+  });
+
+  it('успешное применение журнал ошибок не трогает', async () => {
+    seed();
+    await applyApproval('ap1', '@roman');
+    expect(h.state.errorLogs).toHaveLength(0);
   });
 });
