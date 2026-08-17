@@ -13,11 +13,31 @@ const optionalStr = z
   .transform((v) => (v === '' ? undefined : v))
   .optional();
 
+const TRUTHY = new Set(['true', '1', 'yes', 'on']);
+const FALSY = new Set(['false', '0', 'no', 'off']);
+
+/**
+ * Булев флаг из окружения. Непонятное значение — ошибка запуска, а не «false».
+ *
+ * Так делается ради DRY_RUN: молчаливое приведение к false означало бы, что
+ * опечатка `DRY_RUN=True` снимает предохранитель и система начинает писать
+ * в кабинеты клиентов. Предохранитель, который выключается опиской, не защищает.
+ */
 const boolish = (def: boolean) =>
   z
     .string()
     .optional()
-    .transform((v) => (v === undefined || v === '' ? def : v === 'true' || v === '1'));
+    .transform((v, ctx) => {
+      if (v === undefined || v.trim() === '') return def;
+      const normalized = v.trim().toLowerCase();
+      if (TRUTHY.has(normalized)) return true;
+      if (FALSY.has(normalized)) return false;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `ожидалось true/false (допустимо ${[...TRUTHY, ...FALSY].join(', ')}), получено «${v}»`,
+      });
+      return z.NEVER;
+    });
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -66,6 +86,9 @@ const envSchema = z.object({
   OPENROUTER_API_KEY: optionalStr,
   LLM_MONTHLY_BUDGET_USD: z.coerce.number().positive().default(50),
 });
+
+/** Экспортируется ради тестов: сам `env` читается один раз при импорте модуля. */
+export { envSchema };
 
 export type Env = z.infer<typeof envSchema>;
 

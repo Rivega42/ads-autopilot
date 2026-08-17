@@ -7,12 +7,14 @@ coverage
 .vscode
 .idea
 *.log
-.env
-.env.*
+# Якорить на корень нельзя: Next.js штатно читает web/.env.local, и такой файл
+# уехал бы внутрь публикуемого образа дашборда.
+**/.env
+**/.env.*
 !.env.example
 .DS_Store
 docs
 tests
 *.md
 !README.md
-*.tsbuildinfo
+**/*.tsbuildinfo

@@ -48,7 +48,7 @@ describe('markNegatedQueries', () => {
       },
       data: { negated: true },
     });
-    expect(marked).toBe(3);
+    expect(marked).toEqual({ mapped: true, count: 3 });
   });
 
   it('повторы фраз в одну выборку не превращаются в дубли условия', async () => {
@@ -60,7 +60,10 @@ describe('markNegatedQueries', () => {
   });
 
   it('пустой список фраз не ходит в БД', async () => {
-    expect(await markNegatedQueries({ ...input, phrases: [] })).toBe(0);
+    expect(await markNegatedQueries({ ...input, phrases: [] })).toEqual({
+      mapped: true,
+      count: 0,
+    });
     expect(h.campaignFindUnique).not.toHaveBeenCalled();
     expect(h.statUpdateMany).not.toHaveBeenCalled();
   });
@@ -68,7 +71,7 @@ describe('markNegatedQueries', () => {
   it('ненайденная кампания — warn, а не исключение', async () => {
     h.campaignFindUnique.mockResolvedValue(null);
 
-    expect(await markNegatedQueries(input)).toBe(0);
+    expect(await markNegatedQueries(input)).toEqual({ mapped: false, count: 0 });
     expect(h.statUpdateMany).not.toHaveBeenCalled();
     expect(h.warn).toHaveBeenCalledTimes(1);
   });
@@ -76,7 +79,7 @@ describe('markNegatedQueries', () => {
   it('кампания чужого клиента не помечается', async () => {
     h.campaignFindUnique.mockResolvedValue({ id: 'camp-internal-1', clientId: 'cl-other' });
 
-    expect(await markNegatedQueries(input)).toBe(0);
+    expect(await markNegatedQueries(input)).toEqual({ mapped: false, count: 0 });
     expect(h.statUpdateMany).not.toHaveBeenCalled();
     expect(h.warn).toHaveBeenCalledTimes(1);
   });

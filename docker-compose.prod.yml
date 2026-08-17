@@ -55,17 +55,29 @@ services:
       retries: 10
     networks: [internal]
 
+  # Миграции — отдельный одноразовый контейнер, а не шаг внутри api. Пока они
+  # шли в api, длинная миграция (backfill, CREATE INDEX без CONCURRENTLY) успевала
+  # провалить его healthcheck: api оставался живым, но `up --wait` возвращал
+  # ошибку, а worker и bot, ждущие его здоровья, не запускались вовсе.
+  migrate:
+    <<: *app-base
+    restart: 'no'
+    healthcheck: { disable: true }
+    environment:
+      <<: *app-env
+      ROLE: migrate
+    depends_on:
+      postgres: { condition: service_healthy }
+
   api:
     <<: *app-base
     environment:
       <<: *app-env
       ROLE: api
-      # Миграции накатывает только api. Prisma берёт advisory-lock, так что гонки
-      # не было бы и при трёх контейнерах, но каждый лишний ждал бы её впустую.
-      RUN_MIGRATIONS: 'true'
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
 
   worker:
     <<: *app-base
@@ -76,12 +88,10 @@ services:
     environment:
       <<: *app-env
       ROLE: worker
-    # Ждём здоровья api: до конца миграций схема в базе старая, и воркер начал бы
-    # ходить в колонки, которых ещё нет.
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-      api: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
 
   bot:
     <<: *app-base
@@ -93,12 +103,14 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-      api: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
 
   web:
     image: ${WEB_IMAGE:-ghcr.io/rivega42/ads-autopilot-web:latest}
     restart: unless-stopped
-    env_file: [.env]
+    # env_file здесь намеренно нет: дашборд — единственный компонент, который
+    # смотрит наружу, и мастер-ключ с токенами площадок ему не нужен. Всё, что он
+    # читает, перечислено ниже.
     environment:
       NODE_ENV: production
       TZ: Europe/Moscow
@@ -107,8 +119,10 @@ services:
       # доступ в обход прокси не должен открывать расходы клиентов.
       DASHBOARD_USER: ${DASHBOARD_USER:-admin}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?}
+      DASHBOARD_AUTH_MODE: ${DASHBOARD_AUTH_MODE:-}
     depends_on:
       postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
     networks: [internal]
     logging:
       driver: json-file

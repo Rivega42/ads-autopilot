@@ -77,8 +77,9 @@ echo 'WEB_IMAGE=ads-autopilot-web:latest' >> .env
 ```
 
 Скрипт делает `pull`, `up -d --wait` и дёргает `/health`. Миграции накатывает
-контейнер `api` на старте (`RUN_MIGRATIONS=true`); prisma берёт advisory-lock,
-поэтому повторный запуск деплоя безопасен.
+отдельный одноразовый контейнер `migrate`, и только после его успешного выхода
+стартуют `api`, `worker`, `bot` и `web`. Prisma берёт advisory-lock, поэтому
+повторный запуск деплоя безопасен, а длинная миграция ничей healthcheck не рушит.
 
 ## 6. Проверки после деплоя
 
@@ -89,8 +90,9 @@ curl -s -o /dev/null -w '%{http_code}\n' https://dash.example.ru/   # 401 — т
 docker compose -f docker-compose.prod.yml logs worker | grep 'worker started'
 ```
 
-В логе воркера должны быть десять строк `scheduled repeatable job` — по одной на
-задачу из TZ §3.4. Меньше — значит часть расписаний не встала.
+В логе воркера должны быть одиннадцать строк `scheduled repeatable job` — по одной
+на задачу из TZ §3.4 плюс `evaluate-ab-tests`. Меньше — значит часть расписаний
+не встала. Точный список печатается там же одной строкой `worker started`.
 
 Телеграм: `/start` боту, должен ответить. Молчит — смотри `logs bot`.
 

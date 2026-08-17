@@ -28,12 +28,22 @@ export interface MarkNegatedInput {
  * Кампания живёт у ровно одного клиента, поэтому чужой `clientId` означает
  * рассинхрон данных: тогда лучше не пометить ничего, чем тронуть чужую статистику.
  *
- * @returns сколько строк статистики помечено (0, если кампанию не удалось сопоставить).
+ * `mapped: false` отделено от `count: 0` намеренно: ноль строк бывает и в норме
+ * (фразы уже помечены прошлым прогоном), а несопоставленная кампания означает,
+ * что пометки не будет никогда и человеку это надо показать.
+ *
  * @throws ошибку Prisma — вызывающий сам решает, чем это для него является.
  */
-export async function markNegatedQueries(input: MarkNegatedInput): Promise<number> {
+export interface MarkNegatedResult {
+  /** Нашлась ли кампания, к которой относится действие. */
+  mapped: boolean;
+  /** Сколько строк статистики помечено. */
+  count: number;
+}
+
+export async function markNegatedQueries(input: MarkNegatedInput): Promise<MarkNegatedResult> {
   const phrases = [...new Set(input.phrases)];
-  if (phrases.length === 0) return 0;
+  if (phrases.length === 0) return { mapped: true, count: 0 };
 
   const campaign = await prisma.campaign.findUnique({
     where: {
@@ -53,12 +63,12 @@ export async function markNegatedQueries(input: MarkNegatedInput): Promise<numbe
       },
       'cannot map campaign to internal id: negated flag not set',
     );
-    return 0;
+    return { mapped: false, count: 0 };
   }
 
   const updated = await prisma.searchQueryStat.updateMany({
     where: { adGroup: { campaignId: campaign.id }, query: { in: phrases }, negated: false },
     data: { negated: true },
   });
-  return updated.count;
+  return { mapped: true, count: updated.count };
 }

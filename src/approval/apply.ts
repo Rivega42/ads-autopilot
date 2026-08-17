@@ -307,12 +307,17 @@ async function markNegatedIfNeeded(
 ): Promise<string | null> {
   if (action.kind !== 'add_negatives' || dryRun) return null;
   try {
-    await markNegatedQueries({
+    const result = await markNegatedQueries({
       clientId: action.clientId,
       provider: action.channel,
       campaignExternalId: action.campaignExternalId,
       phrases: action.phrases,
     });
+    // Несопоставленная кампания видна только в логе, а последствие — вечно
+    // повторяющаяся карточка про те же фразы. Человек должен узнать сразу.
+    if (!result.mapped) {
+      return `кампания ${action.campaignExternalId} не найдена в базе: фразы применены, но пометка не поставлена и предложение вернётся`;
+    }
     return null;
   } catch (err) {
     const message = describeError(err);

@@ -5,6 +5,13 @@
 # переменные, объявленные в окружении, поэтому $host и $remote_addr остаются
 # нетронутыми — их nginx раскрывает сам. Домены задаются в .env деплоя.
 
+# Заголовок Connection ставится по факту апгрейда, а не всем подряд: с жёстким
+# `Connection "upgrade"` keep-alive до апстрима не живёт вообще.
+map $http_upgrade $connection_upgrade {
+  default upgrade;
+  ''      close;
+}
+
 # Общий редирект на HTTPS. ACME-челлендж обязан остаться на 80: certbot renew
 # ходит по HTTP, и без этого исключения продление сертификата упадёт.
 server {
@@ -76,6 +83,6 @@ server {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
+    proxy_set_header Connection $connection_upgrade;
   }
 }

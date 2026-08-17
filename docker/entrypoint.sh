@@ -6,19 +6,32 @@ set -eu
 # осталось бы незамеченным для докера.
 ROLE="${ROLE:-api}"
 
-if [ "${RUN_MIGRATIONS:-false}" = "true" ]; then
-  echo "entrypoint: prisma migrate deploy (ROLE=${ROLE})"
+run_migrations() {
+  echo "entrypoint: prisma migrate deploy"
   # Собственный advisory-lock не нужен: prisma берёт его в Postgres сама, поэтому
   # одновременный старт нескольких контейнеров не приводит к гонке миграций.
   ./node_modules/.bin/prisma migrate deploy
+}
+
+# RUN_MIGRATIONS остаётся для одиночного запуска без compose. В прод-стеке
+# миграции делает отдельная роль migrate: пока они шли внутри api, длинная
+# миграция успевала провалить его healthcheck, и зависящие от него worker и bot
+# не стартовали вовсе.
+if [ "${RUN_MIGRATIONS:-false}" = "true" ] && [ "$ROLE" != "migrate" ]; then
+  run_migrations
 fi
 
 case "$ROLE" in
+migrate)
+  run_migrations
+  echo "entrypoint: миграции применены, выхожу"
+  exit 0
+  ;;
 api) exec node dist/server.js ;;
 worker) exec node dist/apps/worker.js ;;
 bot) exec node dist/apps/bot.js ;;
 *)
-  echo "entrypoint: неизвестная роль ROLE=${ROLE}; ожидается api|worker|bot" >&2
+  echo "entrypoint: неизвестная роль ROLE=${ROLE}; ожидается migrate|api|worker|bot" >&2
   exit 64
   ;;
 esac

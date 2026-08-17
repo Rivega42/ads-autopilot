@@ -11,8 +11,10 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
+# Образы, собранные на самой машине (docs/DEPLOY.md §4), в реестре не лежат, и
+# строгий pull обрывал бы деплой ещё до старта стека.
 echo "deploy: pull"
-docker compose -f "$COMPOSE_FILE" pull
+docker compose -f "$COMPOSE_FILE" pull --ignore-pull-failures
 
 # --wait держит команду до healthy: без него скрипт завершался бы успехом ровно
 # в тот момент, когда контейнеры только начали падать в рестарт-петлю.

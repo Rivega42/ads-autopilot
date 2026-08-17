@@ -487,6 +487,9 @@ describe('applyApproval', () => {
 
     expect(out.status).toBe('APPLIED');
     expect(h.prisma.searchQueryStat.updateMany).not.toHaveBeenCalled();
+    // Молчаливый пропуск означал бы, что та же карточка приходит каждый день, и
+    // человек не понимает почему. Отказ должен доехать до него текстом.
+    expect(out.status === 'APPLIED' && out.warning).toContain('пометка не поставлена');
   });
 
   it('другие виды действий статистику запросов не трогают', async () => {
