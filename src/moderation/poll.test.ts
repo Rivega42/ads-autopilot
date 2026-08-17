@@ -1,4 +1,4 @@
-import { ModerationStatus, Provider } from '@prisma/client';
+import { AdStatus, ModerationStatus, Provider } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
@@ -158,6 +158,44 @@ describe('pollAdModeration', () => {
     expect(result.rejected).toEqual([]);
     expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.APPROVED);
     expect(db.adOf('ad1').moderationRetries).toBe(0);
+  });
+
+  it('снимает зависший REWRITING с объявления, которого нет в листинге', async () => {
+    db.seedAd({
+      id: 'ad1',
+      adGroupId: 'g1',
+      externalId: 'снесён-при-замене',
+      moderationStatus: ModerationStatus.REWRITING,
+      moderationRetries: 1,
+      updatedAt: new Date(Date.now() - 60 * 60 * 1_000),
+    });
+
+    // Кабинет этот баннер уже не отдаёт: у VK правка текста удаляет старый баннер, и
+    // процесс умер до записи нового id. Внутри цикла по объявлениям кабинета такую
+    // строку не поднять вообще ничем — она навсегда выключена из модерации.
+    const result = await poll([]);
+
+    expect(result.reclaimed).toBe(1);
+    expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.REJECTED);
+    expect(db.adOf('ad1').moderationRetries).toBe(1);
+  });
+
+  it('не отдаёт в переписывание объявление, которое не крутится', async () => {
+    db.seedAd({
+      id: 'ad1',
+      adGroupId: 'g1',
+      externalId: 'a1',
+      status: AdStatus.PAUSED,
+      moderationStatus: ModerationStatus.REJECTED,
+      moderationReason: 'Превосходная степень без подтверждения',
+    });
+
+    const result = await poll([remoteAd({ externalId: 'a1', adGroupExternalId: 'ext-1' })]);
+
+    // Статус модерации сверить полезно, а вот чинить нечего: показов нет, зато
+    // переписывание стоит двух вызовов модели и заводит в кабинете новый баннер.
+    expect(result.polled).toBe(1);
+    expect(result.rejected).toEqual([]);
   });
 
   it('берёт тексты с площадки, а не из нашей БД', async () => {

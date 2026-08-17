@@ -1,4 +1,4 @@
-import { ChangeActor, ModerationStatus, type Prisma } from '@prisma/client';
+import { AdStatus, ChangeActor, ModerationStatus, type Prisma } from '@prisma/client';
 
 import type { ChannelAdapter, ChannelContext, WriteResult } from '@/channels/types.js';
 import { textVariantId } from '@/creatives/types.js';
@@ -88,12 +88,16 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
- * Расхождение между `Ad.externalId` и живым объявлением в кабинете.
+ * Расхождение между `Ad.externalId` и живым объявлением в кабинете — в `ErrorLog`.
  *
  * Единственный источник такого расхождения — занятая пара `(adGroupId, externalId)`:
  * новый баннер уже завела почасовая загрузка (`ingestion/entities.ts` делает upsert по
- * той же паре). Слить две строки автоматика не вправе — это удаление данных, — поэтому
- * пишем в `ErrorLog`, откуда `reporter/alerts.ts` доносит расхождение до человека.
+ * той же паре). Слить две строки автоматика не вправе — это удаление данных.
+ *
+ * Запись здесь — только след для разбора: одиночная строка в `ErrorLog` до человека
+ * сама не доходит (`reporter/alerts.ts` шлёт `error_burst` от десяти ошибок за пять
+ * минут, а расхождение по определению одиночное). Человека зовёт эскалация на месте
+ * вызова — без неё строка осталась бы молча расходиться с кабинетом.
  */
 async function reportExternalIdLoss(
   rc: RepairContext,
@@ -113,19 +117,60 @@ async function reportExternalIdLoss(
   });
 }
 
-/** Переводит строку на id пересозданного объявления. `false` — id остался прежним. */
-async function switchExternalId(
-  rc: RepairContext,
-  ad: RejectedAd,
-  externalId: string,
-): Promise<boolean> {
-  try {
-    await rc.deps.db.ad.update({ where: { id: ad.id }, data: { externalId } });
-    return true;
-  } catch (err) {
-    await reportExternalIdLoss(rc, ad, externalId, err);
-    return false;
-  }
+/** Поля строки, описывающие отправленный в кабинет текст. */
+function rewrittenTextFields(ad: AdText): Prisma.AdUpdateInput {
+  return {
+    title: ad.title,
+    body: ad.text,
+    // `llmVariant` — отпечаток текста, по нему A/B-отчёт складывает статистику
+    // (см. `creatives/ab/experiment.ts`). Переписывание меняет текст, значит это
+    // новый вариант; категория отказа в это поле не помещается ни по смыслу, ни по
+    // последствиям — два разных объявления с одной категорией слились бы в один ряд.
+    llmVariant: textVariantId(ad),
+  };
+}
+
+interface RewriteRecord {
+  classification: ClassifiedRejection;
+  rewrite: { ad: AdText; changes: string; promptVersion: string };
+  /** Новый внешний id, если объявление пришлось пересоздать. */
+  switchedTo: string | null;
+}
+
+/**
+ * Запись `moderation_rewrite` в журнал.
+ *
+ * Нужна не только для аудита: на неё смотрит A/B-отчёт (`TEXT_REWRITE_ACTIONS` в
+ * `creatives/ab/experiment.ts`), исключая из сравнения объявления, у которых текст
+ * сменился внутри окна. Пропустить её на любой ветке — значит подшить показы нового
+ * текста к отпечатку старого варианта.
+ */
+async function logRewrite(rc: RepairContext, ad: RejectedAd, rec: RewriteRecord): Promise<void> {
+  await rc.deps.db.changeLog.create({
+    data: {
+      campaignId: ad.campaignId,
+      entityType: 'AD',
+      entityId: ad.id,
+      action: REWRITE_ACTION,
+      prevValue: toJson({ ...ad.ad, reason: ad.reason }),
+      newValue: toJson({
+        ...rec.rewrite.ad,
+        category: rec.classification.category,
+        ruleIds: rec.classification.rules.map((rule) => rule.id),
+        retries: ad.retries + 1,
+        prompts: [rec.classification.promptVersion, rec.rewrite.promptVersion],
+        // Только когда id реально сменился: у Директа объявление правится на месте,
+        // и пустая пара полей в каждой записи журнала читалась бы как «было и стало
+        // одно и то же», а не «замены не было».
+        ...(rec.switchedTo === null
+          ? {}
+          : { externalIdBefore: ad.externalId, externalIdAfter: rec.switchedTo }),
+      }),
+      reason: rec.rewrite.changes,
+      actor: ChangeActor.AI,
+      provider: rc.target.provider,
+    },
+  });
 }
 
 /**
@@ -235,8 +280,34 @@ async function escalate(
   return { status: 'escalated', cause: input.cause };
 }
 
+/**
+ * Побочная работа поверх уже случившегося отказа.
+ *
+ * Наверх обязана уйти исходная ошибка отправки — её ждёт `ErrorLog` прогона, и по ней
+ * человек поймёт, что произошло. Упавший журнал или недоставленное письмо подменять
+ * её собой права не имеют.
+ */
+async function bestEffort(
+  adId: string,
+  message: string,
+  action: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await action();
+  } catch (err) {
+    log.error({ adId, err: describeError(err) }, message);
+  }
+}
+
 export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promise<RepairOutcome> {
   const { deps, target, ctx, adapter } = rc;
+
+  if (ad.status !== AdStatus.ACTIVE) {
+    // Выключенное объявление никому не показывается, а починка стоит двух вызовов
+    // модели и нового баннера в кабинете. Проверка до классификации — она же и есть
+    // цена вопроса.
+    return { status: 'skipped', reason: 'ad is not running' };
+  }
 
   if (ad.retries >= MAX_MODERATION_RETRIES) {
     return escalate(rc, ad, {
@@ -301,10 +372,12 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
 
   // Заявка на объявление: перевод REJECTED → REWRITING со сверкой счётчика делает
   // захват атомарным. Два наложившихся прогона не отправят два разных текста —
-  // второй увидит count = 0 и уйдёт.
+  // второй увидит count = 0 и уйдёт. Тем же условием ловится объявление, выключенное
+  // синком между опросом и отправкой: включать его обратно мы права не имеем.
   const claim = await deps.db.ad.updateMany({
     where: {
       id: ad.id,
+      status: AdStatus.ACTIVE,
       moderationStatus: ModerationStatus.REJECTED,
       moderationRetries: ad.retries,
     },
@@ -313,38 +386,71 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
       moderationRetries: ad.retries + 1,
     },
   });
-  if (claim.count === 0) return { status: 'skipped', reason: 'claimed by another run' };
+  if (claim.count === 0) {
+    return { status: 'skipped', reason: 'claimed by another run or no longer active' };
+  }
 
   let applied: WriteResult;
   try {
     applied = await updateAdText(ctx, ad.externalId, rewrite.ad);
   } catch (err) {
-    // Статус возвращаем, счётчик — нет. У VK «обновление текста» это создание нового
-    // баннера с удалением старого, и упасть оно может уже после создания: считать
-    // такую попытку несостоявшейся значило бы отправить ещё один текст поверх.
-    await deps.db.ad.updateMany({
-      where: { id: ad.id, moderationStatus: ModerationStatus.REWRITING },
-      data: { moderationStatus: ModerationStatus.REJECTED },
-    });
-
     // Отказ на полпути: замена уже создана и уже показывается, а старое объявление
     // осталось (адаптер гасит его сам). Единственное место, где сохранился id живого
     // баннера, — контекст ошибки; не забрать его отсюда значит потерять объявление,
     // которое тратит бюджет клиента, навсегда.
     const orphan = replacementExternalId(err instanceof AppError ? err.context : null);
+    const live = orphan !== null && orphan !== ad.externalId ? orphan : null;
+
+    // Статус возвращаем, счётчик — нет. У VK «обновление текста» это создание нового
+    // баннера с удалением старого, и упасть оно может уже после создания: считать
+    // такую попытку несостоявшейся значило бы отправить ещё один текст поверх.
+    const release = { moderationStatus: ModerationStatus.REJECTED };
     let liveExternalId = ad.externalId;
-    if (orphan !== null && orphan !== ad.externalId && (await switchExternalId(rc, ad, orphan))) {
-      liveExternalId = orphan;
-      log.warn(
-        { adId: ad.id, from: ad.externalId, to: orphan },
-        'channel replaced the ad but left the old one; external id switched to the live banner',
+    if (live === null) {
+      // Сверка со статусом: если захват успел протухнуть и его снял опрос, судьбу
+      // строки решает он, а не мы.
+      await deps.db.ad.updateMany({
+        where: { id: ad.id, moderationStatus: ModerationStatus.REWRITING },
+        data: release,
+      });
+    } else {
+      // Новый id и снятие захвата — одной записью. Двумя запросами между ними
+      // открывалось бы окно: падение внутри него оставляло бы строку с мёртвым id и
+      // потраченной попыткой, а поднять её нечем — старого баннера в листинге нет.
+      try {
+        await deps.db.ad.update({
+          where: { id: ad.id },
+          data: { ...rewrittenTextFields(rewrite.ad), ...release, externalId: live },
+        });
+        liveExternalId = live;
+        log.warn(
+          { adId: ad.id, from: ad.externalId, to: live },
+          'channel replaced the ad but left the old one; external id switched to the live banner',
+        );
+      } catch (writeErr) {
+        // Захват снять обязаны в любом случае: строка в `REWRITING` с мёртвым id — это
+        // объявление, выключенное из модерации до ручного вмешательства.
+        await deps.db.ad.updateMany({
+          where: { id: ad.id, moderationStatus: ModerationStatus.REWRITING },
+          data: release,
+        });
+        await reportExternalIdLoss(rc, ad, live, writeErr);
+      }
+    }
+
+    const adopted = liveExternalId !== ad.externalId;
+    if (adopted) {
+      // Текст в кабинете уже сменился — в журнале это должно быть видно так же, как
+      // на успешной ветке, иначе A/B не отсеет смешанную статистику.
+      await bestEffort(ad.id, 'failed to log the rewrite of a half-applied update', () =>
+        logRewrite(rc, ad, { classification, rewrite, switchedTo: liveExternalId }),
       );
     }
 
     // Единственный отказ, после которого объявление в кабинете может остаться
     // наполовину обновлённым, — человек обязан о нём узнать. Парковка здесь не нужна:
     // потрачена одна попытка, и следующий прогон имеет право попробовать ещё раз.
-    try {
+    await bestEffort(ad.id, 'failed to escalate apply failure', async () => {
       await escalate(
         rc,
         { ...ad, externalId: liveExternalId },
@@ -354,35 +460,28 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
           ad: rewrite.ad,
           problems: [
             `отправка в кабинет ${target.provider} не удалась: ${describeError(err)}`,
-            ...(liveExternalId === ad.externalId
-              ? []
-              : [
+            ...(adopted
+              ? [
                   `в кабинете уже показывается новое объявление ${liveExternalId}, старое ${ad.externalId} осталось и остановлено`,
-                ]),
+                ]
+              : []),
+            // Замена создана, а привязать её к строке не вышло: без этой строчки
+            // человек не узнает, что в группе крутится ничей баннер.
+            ...(live !== null && !adopted
+              ? [`в кабинете создано объявление ${live}, но привязать его к строке не удалось`]
+              : []),
           ],
           parkAt: ad.retries + 1,
         },
       );
-    } catch (escalationErr) {
-      // Наверх обязана уйти исходная ошибка отправки: её ждёт ErrorLog прогона.
-      log.error(
-        { adId: ad.id, err: describeError(escalationErr) },
-        'failed to escalate apply failure',
-      );
-    }
+    });
     throw err;
   }
 
   const data: Prisma.AdUpdateInput = {
-    title: rewrite.ad.title,
-    body: rewrite.ad.text,
+    ...rewrittenTextFields(rewrite.ad),
     moderationStatus: ModerationStatus.PENDING,
     moderationReason: null,
-    // `llmVariant` — отпечаток текста, по нему A/B-отчёт складывает статистику
-    // (см. `creatives/ab/experiment.ts`). Переписывание меняет текст, значит это
-    // новый вариант; категория отказа в это поле не помещается ни по смыслу, ни по
-    // последствиям — два разных объявления с одной категорией слились бы в один ряд.
-    llmVariant: textVariantId(rewrite.ad),
   };
 
   // Новый id идёт той же записью, что и тексты: у VK старого баннера уже нет, и строка,
@@ -394,6 +493,7 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
   const nextExternalId = replacement !== null && replacement !== ad.externalId ? replacement : null;
 
   let switchedTo = nextExternalId;
+  let idConflict: string | null = null;
   try {
     await deps.db.ad.update({
       where: { id: ad.id },
@@ -402,37 +502,21 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
   } catch (err) {
     if (nextExternalId === null || !isUniqueViolation(err)) throw err;
     // Пару `(adGroupId, externalId)` занял кто-то ещё. Тексты и статус всё равно
-    // сохраняем: иначе объявление осталось бы в `REWRITING` до истечения захвата.
+    // сохраняем: иначе объявление осталось бы в `REWRITING` до ближайшего опроса.
+    //
+    // Строка при этом указывает на баннер, которого в кабинете больше нет: заменяя
+    // текст, канал его удалил. Сама она не починится — `pollAdModeration` ищет по паре
+    // `(adGroupId, externalId)` и такой пары в листинге не найдёт, а `syncAds` чужие
+    // строки не архивирует. Поэтому объявление помечается как не работающее (иначе
+    // оптимизатор вечно предлагал бы паузу несуществующему баннеру, а A/B считал бы
+    // его показы) и уходит человеку письмом.
     switchedTo = null;
-    await deps.db.ad.update({ where: { id: ad.id }, data });
+    idConflict = nextExternalId;
+    await deps.db.ad.update({ where: { id: ad.id }, data: { ...data, status: AdStatus.ARCHIVED } });
     await reportExternalIdLoss(rc, ad, nextExternalId, err);
   }
 
-  await deps.db.changeLog.create({
-    data: {
-      campaignId: ad.campaignId,
-      entityType: 'AD',
-      entityId: ad.id,
-      action: REWRITE_ACTION,
-      prevValue: toJson({ ...ad.ad, reason: ad.reason }),
-      newValue: toJson({
-        ...rewrite.ad,
-        category: classification.category,
-        ruleIds: classification.rules.map((rule) => rule.id),
-        retries: ad.retries + 1,
-        prompts: [classification.promptVersion, rewrite.promptVersion],
-        // Только когда id реально сменился: у Директа объявление правится на месте,
-        // и пустая пара полей в каждой записи журнала читалась бы как «было и стало
-        // одно и то же», а не «замены не было».
-        ...(switchedTo === null
-          ? {}
-          : { externalIdBefore: ad.externalId, externalIdAfter: switchedTo }),
-      }),
-      reason: rewrite.changes,
-      actor: ChangeActor.AI,
-      provider: target.provider,
-    },
-  });
+  await logRewrite(rc, ad, { classification, rewrite, switchedTo });
 
   log.info(
     {
@@ -445,5 +529,19 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
     },
     'rejected ad rewritten and resubmitted',
   );
+
+  if (idConflict !== null) {
+    return escalate(rc, ad, {
+      cause: 'external_id_taken',
+      classification,
+      ad: rewrite.ad,
+      problems: [
+        `текст заменён, но в кабинете это уже другое объявление ${idConflict}, а пара (группа, ${idConflict}) занята другой строкой нашей БД`,
+        `строка ${ad.id} осталась с внешним id ${ad.externalId}, которого в кабинете больше нет, и помечена как не работающая`,
+      ],
+      parkAt: ad.retries + 1,
+    });
+  }
+
   return { status: 'rewritten', retries: ad.retries + 1, changes: rewrite.changes };
 }

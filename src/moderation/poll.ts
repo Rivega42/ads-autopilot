@@ -1,4 +1,4 @@
-import { ModerationStatus, type Provider } from '@prisma/client';
+import { AdStatus, ModerationStatus, type Provider } from '@prisma/client';
 
 import type { ChannelAdapter, ChannelContext, RemoteAd } from '@/channels/types.js';
 import { toModerationStatus } from '@/ingestion/mapping.js';
@@ -26,6 +26,8 @@ export interface RejectedAd {
   externalId: string;
   campaignId: string;
   campaignName: string;
+  /** Крутится ли объявление. Переписывать имеет смысл только работающее. */
+  status: AdStatus;
   /** Сколько раз это объявление уже переписывалось. */
   retries: number;
   /** Причина отказа дословно от площадки. */
@@ -60,6 +62,7 @@ interface LocalAd {
   id: string;
   adGroupId: string;
   externalId: string;
+  status: AdStatus;
   moderationStatus: ModerationStatus;
   moderationReason: string | null;
   moderationRetries: number;
@@ -71,21 +74,30 @@ export interface PollOptions {
 }
 
 /**
- * Возвращает зависший захват в `REJECTED`.
+ * Возвращает в `REJECTED` все зависшие захваты кабинета.
  *
- * Условие на `updatedAt` продублировано в `where` намеренно: между чтением и записью
- * мог начаться другой прогон, и он имеет право на свою попытку.
+ * Одним запросом по группам, а не внутри обхода объявлений кабинета: строка, чей
+ * баннер уже удалён (у VK правка текста — это создание нового и удаление старого),
+ * в листинге не появится никогда, а `REWRITING` опрос пропускает безусловно. Такая
+ * строка выключена из модерации навсегда, и снять с неё захват больше нечем.
+ *
+ * Условие на `updatedAt` — в самом `where`: между чтением и записью мог начаться
+ * другой прогон, и он имеет право на свою попытку.
  */
-async function reclaimStale(db: ModerationDb, local: LocalAd, before: Date): Promise<boolean> {
+async function reclaimStale(
+  db: ModerationDb,
+  adGroupIds: readonly string[],
+  before: Date,
+): Promise<number> {
   const freed = await db.ad.updateMany({
     where: {
-      id: local.id,
+      adGroupId: { in: [...adGroupIds] },
       moderationStatus: ModerationStatus.REWRITING,
       updatedAt: { lt: before },
     },
     data: { moderationStatus: ModerationStatus.REJECTED },
   });
-  return freed.count > 0;
+  return freed.count;
 }
 
 interface LocalGroup {
@@ -120,6 +132,9 @@ function remoteText(ad: RemoteAd): AdText {
  * (процесс убит между захватом и отправкой), и строка возвращается в `REJECTED`.
  * Попытка при этом остаётся потраченной — счётчик сдвинут захватом, и обнулять его
  * нельзя: текст мог уйти в кабинет ровно перед падением.
+ *
+ * В переписывание идут только работающие объявления (`Ad.status`). Выключенное никому
+ * не показывается, а починка стоит двух вызовов модели и нового баннера в кабинете.
  */
 export async function pollAdModeration(
   db: ModerationDb,
@@ -144,13 +159,19 @@ export async function pollAdModeration(
   if (groups.length === 0) return result;
 
   const groupByExternalId = new Map(groups.map((group) => [group.externalId, group]));
+  const groupIds = groups.map((group) => group.id);
+
+  // До похода в кабинет: зависший захват снимается независимо от того, отдаёт ли
+  // площадка это объявление, — и, если листинг вообще не ответит, тоже.
+  result.reclaimed = await reclaimStale(db, groupIds, staleBefore);
 
   const locals: LocalAd[] = await db.ad.findMany({
-    where: { adGroupId: { in: groups.map((group) => group.id) } },
+    where: { adGroupId: { in: groupIds } },
     select: {
       id: true,
       adGroupId: true,
       externalId: true,
+      status: true,
       moderationStatus: true,
       moderationReason: true,
       moderationRetries: true,
@@ -175,15 +196,11 @@ export async function pollAdModeration(
 
     result.polled += 1;
 
-    let known = local.moderationStatus;
-    if (known === ModerationStatus.REWRITING) {
-      // Свежий захват не трогаем: прямо сейчас другой прогон отправляет туда текст.
-      if (local.updatedAt >= staleBefore) continue;
-      if (!(await reclaimStale(db, local, staleBefore))) continue;
-      result.reclaimed += 1;
-      known = ModerationStatus.REJECTED;
-    }
+    // Захват не трогаем: прямо сейчас другой прогон отправляет туда текст. Зависшие
+    // сняты до чтения строк, поэтому здесь остались только живые.
+    if (local.moderationStatus === ModerationStatus.REWRITING) continue;
 
+    const known = local.moderationStatus;
     const status = toModerationStatus(ad.moderationStatus);
     const reason = ad.moderationReason ?? null;
 
@@ -202,12 +219,14 @@ export async function pollAdModeration(
     }
 
     if (status !== ModerationStatus.REJECTED) continue;
+    if (local.status !== AdStatus.ACTIVE) continue;
 
     result.rejected.push({
       id: local.id,
       externalId: ad.externalId,
       campaignId: group.campaignId,
       campaignName: group.campaign.name,
+      status: local.status,
       retries: local.moderationRetries,
       reason: reason ?? '',
       ad: remoteText(ad),

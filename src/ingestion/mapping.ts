@@ -1,11 +1,16 @@
 import {
   AdFormat,
   AdGroupStatus,
+  AdStatus,
   CampaignStatus,
   KeywordStatus,
   ModerationStatus,
   Prisma,
 } from '@prisma/client';
+
+import { logger } from '@/logger.js';
+
+const log = logger.child({ scope: 'ingestion:mapping' });
 
 /** Decimal(12,2) — бюджеты и ставки. */
 export const MONEY_SCALE = 2;
@@ -51,64 +56,106 @@ function normalize(raw: string): string {
   return raw.trim().toUpperCase();
 }
 
-const CAMPAIGN_STATUS: Record<string, CampaignStatus> = {
-  ON: CampaignStatus.ACTIVE,
-  ACTIVE: CampaignStatus.ACTIVE,
-  ACCEPTED: CampaignStatus.ACTIVE,
-  PREACCEPTED: CampaignStatus.ACTIVE,
-  SERVING: CampaignStatus.ACTIVE,
-  OFF: CampaignStatus.PAUSED,
+/**
+ * Что слово площадки означает про показы. Промежуточный слой нужен, потому что
+ * enum'ы уровней разные, а словарь слов — один: пока таблиц было три, значения
+ * `STOPPED`, `ENDED` и `CONVERTED` знала только кампания, и то же самое слово на
+ * уровне группы или объявления молча уходило в дефолт «работает».
+ */
+type Lifecycle = 'SERVING' | 'STOPPED' | 'ENDED' | 'ARCHIVED' | 'DRAFT';
+
+type StatusLevel = 'campaign' | 'adgroup' | 'ad' | 'keyword';
+
+const LIFECYCLE_BY_WORD: Record<string, Lifecycle> = {
+  ON: 'SERVING',
+  ACTIVE: 'SERVING',
+  ACCEPTED: 'SERVING',
+  PREACCEPTED: 'SERVING',
+  SERVING: 'SERVING',
+  OFF: 'STOPPED',
   // Директ сам остановил показы: сайт не отвечает. Реклама не крутится, поэтому
-  // ACTIVE по умолчанию тут врал бы — оптимизатор считал бы кампанию работающей
+  // «работает» по умолчанию тут врало бы — оптимизатор считал бы кампанию живой
   // и двигал ставки по цифрам, которых больше не будет.
-  OFF_BY_MONITORING: CampaignStatus.PAUSED,
-  PAUSED: CampaignStatus.PAUSED,
-  SUSPENDED: CampaignStatus.PAUSED,
+  OFF_BY_MONITORING: 'STOPPED',
+  PAUSED: 'STOPPED',
+  SUSPENDED: 'STOPPED',
+  STOPPED: 'STOPPED',
+  BLOCKED: 'STOPPED',
+  ARCHIVED: 'ARCHIVED',
+  DELETED: 'ARCHIVED',
+  ENDED: 'ENDED',
+  CONVERTED: 'ENDED',
+  DRAFT: 'DRAFT',
+  MODERATION: 'DRAFT',
+  REJECTED: 'DRAFT',
+};
+
+const CAMPAIGN_STATUS: Record<Lifecycle, CampaignStatus> = {
+  SERVING: CampaignStatus.ACTIVE,
   STOPPED: CampaignStatus.PAUSED,
-  BLOCKED: CampaignStatus.PAUSED,
-  ARCHIVED: CampaignStatus.ARCHIVED,
-  DELETED: CampaignStatus.ARCHIVED,
   ENDED: CampaignStatus.ENDED,
-  CONVERTED: CampaignStatus.ENDED,
+  ARCHIVED: CampaignStatus.ARCHIVED,
   DRAFT: CampaignStatus.DRAFT,
-  MODERATION: CampaignStatus.DRAFT,
-  REJECTED: CampaignStatus.DRAFT,
 };
 
-const ADGROUP_STATUS: Record<string, AdGroupStatus> = {
-  ON: AdGroupStatus.ACTIVE,
-  ACTIVE: AdGroupStatus.ACTIVE,
-  ACCEPTED: AdGroupStatus.ACTIVE,
-  PREACCEPTED: AdGroupStatus.ACTIVE,
-  OFF: AdGroupStatus.PAUSED,
-  // Значение приходит от кампании, но эту же таблицу переиспользуют группы и
-  // объявления: пусть лучше сработает лишний раз, чем показы сочтутся живыми.
-  OFF_BY_MONITORING: AdGroupStatus.PAUSED,
-  PAUSED: AdGroupStatus.PAUSED,
-  SUSPENDED: AdGroupStatus.PAUSED,
-  BLOCKED: AdGroupStatus.PAUSED,
-  DRAFT: AdGroupStatus.PAUSED,
-  MODERATION: AdGroupStatus.PAUSED,
-  REJECTED: AdGroupStatus.PAUSED,
+/**
+ * У группы, объявления и фразы нет своих значений «завершено» и «черновик»:
+ * показов в обоих случаях нет, а `ARCHIVED` соврал бы — сущность в кабинете на
+ * месте и вернётся в эфир вместе с кампанией. Значит — пауза.
+ */
+const ADGROUP_STATUS: Record<Lifecycle, AdGroupStatus> = {
+  SERVING: AdGroupStatus.ACTIVE,
+  STOPPED: AdGroupStatus.PAUSED,
+  ENDED: AdGroupStatus.PAUSED,
   ARCHIVED: AdGroupStatus.ARCHIVED,
-  DELETED: AdGroupStatus.ARCHIVED,
+  DRAFT: AdGroupStatus.PAUSED,
 };
 
-const KEYWORD_STATUS: Record<string, KeywordStatus> = {
-  ON: KeywordStatus.ACTIVE,
-  ACTIVE: KeywordStatus.ACTIVE,
-  ACCEPTED: KeywordStatus.ACTIVE,
-  PREACCEPTED: KeywordStatus.ACTIVE,
-  OFF: KeywordStatus.PAUSED,
-  PAUSED: KeywordStatus.PAUSED,
-  SUSPENDED: KeywordStatus.PAUSED,
-  BLOCKED: KeywordStatus.PAUSED,
-  DRAFT: KeywordStatus.PAUSED,
-  MODERATION: KeywordStatus.PAUSED,
-  REJECTED: KeywordStatus.PAUSED,
-  ARCHIVED: KeywordStatus.ARCHIVED,
-  DELETED: KeywordStatus.ARCHIVED,
+const AD_STATUS: Record<Lifecycle, AdStatus> = {
+  SERVING: AdStatus.ACTIVE,
+  STOPPED: AdStatus.PAUSED,
+  ENDED: AdStatus.PAUSED,
+  ARCHIVED: AdStatus.ARCHIVED,
+  DRAFT: AdStatus.PAUSED,
 };
+
+const KEYWORD_STATUS: Record<Lifecycle, KeywordStatus> = {
+  SERVING: KeywordStatus.ACTIVE,
+  STOPPED: KeywordStatus.PAUSED,
+  ENDED: KeywordStatus.PAUSED,
+  ARCHIVED: KeywordStatus.ARCHIVED,
+  DRAFT: KeywordStatus.PAUSED,
+};
+
+/**
+ * Слова, о которых уже предупредили. Иначе одно неизвестное значение даёт строку
+ * лога на каждое объявление кабинета — а такой поток читать никто не станет.
+ * Множество не растёт бесконечно: словарь площадки конечен, и каждое слово
+ * попадает сюда один раз за жизнь процесса.
+ */
+const warnedUnknownWords = new Set<string>();
+
+/**
+ * Слово площадки → жизненный цикл.
+ *
+ * Незнакомое считаем работающим: сущность приехала из кабинета обычным листингом,
+ * который удалённое уже отфильтровал, и спрятать живую кампанию из отчётов дороже,
+ * чем показать остановленную. Но молчать об этом нельзя — на дефолте «работает»
+ * держится и A/B (выключенный вариант выигрывал бы у работающих), и правила
+ * оптимизатора, а пробел в словаре иначе не виден ниоткуда.
+ */
+function lifecycleOf(raw: string, level: StatusLevel): Lifecycle {
+  const word = normalize(raw);
+  const known = LIFECYCLE_BY_WORD[word];
+  if (known !== undefined) return known;
+
+  const seenKey = `${level}:${word}`;
+  if (!warnedUnknownWords.has(seenKey)) {
+    warnedUnknownWords.add(seenKey);
+    log.warn({ level, status: word }, 'unknown entity status from platform, treated as serving');
+  }
+  return 'SERVING';
+}
 
 const MODERATION: Record<string, ModerationStatus> = {
   ACCEPTED: ModerationStatus.APPROVED,
@@ -125,23 +172,22 @@ const MODERATION: Record<string, ModerationStatus> = {
   NEW: ModerationStatus.PENDING,
 };
 
-/**
- * Незнакомый статус трактуем как «работает».
- *
- * Сущность приехала из кабинета обычным листингом, который удалённое уже
- * отфильтровал; спрятать живую кампанию из отчётов дороже, чем показать
- * остановленную. Настоящее исчезновение из кабинета ловится отдельно — архивацией.
- */
+/** Настоящее исчезновение из кабинета ловится отдельно — архивацией. */
 export function toCampaignStatus(raw: string): CampaignStatus {
-  return CAMPAIGN_STATUS[normalize(raw)] ?? CampaignStatus.ACTIVE;
+  return CAMPAIGN_STATUS[lifecycleOf(raw, 'campaign')];
 }
 
 export function toAdGroupStatus(raw: string): AdGroupStatus {
-  return ADGROUP_STATUS[normalize(raw)] ?? AdGroupStatus.ACTIVE;
+  return ADGROUP_STATUS[lifecycleOf(raw, 'adgroup')];
+}
+
+/** Крутится ли объявление: `Ad.State` у Директа, `banner.status` у VK. */
+export function toAdStatus(raw: string): AdStatus {
+  return AD_STATUS[lifecycleOf(raw, 'ad')];
 }
 
 export function toKeywordStatus(raw: string): KeywordStatus {
-  return KEYWORD_STATUS[normalize(raw)] ?? KeywordStatus.ACTIVE;
+  return KEYWORD_STATUS[lifecycleOf(raw, 'keyword')];
 }
 
 export function toModerationStatus(raw: string): ModerationStatus {

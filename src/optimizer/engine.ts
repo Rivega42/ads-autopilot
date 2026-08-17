@@ -47,7 +47,8 @@ export interface AdRecord {
   id: string;
   /** Заголовок объявления — подпись для карточки апрува. Необязателен: фикстуры его не несут. */
   title?: string | null;
-  status: string;
+  /** Статус из кабинета. Необязателен по той же причине; `undefined` читается как «неизвестен». */
+  status?: string | null;
 }
 
 export interface CampaignStatRecord {

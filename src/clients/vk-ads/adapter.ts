@@ -193,8 +193,7 @@ export class VkAdsAdapter implements ChannelAdapter {
         title: texts.title,
         text: texts.text,
         status: banner.status,
-        // Отдельного поля может не быть — тогда статус модерации совпадает со статусом.
-        moderationStatus: banner.moderation_status ?? banner.status,
+        moderationStatus: moderationStatusOf(banner),
         raw: banner,
       };
       if (texts.title2) ad.title2 = texts.title2;
@@ -444,6 +443,22 @@ function readTextblocks(banner: VkBanner): { title: string; title2?: string; tex
   return out;
 }
 
+/**
+ * Вердикт модерации по баннеру.
+ *
+ * Отдельного поля может не быть, и тогда остаётся `banner.status` — но он про показы,
+ * а не про модерацию, и одно его значение прямо врёт: `blocked` мы пишем сами, когда
+ * ставим объявление на паузу (`pauseEntities`), а в словаре модерации то же слово
+ * значит «отклонено». Без поправки выключенное нами объявление — например,
+ * проигравший вариант A/B — каждые полчаса уезжало бы на переписывание. Отсутствие
+ * данных о модерации честнее отдать как «ещё не проверено».
+ */
+function moderationStatusOf(banner: VkBanner): string {
+  const moderation = banner.moderation_status;
+  if (typeof moderation === 'string' && moderation !== '') return moderation;
+  return banner.status === VK_STATUS_BLOCKED ? 'pending' : banner.status;
+}
+
 function readUrl(banner: VkBanner): string | undefined {
   if (typeof banner.url === 'string' && banner.url !== '') return banner.url;
   const urls = banner.urls;
@@ -458,6 +473,16 @@ function readUrl(banner: VkBanner): string | undefined {
 /**
  * Собирает тело нового баннера на основе старого: сохраняем группу, ссылки и
  * медиа, подменяем только тексты.
+ *
+ * Статус переносится явно: замена — это новый объект, а новый баннер VK заводит
+ * работающим. Пересозданное объявление, которое до правки текста стояло на паузе
+ * (проигравший вариант A/B, пауза оптимизатора), само включилось бы и начало тратить
+ * бюджет клиента. Незнакомое значение статуса считаем «не крутится»: ошибиться в эту
+ * сторону дешевле, чем в обратную.
+ *
+ * @needs-live-token: принимает ли ads.vk.ru `status` в теле создания баннера, не
+ * проверялось. Если нет — гасить замену отдельным `setEntitiesStatus` сразу после
+ * создания, но именно так, а не «оставить включённой».
  */
 export function buildRecreatePayload(
   banner: VkBanner,
@@ -472,6 +497,7 @@ export function buildRecreatePayload(
 
   const payload: Record<string, unknown> = {
     ad_group_id: banner.ad_group_id,
+    status: banner.status === VK_STATUS_ACTIVE ? VK_STATUS_ACTIVE : VK_STATUS_BLOCKED,
     textblocks,
   };
   if (banner.name) payload['name'] = banner.name;

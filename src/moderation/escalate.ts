@@ -19,13 +19,18 @@ import { CATEGORY_TITLE, type AdText, type ClassifiedRejection } from '@/moderat
 
 /** Почему автоматика прекратила попытки. */
 export type EscalationCause =
-  'retries_exhausted' | 'rewrite_failed' | 'channel_unsupported' | 'apply_failed';
+  | 'retries_exhausted'
+  | 'rewrite_failed'
+  | 'channel_unsupported'
+  | 'apply_failed'
+  | 'external_id_taken';
 
 const CAUSE_TITLE: Readonly<Record<EscalationCause, string>> = {
   retries_exhausted: 'три переписанных варианта подряд получили отказ',
   rewrite_failed: 'не удалось собрать вариант, проходящий проверки',
   channel_unsupported: 'канал не умеет обновлять текст объявления',
   apply_failed: 'отправка переписанного текста в кабинет не удалась',
+  external_id_taken: 'внешний id нового объявления занят другой строкой в нашей БД',
 };
 
 export interface ModerationEscalation {

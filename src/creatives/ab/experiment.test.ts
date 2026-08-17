@@ -47,15 +47,13 @@ function storeOf(
     ad: {
       findMany: vi.fn((args: { where: Where }) => {
         capturedAd = args.where;
-        // Фильтры «только наши варианты» и «только работающие» обязаны работать в БД,
-        // но мок обязан вести себя так же, иначе тест проверял бы не то, что уедет в Postgres.
+        // Фильтр «только наши варианты» обязан работать в БД, поэтому мок повторяет
+        // его же: иначе тест проверял бы не то, что уедет в Postgres. Статус в запрос
+        // не уходит — выключенные варианты нужны самой оценке, чтобы про них сказать.
         const byVariant = args.where.llmVariant ? ads.filter((ad) => ad.llmVariant !== null) : ads;
-        const wanted = args.where.status;
-        const rows =
-          wanted === undefined
-            ? byVariant
-            : byVariant.filter((ad) => (ad.status ?? AdStatus.ACTIVE) === wanted);
-        return Promise.resolve(rows);
+        return Promise.resolve(
+          byVariant.map((ad) => ({ ...ad, status: ad.status ?? AdStatus.ACTIVE })),
+        );
       }),
     },
     campaignStat: {
@@ -136,10 +134,10 @@ describe('evaluateAdExperiment', () => {
   });
 
   it('выключенное объявление участником эксперимента не считает', async () => {
-    const { db, adWhere } = storeOf(
+    const { db } = storeOf(
       [
         { id: 'ad-1', llmVariant: 'v-a' },
-        { id: 'ad-2', llmVariant: 'v-b', status: AdStatus.PAUSED },
+        { id: 'ad-2', llmVariant: 'v-b', status: AdStatus.PAUSED, title: 'Ремонт недорого' },
       ],
       [
         { entityId: 'ad-1', impressions: 1000, clicks: 50 },
@@ -149,11 +147,54 @@ describe('evaluateAdExperiment', () => {
 
     const result = await evaluateAdExperiment('ag-1', { from: FROM, to: TO, db });
 
-    expect(adWhere()).toMatchObject({ status: AdStatus.ACTIVE });
     expect([...result.adsByVariant.keys()]).toEqual(['v-a']);
     // Статистика выключенного варианта не должна попасть в счётчики победителя.
     expect(result.decision.variants.map((v) => v.variantId)).toEqual(['v-a']);
     expect(result.decision.reasonCode).toBe('NOT_ENOUGH_VARIANTS');
+  });
+
+  it('исключённый из сравнения вариант назван, а не выброшен молча', async () => {
+    // Человек выключил лучший вариант руками. Сравнение по остатку возможно, но
+    // объявлять победителем вчерашнего аутсайдера, не сказав про исключённого,
+    // значит показать карточку, из которой нельзя понять, что набор неполный.
+    const { db } = storeOf(
+      [
+        { id: 'ad-1', llmVariant: 'v-a', status: AdStatus.PAUSED, title: 'Чемпион' },
+        { id: 'ad-2', llmVariant: 'v-b', title: 'Середняк' },
+        { id: 'ad-3', llmVariant: 'v-c', title: 'Аутсайдер' },
+      ],
+      [
+        { entityId: 'ad-1', impressions: 20_000, clicks: 1200 },
+        { entityId: 'ad-2', impressions: 20_000, clicks: 400 },
+        { entityId: 'ad-3', impressions: 20_000, clicks: 200 },
+      ],
+    );
+
+    const result = await evaluateAdExperiment('ag-1', { from: FROM, to: TO, db });
+
+    expect(result.decision.winner).toBe('v-b');
+    expect(result.excludedVariants).toEqual([{ variantId: 'v-a', label: 'Чемпион' }]);
+    // Показы выключенного варианта в сравнение всё равно не идут.
+    expect(result.decision.variants.map((v) => v.variantId)).toEqual(['v-b', 'v-c']);
+  });
+
+  it('вариант, у которого работает хоть одно объявление, исключённым не считается', async () => {
+    const { db } = storeOf(
+      [
+        { id: 'ad-1', llmVariant: 'v-a', title: 'Живой' },
+        { id: 'ad-2', llmVariant: 'v-a', status: AdStatus.PAUSED, title: 'Живой' },
+        { id: 'ad-3', llmVariant: 'v-b', title: 'Второй' },
+      ],
+      [
+        { entityId: 'ad-1', impressions: 1000, clicks: 50 },
+        { entityId: 'ad-3', impressions: 1000, clicks: 10 },
+      ],
+    );
+
+    const result = await evaluateAdExperiment('ag-1', { from: FROM, to: TO, db });
+
+    expect(result.excludedVariants).toEqual([]);
+    expect(result.adsByVariant.get('v-a')).toEqual(['ad-1']);
   });
 
   it('объявления без статистики за окно перечислены отдельно, а не выброшены', async () => {

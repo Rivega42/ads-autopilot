@@ -351,6 +351,24 @@ describe('decreaseBidOnHighCpa (impressions > 200 AND CPA > 1.5× target)', () =
     });
     expect(decision?.reason).toContain('Снижение ставки на 15.00%: 12.00 → 10.20');
   });
+
+  it.each(['PAUSED', 'ARCHIVED'] as const)('не двигает ставку %s фразы', (status) => {
+    // Ставка выключенной фразы ничего не решает, но правило предлагало её менять
+    // каждую ночь, и апрув реально уезжал в кабинет.
+    const decisions = decreaseBidOnHighCpa(
+      input([entity({ impressions: 300, spend: 900, conversions: 1, status })]),
+      targets(),
+    );
+    expect(decisions).toEqual([]);
+  });
+
+  it('при неизвестном статусе ставку менять можно', () => {
+    const decisions = decreaseBidOnHighCpa(
+      input([entity({ impressions: 300, spend: 900, conversions: 1, status: null })]),
+      targets(),
+    );
+    expect(decisions).toHaveLength(1);
+  });
 });
 
 describe('increaseBidOnLowCpa (CPA < 0.7× target AND daily spend < 50% of budget)', () => {
@@ -446,6 +464,22 @@ describe('increaseBidOnLowCpa (CPA < 0.7× target AND daily spend < 50% of budge
       ruleId: RULE_IDS.increaseBidLowCpa,
     });
     expect(decision?.reason).toContain('расход 1200.00 из 5000.00/сут');
+  });
+
+  it.each(['PAUSED', 'ARCHIVED'] as const)('не поднимает ставку %s фразе', (status) => {
+    const decisions = increaseBidOnLowCpa(
+      input([entity({ spend: 300, conversions: 1, currentBid: 10, status })]),
+      targets({ dailySpend: 1200 }),
+    );
+    expect(decisions).toEqual([]);
+  });
+
+  it('при неизвестном статусе ставку поднять можно', () => {
+    const decisions = increaseBidOnLowCpa(
+      input([entity({ spend: 300, conversions: 1, currentBid: 10, status: null })]),
+      targets({ dailySpend: 1200 }),
+    );
+    expect(decisions).toHaveLength(1);
   });
 });
 

@@ -18,6 +18,7 @@ export {
   TEXT_REWRITE_ACTIONS,
   type AdExperiment,
   type AdExperimentOptions,
+  type ExcludedVariant,
   type ExperimentStore,
 } from './ab/experiment.js';
 export {

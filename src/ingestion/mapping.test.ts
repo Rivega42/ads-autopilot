@@ -1,4 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+const h = vi.hoisted(() => ({ warn: vi.fn() }));
+
+vi.mock('@/logger.js', () => ({
+  logger: { child: () => ({ warn: h.warn, info: vi.fn(), debug: vi.fn(), error: vi.fn() }) },
+}));
 
 import {
   MONEY_SCALE,
@@ -7,6 +13,7 @@ import {
   strategyName,
   toAdFormat,
   toAdGroupStatus,
+  toAdStatus,
   toCampaignStatus,
   toDecimal,
   toJsonObject,
@@ -71,12 +78,60 @@ describe('статусы площадок', () => {
     expect(toCampaignStatus('НЕЧТО')).toBe('ACTIVE');
     expect(toAdGroupStatus('НЕЧТО')).toBe('ACTIVE');
     expect(toKeywordStatus('НЕЧТО')).toBe('ACTIVE');
+    expect(toAdStatus('НЕЧТО')).toBe('ACTIVE');
+  });
+
+  it('слово, известное кампании, известно и нижним уровням', () => {
+    // Словарь один на все уровни. Пока их было три, «STOPPED» у кампании означал
+    // паузу, а у группы и объявления проваливался в дефолт ACTIVE — то есть
+    // остановленное объявление считалось работающим и участвовало в A/B.
+    for (const word of ['STOPPED', 'stopped', 'ENDED', 'CONVERTED']) {
+      expect(toAdGroupStatus(word)).toBe('PAUSED');
+      expect(toAdStatus(word)).toBe('PAUSED');
+      expect(toKeywordStatus(word)).toBe('PAUSED');
+    }
+    expect(toCampaignStatus('STOPPED')).toBe('PAUSED');
+    expect(toCampaignStatus('ENDED')).toBe('ENDED');
+  });
+
+  it('архив остаётся архивом, а не превращается в паузу', () => {
+    expect(toAdStatus('ARCHIVED')).toBe('ARCHIVED');
+    expect(toAdStatus('deleted')).toBe('ARCHIVED');
+    expect(toAdStatus('OFF')).toBe('PAUSED');
   });
 
   it('модерацию неизвестного вида считает незавершённой', () => {
     expect(toModerationStatus('ACCEPTED')).toBe('APPROVED');
     expect(toModerationStatus('REJECTED')).toBe('REJECTED');
     expect(toModerationStatus('НЕЧТО')).toBe('PENDING');
+  });
+});
+
+describe('незнакомые статусы площадки', () => {
+  it('пишет предупреждение: молчаливый ACTIVE не виден ниоткуда', () => {
+    h.warn.mockClear();
+    expect(toAdStatus('НЕВЕДОМОЕ_СЛОВО_1')).toBe('ACTIVE');
+
+    expect(h.warn).toHaveBeenCalledTimes(1);
+    const [payload] = h.warn.mock.calls[0] ?? [];
+    expect(payload).toMatchObject({ level: 'ad', status: 'НЕВЕДОМОЕ_СЛОВО_1' });
+  });
+
+  it('одно и то же слово не превращает синк в поток одинаковых строк', () => {
+    h.warn.mockClear();
+    for (let i = 0; i < 100; i += 1) toAdGroupStatus('НЕВЕДОМОЕ_СЛОВО_2');
+
+    expect(h.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('известное слово молчит', () => {
+    h.warn.mockClear();
+    toCampaignStatus('ON');
+    toAdGroupStatus('OFF');
+    toKeywordStatus('ARCHIVED');
+    toAdStatus('SUSPENDED');
+
+    expect(h.warn).not.toHaveBeenCalled();
   });
 });
 

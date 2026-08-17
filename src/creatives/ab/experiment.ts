@@ -36,11 +36,27 @@ export interface AdExperimentOptions {
   config?: AbTestConfig;
 }
 
+export interface ExcludedVariant {
+  variantId: string;
+  /** Заголовок объявления — то же имя, под которым вариант был бы виден в сравнении. */
+  label: string;
+}
+
 export interface AdExperiment {
   adGroupId: string;
   decision: AbDecision;
   /** Объявления, стоящие за каждым вариантом: победителя оставляем, остальные — на паузу. */
   adsByVariant: Map<string, string[]>;
+  /**
+   * Варианты, выключенные в кабинете и потому не попавшие в сравнение.
+   *
+   * Список обязан доехать до человека вместе с вердиктом: без него карточка
+   * «победил вариант B» неотличима от честной победы, хотя выключенный руками
+   * вариант A мог обходить победителя вдвое. Отказаться от вердикта нельзя —
+   * выключенное объявление показов больше не наберёт, и группа осталась бы без
+   * решения навсегда (та же логика, что у `losingVariantIds`).
+   */
+  excludedVariants: ExcludedVariant[];
   /**
    * Объявления без статистики за окно. На решение не влияют (без показов вариант не
    * добирает минимума и в сравнение не идёт), но по ним видно поломку сбора статистики:
@@ -61,25 +77,28 @@ export interface AdExperiment {
  * не считается: предлагать человеку выключить объявление, которого мы не писали и о
  * котором ничего не знаем, система права не имеет.
  *
- * И только работающие: выключенное в кабинете объявление больше никого не обслуживает,
- * но его показы остаются в 30-дневном окне ещё месяц. Считая их, тест сравнивал бы
- * победителя с вариантом, которого в эфире уже нет, — и заодно каждую ночь предлагал бы
- * выключить то, что выключено.
+ * В сравнение идут только работающие: выключенное в кабинете объявление больше никого не
+ * обслуживает, но его показы остаются в 30-дневном окне ещё месяц. Считая их, тест сравнивал
+ * бы победителя с вариантом, которого в эфире уже нет, — и заодно каждую ночь предлагал бы
+ * выключить то, что выключено. Выключенные варианты при этом не пропадают: они уезжают в
+ * `excludedVariants`, потому что вердикт по неполному набору человек обязан видеть неполным.
  */
 export async function evaluateAdExperiment(
   adGroupId: string,
   opts: AdExperimentOptions,
 ): Promise<AdExperiment> {
-  const ads = await opts.db.ad.findMany({
-    where: { adGroupId, llmVariant: { not: null }, status: AdStatus.ACTIVE },
-    select: { id: true, llmVariant: true, title: true },
+  const ourAds = await opts.db.ad.findMany({
+    where: { adGroupId, llmVariant: { not: null } },
+    select: { id: true, llmVariant: true, title: true, status: true },
   });
+  const ads = ourAds.filter((ad) => ad.status === AdStatus.ACTIVE);
 
   if (ads.length === 0) {
     return {
       adGroupId,
       decision: selectWinner([], opts.config),
       adsByVariant: new Map(),
+      excludedVariants: excludedVariantsOf(ourAds, new Set()),
       adsWithoutStats: [],
       rewrittenAds: [],
       experimentAgeDays: null,
@@ -155,6 +174,8 @@ export async function evaluateAdExperiment(
     elapsedDays === null ? {} : { elapsedDays },
   );
 
+  const excludedVariants = excludedVariantsOf(ourAds, new Set(adsByVariant.keys()));
+
   log.debug(
     {
       adGroupId,
@@ -164,6 +185,7 @@ export async function evaluateAdExperiment(
       reasonCode: decision.reasonCode,
       elapsedDays,
       rewritten: rewritten.size,
+      excluded: excludedVariants.length,
     },
     'creative A/B evaluated',
   );
@@ -172,10 +194,31 @@ export async function evaluateAdExperiment(
     adGroupId,
     decision,
     adsByVariant,
+    excludedVariants,
     adsWithoutStats: [...variantByAd.keys()].filter((id) => !seenAds.has(id)),
     rewrittenAds: ads.map((ad) => ad.id).filter((id) => rewritten.has(id)),
     experimentAgeDays: elapsedDays,
   };
+}
+
+/**
+ * Варианты, от которых в сравнении не осталось ни одного работающего объявления.
+ *
+ * Вариант, у которого выключена только часть объявлений, исключённым не считается: он в
+ * сравнении есть, просто меньшим числом строк — говорить про него человеку нечего.
+ */
+function excludedVariantsOf(
+  ads: readonly { llmVariant: string | null; title: string; status: AdStatus }[],
+  compared: ReadonlySet<string>,
+): ExcludedVariant[] {
+  const excluded = new Map<string, ExcludedVariant>();
+  for (const ad of ads) {
+    const variantId = ad.llmVariant;
+    if (variantId === null || ad.status === AdStatus.ACTIVE) continue;
+    if (compared.has(variantId) || excluded.has(variantId)) continue;
+    excluded.set(variantId, { variantId, label: ad.title });
+  }
+  return [...excluded.values()];
 }
 
 /**

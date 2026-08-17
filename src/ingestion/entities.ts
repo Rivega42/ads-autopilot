@@ -1,6 +1,6 @@
 import {
   AdGroupStatus,
-  AdStatus,
+  type AdStatus,
   CampaignStatus,
   KeywordStatus,
   MatchType,
@@ -16,6 +16,7 @@ import {
   strategyName,
   toAdFormat,
   toAdGroupStatus,
+  toAdStatus,
   toCampaignStatus,
   toDecimal,
   toJsonObject,
@@ -272,24 +273,6 @@ function adFields(ad: RemoteAd): {
     moderationStatus: toModerationStatus(ad.moderationStatus),
     moderationReason: ad.moderationReason ?? null,
   };
-}
-
-const AD_STATUS_BY_ADGROUP_STATUS: Record<AdGroupStatus, AdStatus> = {
-  [AdGroupStatus.ACTIVE]: AdStatus.ACTIVE,
-  [AdGroupStatus.PAUSED]: AdStatus.PAUSED,
-  [AdGroupStatus.ARCHIVED]: AdStatus.ARCHIVED,
-};
-
-/**
- * Статус объявления из кабинета.
- *
- * Разбор переиспользован у группы: и Директ (`Ad.State`), и VK (`banner.status`)
- * присылают на всех уровнях одни и те же слова (ON/OFF/SUSPENDED/ARCHIVED), а вторая
- * копия таблицы соответствий разъезжалась бы с первой молча. Перевод в свой enum —
- * плата за то, что уровни могут разойтись значениями, не ломая друг друга.
- */
-function toAdStatus(raw: string): AdStatus {
-  return AD_STATUS_BY_ADGROUP_STATUS[toAdGroupStatus(raw)];
 }
 
 /**

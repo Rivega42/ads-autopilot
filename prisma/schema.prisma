@@ -247,8 +247,11 @@ model Ad {
   /// одобренное модерацией объявление бывает выключено, а выключенное — отклонено.
   /// Источник — листинг площадки (`Ad.State` у Директа, `banner.status` у VK);
   /// собственные паузы сюда не пишутся, их подхватывает ближайший синк сущностей.
-  /// ACTIVE по умолчанию — «статус неизвестен, считаем работающим»: спрятать живое
-  /// объявление из A/B и отчётов дороже, чем лишний раз предложить его паузу.
+  /// Читают поле отбор групп-кандидатов и сама оценка A/B (`creatives/scheduled.ts`,
+  /// `creatives/ab/experiment.ts`), правила оптимизатора (`optimizer/engine.ts` →
+  /// `optimizer/rules.ts`) и модерация (`moderation/`). Отчёты (`reporter/`) поле не
+  /// читают вовсе. ACTIVE по умолчанию — «статус неизвестен, считаем работающим»:
+  /// спрятать живое объявление из A/B дороже, чем лишний раз предложить его паузу.
   status            AdStatus         @default(ACTIVE)
   moderationStatus  ModerationStatus @default(PENDING)
   moderationReason  String?
@@ -262,9 +265,6 @@ model Ad {
   creative Creative? @relation(fields: [creativeId], references: [id], onDelete: SetNull)
 
   @@unique([adGroupId, externalId])
-  /// Составной, а не отдельный по status: и A/B (`creatives/ab`), и оптимизатор
-  /// читают объявления группы с фильтром по статусу, а по одному статусу выборки нет.
-  @@index([adGroupId, status])
   @@index([moderationStatus])
 }
 

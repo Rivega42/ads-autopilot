@@ -1,3 +1,4 @@
+import { ModerationStatus } from '@prisma/client';
 import { describe, expect, it } from 'vitest';
 
 import type { ChannelContext } from '@/channels/types.js';
@@ -5,6 +6,7 @@ import { VkAdsAdapter, buildRecreatePayload } from '@/clients/vk-ads/adapter.js'
 import { VK_PATHS } from '@/clients/vk-ads/entities.js';
 import { RateLimitGovernor, VkHttpClient, type VkTransport } from '@/clients/vk-ads/http.js';
 import type { VkBanner } from '@/clients/vk-ads/schemas.js';
+import { toModerationStatus } from '@/ingestion/mapping.js';
 import { ChannelError } from '@/lib/errors.js';
 
 interface Recorded {
@@ -183,6 +185,26 @@ describe('VkAdsAdapter reads', () => {
       moderationReason: 'превосходная степень',
       href: 'https://example.ru',
     });
+  });
+
+  it('не выдаёт нашу собственную паузу за отказ модерации', async () => {
+    const { adapter } = harness(() => ({
+      count: 2,
+      items: [
+        // `moderation_status` у VK не обязателен. Слово `blocked` в статусе показов —
+        // это ровно то, что пишет `pauseEntities`, а в словаре модерации то же слово
+        // значит «отклонено»: без поправки выключенное нами объявление каждые полчаса
+        // уезжало бы на переписывание и заводило в кабинете новый баннер.
+        { id: 9, ad_group_id: 4, status: 'blocked' },
+        { id: 10, ad_group_id: 4, status: 'active' },
+      ],
+    }));
+
+    const [paused, active] = await adapter.listAds(ctx(false), []);
+
+    expect(paused?.status).toBe('blocked');
+    expect(toModerationStatus(paused?.moderationStatus ?? '')).toBe(ModerationStatus.PENDING);
+    expect(toModerationStatus(active?.moderationStatus ?? '')).toBe(ModerationStatus.APPROVED);
   });
 
   it('has no keyword level at all', async () => {
@@ -477,5 +499,34 @@ describe('buildRecreatePayload', () => {
     });
     // id старого баннера в тело не попадает — это создание, а не апдейт.
     expect(payload['id']).toBeUndefined();
+  });
+
+  it('не включает объявление, которое было выключено', () => {
+    const banner = { id: 9, ad_group_id: 4, status: 'blocked' } as unknown as VkBanner;
+
+    // Замена создаётся заново, а у нового баннера статус по умолчанию — «крутится».
+    // Выключенное объявление (проигравший вариант A/B, пауза оптимизатора) начало бы
+    // тратить бюджет клиента само.
+    expect(buildRecreatePayload(banner, { title: 'новый', text: 'новый текст' })).toMatchObject({
+      status: 'blocked',
+    });
+  });
+
+  it('сохраняет работающий статус исходного баннера', () => {
+    const banner = { id: 9, ad_group_id: 4, status: 'active' } as unknown as VkBanner;
+
+    expect(buildRecreatePayload(banner, { title: 'новый', text: 'новый текст' })).toMatchObject({
+      status: 'active',
+    });
+  });
+
+  it('незнакомый статус трактует как «не крутится»', () => {
+    const banner = { id: 9, ad_group_id: 4, status: 'на_модерации' } as unknown as VkBanner;
+
+    // Ошибиться можно в обе стороны, но включить чужой бюджет дороже, чем не включить
+    // объявление и дождаться человека.
+    expect(buildRecreatePayload(banner, { title: 'новый', text: 'новый текст' })).toMatchObject({
+      status: 'blocked',
+    });
   });
 });

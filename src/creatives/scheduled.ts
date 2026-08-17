@@ -293,10 +293,22 @@ async function requestLoserPause(
     level: 'ad',
     externalIds,
     reason:
-      `A/B-тест группы «${group.name}». ${experiment.decision.reason} ` +
+      `A/B-тест группы «${group.name}». ${experiment.decision.reason}` +
+      `${excludedNote(experiment)} ` +
       `На паузу уходят проигравшие объявления (${externalIds.length}): ` +
       `${listTitles(addressed.map((row) => row.title))}.`,
   };
+
+  if (experiment.excludedVariants.length > 0) {
+    log.warn(
+      {
+        adGroupId: group.id,
+        clientId: group.campaign.clientId,
+        excluded: experiment.excludedVariants.map((variant) => variant.variantId),
+      },
+      'A/B winner declared on a partial set: some variants are paused in the cabinet',
+    );
+  }
 
   const key = abApprovalIdempotencyKey(group.id, externalIds, { dryRun: deps.dryRun });
   if ((await deps.idempotency.reserve(key, group.id, deps.dryRun)) === 'duplicate') {
@@ -313,6 +325,23 @@ async function requestLoserPause(
     await deps.idempotency.release([key]);
     throw err;
   }
+}
+
+/**
+ * Оговорка про неполный набор.
+ *
+ * Победитель выбран среди работающих вариантов, и это правильно — выключенное в кабинете
+ * ничего не обслуживает. Но человек, выключивший лучший вариант руками, из карточки
+ * «победил B» никак не узнает, что A с вдвое лучшим CTR в сравнении не участвовал. Молча
+ * такое решение показывать нельзя: оно верное только вместе с этой строкой.
+ */
+function excludedNote(experiment: AdExperiment): string {
+  const excluded = experiment.excludedVariants;
+  if (excluded.length === 0) return '';
+  return (
+    ` Сравнение шло не по всему набору: выключенные в кабинете варианты (${excluded.length}) ` +
+    `в тест не входили — ${listTitles(excluded.map((variant) => variant.label))}.`
+  );
 }
 
 /** Заголовки объявлений для карточки: человек должен узнать текст, а не cuid. */

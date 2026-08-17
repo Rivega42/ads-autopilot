@@ -1,4 +1,4 @@
-import { ModerationStatus, Provider } from '@prisma/client';
+import { AdStatus, ModerationStatus, Provider } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
@@ -47,6 +47,7 @@ function rejected(over: Partial<RejectedAd> = {}): RejectedAd {
     externalId: '9',
     campaignId: 'c1',
     campaignName: 'Поиск — ремонт',
+    status: AdStatus.ACTIVE,
     retries: 0,
     reason: 'Превосходная степень без подтверждения',
     ad: ORIGINAL,
@@ -179,6 +180,30 @@ describe('repairRejectedAd: штатное переписывание', () => {
     expect(entry?.prevValue).toMatchObject({ title: ORIGINAL.title });
   });
 
+  it('не тратит вызовы модели на объявление, которое не крутится', async () => {
+    const h = harness();
+
+    const outcome = await repairRejectedAd(h.rc, rejected({ status: AdStatus.PAUSED }));
+
+    expect(outcome).toEqual({ status: 'skipped', reason: 'ad is not running' });
+    expect(h.classifyCalls).toHaveLength(0);
+    expect(h.rewriteCalls).toHaveLength(0);
+    expect((h.rc.adapter as ReturnType<typeof fakeAdapter>).updates).toEqual([]);
+  });
+
+  it('не отправляет текст объявлению, выключенному между опросом и отправкой', async () => {
+    const h = harness();
+    // Между `pollAdModeration` и отправкой прошёл синк сущностей: объявление выключено
+    // (например, проигравший вариант A/B). Захват обязан этого не пропустить.
+    db.adOf('ad1').status = AdStatus.PAUSED;
+
+    const outcome = await repairRejectedAd(h.rc, rejected());
+
+    expect(outcome).toMatchObject({ status: 'skipped' });
+    expect((h.rc.adapter as ReturnType<typeof fakeAdapter>).updates).toEqual([]);
+    expect(db.adOf('ad1').moderationStatus).toBe(ModerationStatus.REJECTED);
+  });
+
   it('наложившийся прогон не отправляет второй текст', async () => {
     const h = harness();
     // Первый прогон уже захватил объявление: статус REWRITING, счётчик сдвинут.
@@ -187,7 +212,10 @@ describe('repairRejectedAd: штатное переписывание', () => {
 
     const outcome = await repairRejectedAd(h.rc, rejected());
 
-    expect(outcome).toEqual({ status: 'skipped', reason: 'claimed by another run' });
+    expect(outcome).toEqual({
+      status: 'skipped',
+      reason: 'claimed by another run or no longer active',
+    });
     expect((h.rc.adapter as ReturnType<typeof fakeAdapter>).updates).toEqual([]);
   });
 
@@ -335,7 +363,10 @@ function vkHarness(over: { deleteFails?: boolean } = {}): {
             {
               id: 9,
               ad_group_id: 4,
-              status: 'rejected',
+              // Показы и модерация — разные поля: отклонённый баннер продолжает
+              // числиться работающим, пока его не выключили руками.
+              status: 'active',
+              moderation_status: 'rejected',
               textblocks: { title_25: { text: 'Лучший ремонт' } },
               url: 'https://example.ru',
             },
@@ -423,21 +454,64 @@ describe('repairRejectedAd в VK', () => {
     expect(escalations[0]?.problems.join(' ')).toContain('10');
   });
 
-  it('не роняет прогон, когда новый id уже занят другой строкой', async () => {
+  it('переводит строку на живой баннер и снимает захват одной записью', async () => {
+    const vk = vkHarness({ deleteFails: true });
+    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, rewrites: [VK_REWRITE] });
+
+    await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow(/replaced by 10/);
+
+    // Между «захватил» и «отпустил» промежуточных состояний быть не должно: падение
+    // после первой из двух записей оставляло бы строку с мёртвым id и потраченной
+    // попыткой, а поднять её нечем — старого баннера в листинге уже нет.
+    const released = db.adWrites.filter(
+      (write) => write.data.moderationStatus === ModerationStatus.REJECTED,
+    );
+    expect(released).toHaveLength(1);
+    expect(released[0]?.data).toMatchObject({
+      externalId: '10',
+      moderationStatus: ModerationStatus.REJECTED,
+    });
+  });
+
+  it('после спасённого id строка описывает новый баннер, а не прошлый вариант', async () => {
+    const vk = vkHarness({ deleteFails: true });
+    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, rewrites: [VK_REWRITE] });
+
+    await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow(/replaced by 10/);
+
+    // В баннере 10 лежит переписанный текст. Оставить строке отпечаток старого
+    // варианта — значит подшить его показы к чужой строке A/B-отчёта.
+    const ad = db.adOf('ad1');
+    expect(ad.title).toBe(VK_REWRITE.title);
+    expect(ad.llmVariant).toBe(textVariantId({ title: VK_REWRITE.title, text: VK_REWRITE.text }));
+    // На эту запись опирается исключение переписанных объявлений из A/B
+    // (`TEXT_REWRITE_ACTIONS` в `creatives/ab/experiment.ts`).
+    const entry = db.changeLogs.find((row) => row.action === REWRITE_ACTION);
+    expect(entry?.newValue).toMatchObject({ externalIdBefore: '9', externalIdAfter: '10' });
+  });
+
+  it('зовёт человека, когда новый id уже занят другой строкой', async () => {
     db.seedAd({ id: 'ad2', adGroupId: 'g1', externalId: '10' });
     const vk = vkHarness();
     const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, rewrites: [VK_REWRITE] });
 
     const outcome = await repairRejectedAd(h.rc, rejected());
 
-    expect(outcome).toMatchObject({ status: 'rewritten' });
+    expect(outcome).toEqual({ status: 'escalated', cause: 'external_id_taken' });
     const ad = db.adOf('ad1');
     // Слить две строки автоматика не вправе, поэтому id остаётся старым, но тексты
     // и статус сохраняются: иначе объявление зависло бы в REWRITING.
     expect(ad.externalId).toBe('9');
     expect(ad.title).toBe(VK_REWRITE.title);
     expect(ad.moderationStatus).toBe(ModerationStatus.PENDING);
-    // Молча терять расхождение нельзя: строка в ErrorLog поднимает алерт Роману.
+    // Баннер 9 удалён при замене. Оставить строку работающей значит вечно предлагать
+    // паузу несуществующему объявлению и держать его в A/B.
+    expect(ad.status).toBe(AdStatus.ARCHIVED);
+    // Одиночное расхождение не набирает порога `error_burst` в `reporter/alerts.ts`,
+    // поэтому строки в ErrorLog мало — человеку нужно письмо.
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]).toMatchObject({ adId: 'ad1', cause: 'external_id_taken' });
+    expect(escalations[0]?.problems.join(' ')).toContain('10');
     expect(db.errorLogs).toHaveLength(1);
     expect(db.errorLogs[0]?.scope).toBe('moderation:external-id:ad1');
     expect(db.errorLogs[0]?.message).toContain('10');

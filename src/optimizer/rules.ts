@@ -72,9 +72,7 @@ export function pauseHighCpaEntities(input: RuleInput, targets: OptimizationTarg
 
   for (const entity of input.entities) {
     if (!PAUSABLE_ENTITY_TYPES.has(entity.entityType)) continue;
-    // Выключенное в кабинете уже не откручивается: карточка «поставить на паузу»
-    // по нему возвращалась бы каждую ночь, пока статистика не выпадет из окна.
-    if (entity.status !== null && entity.status !== 'ACTIVE') continue;
+    if (!isServing(entity)) continue;
     if (entity.impressions <= minImpressions) continue;
 
     const { cpa } = deriveMetrics(entity);
@@ -110,6 +108,7 @@ export function decreaseBidOnHighCpa(input: RuleInput, targets: OptimizationTarg
   for (const entity of input.entities) {
     const bid = biddableBid(entity);
     if (bid === null) continue;
+    if (!isServing(entity)) continue;
     if (entity.impressions <= minImpressions) continue;
 
     const { cpa } = deriveMetrics(entity);
@@ -156,6 +155,7 @@ export function increaseBidOnLowCpa(input: RuleInput, targets: OptimizationTarge
   for (const entity of input.entities) {
     const bid = biddableBid(entity);
     if (bid === null) continue;
+    if (!isServing(entity)) continue;
 
     const { cpa } = deriveMetrics(entity);
     if (cpa === null || cpa >= cpaRatio * targetCpa) continue;
@@ -228,6 +228,19 @@ export const MVP_RULES: readonly OptimizationRule[] = [
 
 export function runMvpRules(input: RuleInput, targets: OptimizationTargets): Decision[] {
   return MVP_RULES.flatMap((rule) => rule(input, targets));
+}
+
+/**
+ * Правила трогают только то, что реально откручивается.
+ *
+ * Выключенное в кабинете не показывается: карточка «поставить на паузу» по нему
+ * возвращалась бы каждую ночь, пока статистика не выпадет из окна, а изменение
+ * ставки уехало бы в кабинет и не изменило бы ровно ничего — зато в отчёте
+ * выглядело бы работой. Неизвестный статус (null) считается работой: колонка
+ * новая, и старая строка не должна выпадать из оптимизации из-за пробела в ней.
+ */
+function isServing(entity: EntityMetrics): boolean {
+  return entity.status === null || entity.status === 'ACTIVE';
 }
 
 function biddableBid(entity: EntityMetrics): number | null {

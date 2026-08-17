@@ -438,6 +438,21 @@ describe('runOptimizer', () => {
     expect(run.allowed[0]?.label).toBe('Ремонт под ключ за 30 дней');
   });
 
+  it('фикстура без статуса объявления считается работающей, а не выпадает из оптимизации', async () => {
+    const db = createDb({
+      ads: [{ id: 'ad-1', title: 'Ремонт под ключ за 30 дней' }],
+      stats: statsOver(
+        'ad-1',
+        3,
+        { impressions: 600, clicks: 30, spend: 6000, conversions: 0 },
+        'AD',
+      ),
+    });
+    const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW });
+
+    expect(run.proposed.map((d) => d.action)).toContain('PAUSE');
+  });
+
   it.each(['PAUSED', 'ARCHIVED'])(
     'не предлагает паузу объявлению со статусом %s',
     async (status) => {

@@ -101,7 +101,12 @@ const h = vi.hoisted(() => {
               .filter((ad) => ad.adGroupId === where.adGroupId)
               .filter((ad) => !where.llmVariant || ad.llmVariant !== null)
               .filter((ad) => where.status === undefined || ad.status === where.status)
-              .map((ad) => ({ id: ad.id, llmVariant: ad.llmVariant, title: ad.title }));
+              .map((ad) => ({
+                id: ad.id,
+                llmVariant: ad.llmVariant,
+                title: ad.title,
+                status: ad.status,
+              }));
           }
           if (where.externalId !== undefined) {
             const ext = where.externalId.in;
@@ -318,6 +323,30 @@ describe('runAbEvaluation: что видит человек', () => {
     expect(reason).toContain('Заголовок ad-2');
     expect(reason).not.toMatch(/t-[0-9a-f]{12}/);
     expect(reason).not.toMatch(/\bad:/);
+  });
+
+  it('говорит, что сравнение шло не по всему набору, если вариант выключен руками', async () => {
+    // Лучший вариант выключен человеком, победителем становится вчерашний середняк.
+    // Из карточки обязано быть видно, что чемпион в сравнении не участвовал.
+    h.state.ads = [
+      ad('ad-1', 'v-a', 'ag-1', AdStatus.PAUSED),
+      ad('ad-2', 'v-b'),
+      ad('ad-3', 'v-c'),
+    ];
+    h.state.stats = [
+      { entityId: 'ad-1', impressions: 20_000, clicks: 1200 },
+      { entityId: 'ad-2', impressions: 20_000, clicks: 400 },
+      { entityId: 'ad-3', impressions: 20_000, clicks: 200 },
+    ];
+
+    await runAbEvaluation({ dryRun: false, now: NOW });
+
+    const [action] = h.createApproval.mock.calls[0] ?? [];
+    const reason = action?.reason ?? '';
+    expect(reason).toContain('Заголовок ad-1');
+    expect(reason).toMatch(/выключен/i);
+    // Выключенное объявление на паузу второй раз не отправляют.
+    expect(action?.kind === 'pause_entities' && action.externalIds).toEqual(['ext-ad-3']);
   });
 });
 

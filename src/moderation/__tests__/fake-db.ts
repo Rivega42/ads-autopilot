@@ -1,4 +1,4 @@
-import { ClientStatus, ModerationStatus, type Provider } from '@prisma/client';
+import { AdStatus, ClientStatus, ModerationStatus, type Provider } from '@prisma/client';
 
 import type { ModerationDb } from '@/moderation/deps.js';
 
@@ -37,6 +37,7 @@ export interface AdRow {
   externalId: string;
   title: string;
   body: string;
+  status: AdStatus;
   moderationStatus: ModerationStatus;
   moderationReason: string | null;
   moderationRetries: number;
@@ -77,6 +78,7 @@ type StatusFilter = ModerationStatus | { not: ModerationStatus };
 interface AdWhere {
   id?: string;
   adGroupId?: { in: string[] };
+  status?: AdStatus;
   moderationStatus?: StatusFilter;
   moderationRetries?: number;
   updatedAt?: { lt: Date };
@@ -86,10 +88,17 @@ interface AdData {
   externalId?: string;
   title?: string;
   body?: string;
+  status?: AdStatus;
   moderationStatus?: ModerationStatus;
   moderationReason?: string | null;
   moderationRetries?: number;
   llmVariant?: string | null;
+}
+
+/** След записи в `Ad`: по нему видно, сколько состояний строка прошла между двумя точками. */
+export interface AdWrite {
+  op: 'update' | 'updateMany';
+  data: AdData;
 }
 
 /**
@@ -121,6 +130,7 @@ export class FakeDb {
   readonly credentials: CredentialRow[] = [];
   readonly changeLogs: ChangeLogRow[] = [];
   readonly errorLogs: ErrorLogRow[] = [];
+  readonly adWrites: AdWrite[] = [];
 
   seedClient(row: Partial<ClientRow> & { id: string }): ClientRow {
     const client: ClientRow = {
@@ -154,6 +164,7 @@ export class FakeDb {
       externalId: `a-${row.id}`,
       title: 'Заголовок',
       body: 'Текст объявления',
+      status: AdStatus.ACTIVE,
       moderationStatus: ModerationStatus.PENDING,
       moderationReason: null,
       moderationRetries: 0,
@@ -161,6 +172,7 @@ export class FakeDb {
       updatedAt: new Date(),
       ...row,
     };
+    this.assertExternalIdFree(ad);
     this.ads.push(ad);
     return ad;
   }
@@ -181,9 +193,35 @@ export class FakeDb {
     return campaign;
   }
 
+  /**
+   * `@@unique([adGroupId, externalId])`.
+   *
+   * Проверка вынесена из `ad.update` и стоит на каждом пути, который вообще пишет
+   * `externalId`: индекс в Postgres не знает, каким запросом в него пришли, и тест,
+   * который «прошёл» мимо него, соврал бы ровно про то место, где строка теряет id.
+   */
+  private assertExternalIdFree(candidate: AdRow): void {
+    const taken = this.ads.some(
+      (row) =>
+        row.id !== candidate.id &&
+        row.adGroupId === candidate.adGroupId &&
+        row.externalId === candidate.externalId,
+    );
+    if (taken) throw new FakeUniqueViolation('adGroupId, externalId');
+  }
+
+  private writeAd(ad: AdRow, data: AdData, op: AdWrite['op']): void {
+    if (data.externalId !== undefined) {
+      this.assertExternalIdFree({ ...ad, externalId: data.externalId });
+    }
+    Object.assign(ad, data, { updatedAt: new Date() });
+    this.adWrites.push({ op, data });
+  }
+
   private matchAd(where: AdWhere, ad: AdRow): boolean {
     if (where.id !== undefined && where.id !== ad.id) return false;
     if (where.adGroupId && !where.adGroupId.in.includes(ad.adGroupId)) return false;
+    if (where.status !== undefined && where.status !== ad.status) return false;
     if (!matchStatus(where.moderationStatus, ad.moderationStatus)) return false;
     if (where.moderationRetries !== undefined && where.moderationRetries !== ad.moderationRetries) {
       return false;
@@ -219,7 +257,7 @@ export class FakeDb {
       let count = 0;
       for (const ad of this.ads) {
         if (!this.matchAd(args.where, ad)) continue;
-        Object.assign(ad, args.data, { updatedAt: new Date() });
+        this.writeAd(ad, args.data, 'updateMany');
         count += 1;
       }
       return { count };
@@ -227,17 +265,7 @@ export class FakeDb {
 
     update: async (args: { where: { id: string }; data: AdData }): Promise<AdRow> => {
       const ad = this.adOf(args.where.id);
-      const externalId = args.data.externalId;
-      if (
-        externalId !== undefined &&
-        this.ads.some(
-          (row) =>
-            row.id !== ad.id && row.adGroupId === ad.adGroupId && row.externalId === externalId,
-        )
-      ) {
-        throw new FakeUniqueViolation('adGroupId, externalId');
-      }
-      Object.assign(ad, args.data, { updatedAt: new Date() });
+      this.writeAd(ad, args.data, 'update');
       return { ...ad };
     },
   };
