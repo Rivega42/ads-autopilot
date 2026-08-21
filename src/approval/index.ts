@@ -50,6 +50,9 @@ export { registerActionExecutor, type ActionExecutor } from '@/approval/execute.
 // Пометка применённых минус-фраз нужна обоим путям применения — через апрув и
 // напрямую из оптимизатора, — поэтому лежит здесь, а не внутри одного из них.
 export { markNegatedQueries, type MarkNegatedInput } from '@/approval/mark-negated.js';
+// Отражение применённого в строках сущностей адресуется внешними id, поэтому
+// путь оптимизатора использует свою версию (`optimizer/local-state.ts`) — по нашим.
+export { syncLocalEntities, type LocalStateResult } from '@/approval/local-state.js';
 export {
   createApiMessenger,
   getMessenger,

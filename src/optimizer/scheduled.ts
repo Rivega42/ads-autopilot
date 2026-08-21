@@ -6,6 +6,7 @@ import { applyDecisions, type ApplyReport, type IdempotencyStore } from './apply
 import { runOptimizer } from './engine.js';
 import type { OptimizerRun } from './engine.js';
 import { describeFailure, recordFailure } from './errors.js';
+import { syncAppliedDecisions } from './local-state.js';
 import type { ApprovalRequest } from './policy.js';
 import { createApplyDb, createPlatformWriter, createPrismaIdempotencyStore } from './runtime.js';
 import { toApprovalActions, type ApprovalTarget } from './to-approval.js';
@@ -37,6 +38,12 @@ export interface ScheduledOptimizationSummary {
   /** Дошло до площадки, но менять было нечего (минус-слово уже стояло). */
   noop: number;
   applyFailed: number;
+  /**
+   * Кампании, где изменение доехало до кабинета, а наши строки обновить не удалось.
+   * Не то же самое, что `applyFailed`: деньги потрачены, изменение живёт, но до
+   * ближайшего синка сущностей оптимизатор будет предлагать его снова.
+   */
+  localStateFailed: number;
   approvals: number;
   approvalsFailed: number;
   /** Карточка уже создана этим же прогоном — повтор задачи BullMQ второй не шлёт. */
@@ -178,6 +185,7 @@ export async function runScheduledOptimization(
     plannedOnly: 0,
     noop: 0,
     applyFailed: 0,
+    localStateFailed: 0,
     approvals: 0,
     approvalsFailed: 0,
     approvalsDuplicate: 0,
@@ -247,6 +255,9 @@ export async function runScheduledOptimization(
       summary.plannedOnly += report.planned.length;
       summary.noop += report.noop.length;
       summary.applyFailed += report.failed.length;
+      // Раньше пометки минус-фраз: `markNegated` бросает, и её падение не должно
+      // забирать с собой отражение пауз и ставок.
+      summary.localStateFailed += await syncLocalState(campaign.id, report);
       await markNegated(campaign.id, report);
     } catch (err) {
       summary.failed += 1;
@@ -311,6 +322,63 @@ async function markNegated(campaignId: string, report: ApplyReport): Promise<voi
     where: { adGroup: { campaignId }, query: { in: [...new Set(phrases)] }, negated: false },
     data: { negated: true },
   });
+}
+
+/**
+ * Наши строки после успешной записи в кабинет.
+ *
+ * Решение считается от значений в БД, а не от того, что в кабинете: пока строка
+ * не обновлена, завтрашний прогон увидит прежний ACTIVE и прежнюю ставку и
+ * отправит то же самое ещё раз — с новым посуточным ключом идемпотентности, то
+ * есть за баллы и с записью в ChangeLog об изменении, которого не было. Раньше
+ * дыру закрывала только загрузка сущностей раз в час, и корректность
+ * оптимизатора держалась на том, что чужая задача успела пройти между циклами.
+ *
+ * `noop` отражаем наравне с `applied` по той же причине, что и в `markNegated`:
+ * «менять было нечего» означает, что нужное состояние в кабинете уже стоит, —
+ * значит наша строка от него отстала, и записать целевое значение верно.
+ *
+ * Изменение, дошедшее до площадки, но не попавшее в журнал (`failed` с
+ * `platformApplied`), отражаем тоже: в кабинете оно живёт, и стоит нам его не
+ * отразить — завтрашний прогон отправит его заново.
+ *
+ * В dry-run сюда не попадает ничего: `applyDecisions` кладёт решения в `planned`,
+ * а `applied`/`noop` остаются пустыми. Это существенно — тронуть строку в dry-run
+ * значило бы решить, что изменение сделано, и перестать его предлагать.
+ *
+ * Ошибка обновления не считается провалом применения: изменение в кабинете уже
+ * есть, и «не применено» в сводке позвало бы разбираться не туда.
+ *
+ * @returns 1, если строки обновить не удалось, иначе 0.
+ */
+async function syncLocalState(campaignId: string, report: ApplyReport): Promise<number> {
+  const decisions = [
+    ...report.applied.map((change) => change.decision),
+    ...report.noop.map((change) => change.decision),
+    // Провал записи в ChangeLog изменения в кабинете не отменяет — там же и ключ
+    // идемпотентности не освобождается. Аудита у такой строки нет, но повторно
+    // слать её тем более незачем.
+    ...report.failed.filter((change) => change.platformApplied).map((change) => change.decision),
+  ];
+  if (decisions.length === 0) return 0;
+
+  try {
+    const { updated, skipped } = await syncAppliedDecisions(decisions);
+    if (skipped > 0) {
+      log.warn(
+        { campaignId, skipped },
+        'applied decisions have no local column: optimizer will propose them again',
+      );
+    }
+    log.debug({ campaignId, updated, skipped }, 'local state synced');
+    return 0;
+  } catch (err) {
+    log.error(
+      { campaignId, err: describeError(err) },
+      'local state not synced after a platform write',
+    );
+    return 1;
+  }
 }
 
 export interface ApprovalCardsOutcome {

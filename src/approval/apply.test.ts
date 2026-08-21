@@ -36,6 +36,8 @@ const h = vi.hoisted(() => {
     updateError: string | null;
     changeLogError: string | null;
     negatedError: string | null;
+    localStateError: string | null;
+    localStateCount: number;
   } = {
     row: null,
     changeLogs: [],
@@ -43,7 +45,16 @@ const h = vi.hoisted(() => {
     updateError: null,
     changeLogError: null,
     negatedError: null,
+    localStateError: null,
+    localStateCount: 1,
   };
+
+  /** Обновление наших строк после записи в кабинет — общее для всех уровней. */
+  const localUpdate = (): ReturnType<typeof vi.fn> =>
+    vi.fn(async (_args: unknown) => {
+      if (state.localStateError) throw new Error(state.localStateError);
+      return { count: state.localStateCount };
+    });
   return {
     state,
     prisma: {
@@ -77,7 +88,11 @@ const h = vi.hoisted(() => {
           id: 'camp-internal-1',
           clientId: 'cl1',
         })),
+        updateMany: localUpdate(),
       },
+      adGroup: { updateMany: localUpdate() },
+      ad: { updateMany: localUpdate() },
+      keyword: { updateMany: localUpdate() },
       searchQueryStat: {
         updateMany: vi.fn(async (_args: unknown) => {
           if (state.negatedError) throw new Error(state.negatedError);
@@ -101,6 +116,17 @@ const h = vi.hoisted(() => {
     setBudgets: vi.fn(async (_ctx: ChannelContext, _changes: unknown[]): Promise<WriteResult> => ({
       applied: true,
       plan: { budgets: 1 },
+    })),
+    pauseEntities: vi.fn(
+      async (
+        _ctx: ChannelContext,
+        _level: string,
+        _externalIds: string[],
+      ): Promise<WriteResult> => ({ applied: true, plan: { paused: 1 } }),
+    ),
+    setBids: vi.fn(async (_ctx: ChannelContext, _changes: unknown[]): Promise<WriteResult> => ({
+      applied: true,
+      plan: { bids: 1 },
     })),
     listCampaigns: vi.fn(async (_ctx: ChannelContext): Promise<RemoteCampaign[]> => [
       {
@@ -132,6 +158,8 @@ vi.mock('@/channels/registry.js', () => ({
     setBudgets: h.setBudgets,
     listCampaigns: h.listCampaigns,
     addNegativeKeywords: h.addNegativeKeywords,
+    pauseEntities: h.pauseEntities,
+    setBids: h.setBids,
   }),
 }));
 
@@ -171,6 +199,15 @@ function cardText(): string {
   return calls[calls.length - 1]?.[2] ?? '';
 }
 
+const pauseAction: ApprovalAction = {
+  kind: 'pause_entities',
+  clientId: 'cl1',
+  channel: 'YANDEX_DIRECT',
+  reason: 'CPA 3 200 ₽ при цели 500 ₽, 1 200 показов',
+  level: 'keyword',
+  externalIds: ['kw-ext-1', 'kw-ext-2'],
+};
+
 const negativesAction: ApprovalAction = {
   kind: 'add_negatives',
   clientId: 'cl1',
@@ -193,7 +230,11 @@ beforeEach(() => {
   h.state.updateError = null;
   h.state.changeLogError = null;
   h.state.negatedError = null;
+  h.state.localStateError = null;
+  h.state.localStateCount = 1;
   h.setBudgets.mockResolvedValue({ applied: true, plan: { budgets: 1 } });
+  h.pauseEntities.mockResolvedValue({ applied: true, plan: { paused: 1 } });
+  h.setBids.mockResolvedValue({ applied: true, plan: { bids: 1 } });
   h.addNegativeKeywords.mockResolvedValue({ applied: true, plan: { negatives: 2 } });
   h.prisma.campaign.findUnique.mockResolvedValue({ id: 'camp-internal-1', clientId: 'cl1' });
   h.prisma.searchQueryStat.updateMany.mockImplementation(async () => {
@@ -565,5 +606,105 @@ describe('журнал ошибок', () => {
     seed();
     await applyApproval('ap1', '@roman');
     expect(h.state.errorLogs).toHaveLength(0);
+  });
+});
+
+// ── наши строки после применения ─────────────────────────────────────────────
+describe('локальное состояние', () => {
+  /** Аргументы последнего обновления строк ключевых фраз. */
+  function keywordUpdate(): unknown {
+    const calls = h.prisma.keyword.updateMany.mock.calls;
+    return calls[calls.length - 1]?.[0];
+  }
+
+  it('одобренная пауза гасит наши строки сразу, а не через час', async () => {
+    seed({ payload: pauseAction, kind: ApprovalKind.MASS_PAUSE });
+    h.state.localStateCount = 2;
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toEqual({ status: 'APPLIED', dryRun: false });
+    expect(keywordUpdate()).toEqual({
+      where: {
+        externalId: { in: ['kw-ext-1', 'kw-ext-2'] },
+        adGroup: { campaign: { clientId: 'cl1', provider: 'YANDEX_DIRECT' } },
+      },
+      data: { status: 'PAUSED' },
+    });
+  });
+
+  it('одобренная ставка ложится в ту же колонку, из которой считалось решение', async () => {
+    seed({
+      payload: {
+        kind: 'bid_change',
+        clientId: 'cl1',
+        channel: 'YANDEX_DIRECT',
+        reason: 'CPA 900 ₽ при цели 500 ₽',
+        changes: [{ keywordExternalId: 'kw-ext-1', bid: 170, bidBefore: 200 }],
+      },
+      kind: ApprovalKind.BID_CHANGE,
+    });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toEqual({ status: 'APPLIED', dryRun: false });
+    expect(keywordUpdate()).toMatchObject({ data: { bid: 170 } });
+  });
+
+  it('в dry-run строки не трогаем: на площадке ничего не менялось', async () => {
+    seed({ payload: pauseAction, kind: ApprovalKind.MASS_PAUSE });
+    h.buildContext.mockResolvedValue({ clientId: 'cl1', credentials: {}, dryRun: true });
+    h.pauseEntities.mockResolvedValue({ applied: false, plan: { would: 'pause 2' } });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toEqual({ status: 'APPLIED', dryRun: true });
+    expect(h.prisma.keyword.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('пустой ответ адаптера тоже отражаем: нужное состояние в кабинете уже стоит', async () => {
+    seed({ payload: pauseAction, kind: ApprovalKind.MASS_PAUSE });
+    h.pauseEntities.mockResolvedValue({ applied: false, plan: { paused: 0 } });
+    h.state.localStateCount = 2;
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toMatchObject({ status: 'APPLIED', noop: true });
+    expect(h.prisma.keyword.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('упавшее обновление строк не превращает применённое изменение в FAILED', async () => {
+    seed({ payload: pauseAction, kind: ApprovalKind.MASS_PAUSE });
+    h.state.localStateError = 'connection pool timeout';
+
+    const out = await applyApproval('ap1', '@roman');
+
+    // Фразы в кабинете уже погашены: «не применено» позвало бы человека на второй заход.
+    expect(out.status).toBe('APPLIED');
+    expect(out).toMatchObject({ warning: expect.stringContaining('состояние в базе') });
+    expect(h.state.row?.decision).toBe(ApprovalDecision.APPLIED);
+    expect(cardText()).not.toContain('применить не удалось');
+  });
+
+  it('несопоставленная сущность доезжает до человека текстом', async () => {
+    seed({ payload: pauseAction, kind: ApprovalKind.MASS_PAUSE });
+    h.state.localStateCount = 0;
+
+    const out = await applyApproval('ap1', '@roman');
+
+    // Молчаливый пропуск означал бы, что та же карточка приходит каждый день.
+    expect(out.status).toBe('APPLIED');
+    expect(out).toMatchObject({
+      warning: expect.stringContaining('предложит это изменение снова'),
+    });
+  });
+
+  it('минус-слова строк сущностей не трогают', async () => {
+    seed({ payload: negativesAction, kind: ApprovalKind.STRATEGY_CHANGE });
+
+    await applyApproval('ap1', '@roman');
+
+    expect(h.prisma.keyword.updateMany).not.toHaveBeenCalled();
+    expect(h.prisma.campaign.updateMany).not.toHaveBeenCalled();
   });
 });

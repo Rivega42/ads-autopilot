@@ -2,6 +2,7 @@ import { ApprovalDecision, ChangeActor, type PendingApproval } from '@prisma/cli
 
 import { formatAmount, renderOutcome, type CardOutcome } from '@/approval/card.js';
 import { changeLogAction, changeSnapshot, executeAction } from '@/approval/execute.js';
+import { syncLocalEntities } from '@/approval/local-state.js';
 import { markNegatedQueries } from '@/approval/mark-negated.js';
 import { getMessenger } from '@/approval/telegram.js';
 import {
@@ -101,6 +102,9 @@ export async function applyApproval(approvalId: string, approvedBy: string): Pro
 
   const negatedError = await markNegatedIfNeeded(action, dryRun);
   if (negatedError) notes.push(`пометка минус-фраз в статистике не удалась: ${negatedError}`);
+
+  const localStateNote = await syncLocalStateIfNeeded(action, dryRun);
+  if (localStateNote) notes.push(localStateNote);
 
   try {
     await prisma.pendingApproval.update({
@@ -357,6 +361,52 @@ async function markNegatedIfNeeded(
     const message = describeError(err);
     log.error({ campaign: action.campaignExternalId, err: message }, 'negated marking failed');
     return message;
+  }
+}
+
+/**
+ * Наши строки после применения — тот же долг, что и пометка минус-фраз выше.
+ *
+ * Оптимизатор считает решения от значений в нашей БД, поэтому непогашенный
+ * `Keyword.status` или прежняя `Keyword.bid` означают, что завтрашний прогон
+ * предложит ровно то же самое: новая карточка человеку, новые баллы на площадке
+ * и запись в ChangeLog об изменении, которого не было. Раньше это чинил только
+ * синк сущностей раз в час.
+ *
+ * В dry-run не трогаем: на площадке ничего не менялось, и обновлённая строка
+ * скрыла бы изменение от следующего — уже настоящего — прогона.
+ *
+ * Пустой ответ адаптера (`applied: false` вне dry-run) отражаем наравне с
+ * применённым по той же причине, что и минус-фразы: «менять было нечего»
+ * означает, что нужное состояние в кабинете уже стоит, — отстала как раз наша
+ * строка.
+ *
+ * Ошибку возвращаем, а не бросаем: изменение в кабинете уже сделано, и провал
+ * записи обязан остаться примечанием, а не превратить исход в FAILED.
+ *
+ * @returns текст примечания либо null.
+ */
+async function syncLocalStateIfNeeded(
+  action: ApprovalAction,
+  dryRun: boolean,
+): Promise<string | null> {
+  if (dryRun) return null;
+  try {
+    const { requested, updated } = await syncLocalEntities(action);
+    if (requested > 0 && updated < requested) {
+      // Ноль обновлённых — сущности нет в нашей базе; меньше запрошенного — часть
+      // строк не нашлась. И то и другое означает, что оптимизатор вернётся с тем же.
+      log.warn({ kind: action.kind, requested, updated }, 'local state partially synced');
+      return (
+        `состояние в базе обновлено частично (${updated} из ${requested}): ` +
+        'изменение применено, но оптимизатор предложит это изменение снова'
+      );
+    }
+    return null;
+  } catch (err) {
+    const message = describeError(err);
+    log.error({ kind: action.kind, err: message }, 'local state sync failed');
+    return `состояние в базе не обновлено: ${message}`;
   }
 }
 

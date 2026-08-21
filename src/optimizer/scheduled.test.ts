@@ -54,7 +54,10 @@ const h = vi.hoisted(() => {
     runOptimizer: vi.fn(),
     applyDecisions: vi.fn(),
     prisma: {
-      campaign: { findMany: vi.fn(async () => state.campaigns) },
+      campaign: {
+        findMany: vi.fn(async () => state.campaigns),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
       clientBrief: { findUnique: vi.fn(async () => state.brief) },
       searchQueryStat: {
         findMany: vi.fn(async () => state.searchQueries),
@@ -63,9 +66,9 @@ const h = vi.hoisted(() => {
           return { count: 1 };
         }),
       },
-      adGroup: { findMany: vi.fn(async () => []) },
-      ad: { findMany: vi.fn(async () => []) },
-      keyword: { findMany: vi.fn() },
+      adGroup: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 1 })) },
+      ad: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 1 })) },
+      keyword: { findMany: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
     },
     runtime: {
       createApplyDb: vi.fn(() => ({})),
@@ -434,5 +437,105 @@ describe('runScheduledOptimization: target CPA', () => {
 
     const [, options] = h.runOptimizer.mock.calls[0] ?? [];
     expect(options).toMatchObject({ fallbackTargetCpa: null });
+  });
+});
+
+describe('runScheduledOptimization: локальное состояние', () => {
+  const applied = (decision: DecisionLike): Record<string, unknown> => ({
+    decision,
+    changeLogId: 'cl-1',
+    idempotencyKey: 'k',
+  });
+
+  function bidDecrease(id: string): DecisionLike {
+    return {
+      action: 'BID_DECREASE',
+      entityType: 'KEYWORD',
+      entityId: id,
+      label: `фраза ${id}`,
+      prevValue: { kind: 'bid', amount: 200 },
+      nextValue: { kind: 'bid', amount: 170 },
+      reason: 'CPA 900 при цели 500',
+      requiresApproval: false,
+      layer: 'rule',
+      ruleId: 'decrease-bid-high-cpa',
+      approvalKind: null,
+    };
+  }
+
+  it('гасит нашу строку сразу, не дожидаясь часового синка', async () => {
+    h.applyDecisions.mockResolvedValue(report({ applied: [applied(pause('kw-1'))] }));
+
+    const summary = await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    expect(h.prisma.keyword.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['kw-1'] } },
+      data: { status: 'PAUSED' },
+    });
+    expect(summary.localStateFailed).toBe(0);
+  });
+
+  it('записывает применённую ставку в ту же колонку, из которой считалось решение', async () => {
+    h.applyDecisions.mockResolvedValue(report({ applied: [applied(bidDecrease('kw-1'))] }));
+
+    await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    expect(h.prisma.keyword.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['kw-1'] } },
+      data: { bid: 170 },
+    });
+  });
+
+  it('отражает и noop: в кабинете нужное состояние уже стоит', async () => {
+    h.applyDecisions.mockResolvedValue(
+      report({ noop: [{ decision: pause('kw-1'), reason: 'площадке нечего было менять' }] }),
+    );
+
+    await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    expect(h.prisma.keyword.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('в dry-run строки не трогает: на площадке ничего не менялось', async () => {
+    h.applyDecisions.mockResolvedValue(report({ planned: [pause('kw-1'), bidDecrease('kw-2')] }));
+
+    await runScheduledOptimization({ dryRun: true, now: NOW });
+
+    expect(h.prisma.keyword.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('упавшее обновление строк не выдаётся за провал применения', async () => {
+    h.applyDecisions.mockResolvedValue(report({ applied: [applied(pause('kw-1'))] }));
+    h.prisma.keyword.updateMany.mockRejectedValueOnce(new Error('connection pool timeout'));
+
+    const summary = await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    // Изменение в кабинете уже есть: считать прогон провалившимся значило бы врать сводке.
+    expect(summary.autoApply).toBe(1);
+    expect(summary.applyFailed).toBe(0);
+    expect(summary.failed).toBe(0);
+    // Но расхождение должно быть видно: до синка оптимизатор пошлёт это ещё раз.
+    expect(summary.localStateFailed).toBe(1);
+  });
+});
+
+describe('runScheduledOptimization: изменение без журнала', () => {
+  it('отражает то, что доехало до кабинета, но не попало в ChangeLog', async () => {
+    h.applyDecisions.mockResolvedValue(
+      report({
+        failed: [
+          { decision: pause('kw-1'), reason: 'ChangeLog недоступен', platformApplied: true },
+          { decision: pause('kw-2'), reason: 'units exhausted', platformApplied: false },
+        ],
+      }),
+    );
+
+    await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    // Ключ идемпотентности такому изменению тоже не возвращают: оно применено.
+    expect(h.prisma.keyword.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['kw-1'] } },
+      data: { status: 'PAUSED' },
+    });
   });
 });
