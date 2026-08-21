@@ -104,6 +104,52 @@ describe('VkAdsAdapter http client lifetime', () => {
     expect(created).toHaveLength(1);
   });
 
+  /**
+   * Было сломано: клиент создавался с контекстом первого вызова и кешировался по
+   * кабинету, а токен в ключ кеша не входит. Заменённые в БД креды того же
+   * приложения до площадки не доезжали — живущий сутками воркер продолжал слать
+   * старый токен, и лечилось это лишним 401 → forceRefresh, то есть лишним минтом
+   * из пяти доступных слотов.
+   */
+  it('keeps the cached client but takes the token from the newest context', async () => {
+    const created: VkHttpClient[] = [];
+    const seen: string[] = [];
+    const transport: VkTransport = async () => ({
+      status: 200,
+      data: { count: 0, items: [] },
+      headers: {},
+    });
+    const adapter = new VkAdsAdapter({
+      httpFactory: (currentCtx) => {
+        const client = new VkHttpClient({
+          transport,
+          // Ровно как в проде: контекст перечитывается на каждом запросе токена.
+          getAccessToken: async () => {
+            seen.push(String(currentCtx().credentials['accessToken']));
+            return 'token';
+          },
+          attempts: 1,
+          governor: fastGovernor(),
+        });
+        created.push(client);
+        return client;
+      },
+    });
+
+    const withToken = (token: string): ChannelContext => ({
+      clientId: 'client-1',
+      credentials: { clientId: 'a', clientSecret: 'b', accessToken: token },
+      dryRun: false,
+    });
+
+    await adapter.listCampaigns(withToken('vk-token-old'));
+    await adapter.listCampaigns(withToken('vk-token-new'));
+
+    // Кеш не сломан: очередь и снимок лимитов кабинета пережили смену кред.
+    expect(created).toHaveLength(1);
+    expect(seen).toEqual(['vk-token-old', 'vk-token-new']);
+  });
+
   it('does not share a client between cabinets', async () => {
     const { adapter, created } = countingHarness();
     await adapter.listCampaigns(ctx(false));
@@ -352,6 +398,28 @@ describe('VkAdsAdapter writes for real', () => {
       createdBannerExternalId: '10',
       deletedBannerExternalId: '9',
     });
+  });
+
+  /**
+   * Было сломано: id замены читался схемой баннера, где `id: z.number()`, а
+   * VK местами отдаёт id строкой (см. `vkId` в schemas.ts). Ответ `{"id":"10"}`
+   * давал VK_BANNER_CREATE_NO_ID: замена уже создана и тратит деньги, старый
+   * баннер жив, а связи между ними не знает никто.
+   */
+  it('accepts a string id from the create response, like the rest of the client', async () => {
+    const { adapter, calls } = harness((call) =>
+      call.method === 'GET'
+        ? { count: 1, items: [{ id: 9, ad_group_id: 4, status: 'rejected' }] }
+        : { id: '10', ad_group_id: 4 },
+    );
+
+    const res = await adapter.updateAdText(ctx(false), '9', {
+      title: 'новый',
+      text: 'новый текст',
+    });
+
+    expect(res.result).toEqual({ createdBannerExternalId: '10', deletedBannerExternalId: '9' });
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST', 'DELETE']);
   });
 
   it('keeps the old banner alive when the created one has no confirmed id', async () => {

@@ -204,11 +204,20 @@ export function toAdFormat(ad: { imageUrl?: string }): AdFormat {
 
 /**
  * Имя стратегии из вложенного объекта площадки: у Директа оно лежит в
- * `Search.BiddingStrategyType`, у VK — плоским полем. Колонка `strategy`
- * строковая, поэтому берём то, что читается человеком в отчёте.
+ * `Search.BiddingStrategyType`, у VK — плоским `autobiddingMode`. Колонка
+ * `strategy` строковая, поэтому берём то, что читается человеком в отчёте.
+ *
+ * Словарь имён живёт здесь, а не в адаптерах: `RemoteCampaign.strategy` — мешок
+ * полей площадки, и каждый адаптер вправе назвать их по-своему (Директ отдаёт
+ * подобъект как есть, VK — camelCase, как и остальные поля DTO). Место, где эти
+ * диалекты сводятся к одной колонке, ровно одно — оно и обязано их знать.
  */
 export function strategyName(strategy: Record<string, unknown>): string | null {
-  const direct = strategy['BiddingStrategyType'] ?? strategy['type'] ?? strategy['name'];
+  const direct =
+    strategy['BiddingStrategyType'] ??
+    strategy['autobiddingMode'] ??
+    strategy['type'] ??
+    strategy['name'];
   if (typeof direct === 'string' && direct !== '') return direct;
 
   const search = strategy['Search'];

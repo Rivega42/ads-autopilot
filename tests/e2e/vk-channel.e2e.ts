@@ -130,14 +130,13 @@ describe('канал VK: кабинет → база → решения → ка
       name: 'Мамонты — сайт',
       status: 'ACTIVE',
       /**
-       * ДЕФЕКТ (не чиним здесь, см. отчёт): стратегия кабинета до колонки не доезжает.
-       * Адаптер кладёт в `RemoteCampaign.strategy` ключи `autobiddingMode` / `maxPrice` /
-       * `budgetLimit`, а `strategyName` (`src/ingestion/mapping.ts`) ищет
-       * `BiddingStrategyType` / `type` / `name` — и не находит ни одного. У всех кампаний
-       * VK колонка `strategy` останется null, хотя кабинет прислал `max_goals`.
-       * Если дефект починят, этот тест обязан покраснеть — обновить вместе с починкой.
+       * Было сломано: адаптер кладёт в `RemoteCampaign.strategy` ключи
+       * `autobiddingMode` / `maxPrice` / `budgetLimit`, а `strategyName`
+       * (`src/ingestion/mapping.ts`) искал только `BiddingStrategyType` / `type` /
+       * `name` — и не находил ни одного. У всех кампаний VK колонка `strategy`
+       * оставалась null, хотя кабинет прислал `max_goals`.
        */
-      strategy: null,
+      strategy: 'max_goals',
     });
     expect(Number(campaign.dailyBudget)).toBe(5000);
 

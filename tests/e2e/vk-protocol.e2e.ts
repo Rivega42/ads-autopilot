@@ -31,9 +31,9 @@ let vk: VkApiMock;
 /**
  * Свой адаптер на каждый случай.
  *
- * Не общий экземпляр из реестра: он кеширует HTTP-клиента вместе с контекстом
- * первого вызова (см. отдельный тест ниже), и соседний кабинет получал бы чужой
- * токен — провал одного теста пришлось бы объяснять настройками другого.
+ * Не общий экземпляр из реестра: он кеширует HTTP-клиента по кабинету вместе с
+ * очередью и снимком лимитов, а кабинет во всех случаях один и тот же — соседний
+ * случай унаследовал бы троттлинг предыдущего и падал бы по чужой причине.
  */
 let adapter: VkAdsAdapter;
 
@@ -114,17 +114,17 @@ describe('VK: края протокола', () => {
     expect(vk.calls.filter((c) => c.status === 401)).toHaveLength(1);
   });
 
-  it('ДЕФЕКТ: адаптер держит контекст первого вызова и игнорирует новые креды', async () => {
+  it('заменённые в БД креды уезжают в следующий же запрос, без лишнего минта', async () => {
     /**
-     * `createVkHttpClient(ctx, ...)` замыкает `getAccessToken` на тот `ChannelContext`,
-     * с которым клиента создали, а `VkAdsAdapter` кеширует клиента по кабинету
-     * (`cabinetKey` = клиент + реквизиты приложения). Токен в ключ не входит, поэтому
-     * заменённые в БД креды тем же приложением до площадки не доедут: живущий сутками
-     * воркер продолжит слать старый токен.
+     * Было сломано: `createVkHttpClient(ctx, ...)` замыкал `getAccessToken` на тот
+     * `ChannelContext`, с которым клиента создали, а `VkAdsAdapter` кеширует клиента
+     * по кабинету (`cabinetKey` = клиент + реквизиты приложения). Токен в ключ не
+     * входит, поэтому заменённые в БД креды тем же приложением до площадки не
+     * доезжали: живущий сутками воркер продолжал слать старый токен.
      *
-     * Само по себе это чинится 401 → forceRefresh, но ценой лишнего минта — а их
+     * Само по себе это лечилось 401 → forceRefresh, но ценой лишнего минта — а их
      * одновременно всего пять на пару (client_id, user). Если токен заменили именно
-     * потому, что старый отозвали, лишний минт съест слот на ровном месте.
+     * потому, что старый отозвали, лишний минт съедал слот на ровном месте.
      */
     startMock();
     await adapter.listCampaigns(await ctx());
@@ -140,9 +140,10 @@ describe('VK: края протокола', () => {
 
     await adapter.listCampaigns(await ctx());
 
-    // Запрос ушёл со старым токеном: свежий контекст кешированный клиент не увидел.
-    expect(vk.calls.at(-1)?.token).toBe('vk-token-1');
-    expect(vk.calls.some((c) => c.token === 'vk-token-external')).toBe(false);
+    // Свежий контекст доехал: ни 401, ни второго минта не понадобилось.
+    expect(vk.calls.at(-1)?.token).toBe('vk-token-external');
+    expect(vk.calls.some((c) => c.status === 401)).toBe(false);
+    expect(vk.minted).toBe(1);
   });
 
   it('429 с Retry-After: ждём столько, сколько сказала площадка, и повторяем', async () => {
@@ -201,22 +202,25 @@ describe('VK: края протокола', () => {
     expect(rows[0]).toMatchObject({ spend: 400, impressions: 3000, conversions: 1 });
   });
 
-  it('ДЕФЕКТ: баннер в статусе rejected не виден ни листингу, ни пересозданию', async () => {
+  it('баннер в статусе rejected пересоздаётся: чтение по id не фильтрует по статусу', async () => {
     /**
-     * ТЗ §2.2: «Статусы баннеров: active, deleted, blocked, pending_moderation,
-     * rejected». `VK_DEFAULT_STATUSES` (`src/clients/vk-ads/entities.ts`) — это
-     * `active,blocked`, и фильтр `_status__in` отправляется на каждом чтении, включая
-     * чтение по конкретному id внутри `updateAdText`.
+     * Было сломано: `VK_DEFAULT_STATUSES` (`src/clients/vk-ads/entities.ts`) — это
+     * `active,blocked`, а фильтр `_status__in` уходил на каждом чтении, включая чтение
+     * по конкретному id внутри `updateAdText`. Если VK кладёт вердикт модерации в
+     * `banner.status` (словарь ТЗ §2.2 — `active/deleted/blocked/pending_moderation/
+     * rejected`), то `GET banners.json?_status__in=active,blocked&_id__in=922` не
+     * возвращал отклонённый баннер, и переписывание текста падало с
+     * VK_BANNER_NOT_FOUND ещё до единой записи — то есть не работало совсем.
      *
-     * Последствия, если словарь ТЗ верен:
-     *  • отклонённое объявление не приезжает в `listAds` — модерация о нём не узнает
-     *    вовсе, а `pollAdModeration` посчитает нашу строку пропавшей и позовёт человека;
-     *  • даже с известным id пересоздать баннер нельзя: адаптер не находит его и
-     *    падает с VK_BANNER_NOT_FOUND, то есть переписывание текста не работает совсем.
+     * Починка сделана той стороной, которая верна при любом словаре: id адресует ровно
+     * один объект, фильтр статусов при чтении по id не нужен вовсе. Добавлять
+     * `rejected` в перечисление нельзя — словарь не подтверждён, а неизвестное площадке
+     * значение в `_status__in` уронит 400 весь листинг.
      *
-     * Чинится не догадкой, а живым токеном: либо словарь статусов дополняется, либо
-     * фильтр меняется на исключающий (`_status__ne=deleted`), либо чтение по `ids`
-     * перестаёт фильтровать по статусу вовсе — id и так адресует ровно один объект.
+     * ОСТАЁТСЯ ОТКРЫТЫМ (нужен живой токен): обход списка по-прежнему фильтрует по
+     * `active,blocked`, поэтому отклонённое объявление не приезжает в `listAds` —
+     * модерация не узнает о нём сама, если вердикт лежит именно в `status`. Проверка
+     * ниже фиксирует это как есть, а не как хотелось бы.
      */
     const cabinet = createVkCabinet();
     const rejectedBanner = cabinet.banners.find((b) => b.id === VK_IDS.bannerRejected);
@@ -228,45 +232,61 @@ describe('VK: края протокола', () => {
     expect(ads.map((a) => a.externalId)).not.toContain(String(VK_IDS.bannerRejected));
     expect(vk.callsTo('banners.json')[0]?.query['_status__in']).toBe('active,blocked');
 
-    await expect(
-      adapter.updateAdText(await ctx(), String(VK_IDS.bannerRejected), {
-        title: 'Мамонты с доставкой',
-        text: 'Привезём мамонта за сутки',
-      }),
-    ).rejects.toMatchObject({ code: 'VK_BANNER_NOT_FOUND' });
+    const res = await adapter.updateAdText(await ctx(), String(VK_IDS.bannerRejected), {
+      title: 'Мамонты с доставкой',
+      text: 'Привезём мамонта за сутки',
+    });
 
-    // Ни создания, ни удаления: половину замены сделать хуже, чем не делать ничего.
-    expect(
-      vk.calls.filter((c) => c.method !== 'GET' && !c.path.startsWith('oauth2/')),
-    ).toHaveLength(0);
+    // Чтение по id ушло без фильтра статусов — иначе баннер снова бы «пропал».
+    const byId = vk.callsTo('banners.json').filter((c) => c.query['_id__in'] !== undefined);
+    expect(byId).toHaveLength(1);
+    expect(byId[0]?.query['_status__in']).toBeUndefined();
+
+    expect(res.applied).toBe(true);
+    expect(res.result).toMatchObject({ deletedBannerExternalId: String(VK_IDS.bannerRejected) });
+    // Замена создана и ушла на модерацию заново, старый баннер погашен.
+    expect(vk.bannerById(VK_IDS.bannerRejected)?.status).toBe('deleted');
+    const created = vk.cabinet.banners.at(-1);
+    expect(created).toMatchObject({
+      ad_group_id: VK_IDS.groupRegions,
+      moderation_status: 'pending',
+      textblocks: {
+        title_25: { text: 'Мамонты с доставкой' },
+        text_90: { text: 'Привезём мамонта за сутки' },
+      },
+    });
   });
 
-  it('ДЕФЕКТ: id созданного баннера строкой оставляет в группе ничей баннер', async () => {
+  it('id созданного баннера строкой: замена опознана, а не потеряна', async () => {
     /**
-     * `readCreatedId` в адаптере разбирает ответ через `vkBannerSchema.partial()`, где
-     * `id: z.number()`. Соседние создания того же клиента (`remarketing.ts`) читают id
-     * через `vkCreatedSchema`, у которого `vkId` принимает и строку — а сам
-     * `src/clients/vk-ads/schemas.ts` прямо пишет, что VK местами отдаёт id строкой.
+     * Было сломано: `readCreatedId` в адаптере разбирал ответ через
+     * `vkBannerSchema.partial()`, где `id: z.number()`. Соседние создания того же
+     * клиента (`remarketing.ts`) читают id через `vkCreatedSchema`, у которого `vkId`
+     * принимает и строку, — а сам `src/clients/vk-ads/schemas.ts` прямо пишет, что VK
+     * местами отдаёт id строкой.
      *
-     * Цена расхождения: замена уже создана и уже тратит деньги, но её id мы «не
-     * увидели», старый баннер оставили жить, а в контексте ошибки нет
-     * `createdBannerExternalId` — то есть `moderation/repair.ts` не сможет подобрать
+     * Цена расхождения была такая: замена уже создана и уже тратит деньги, но её id мы
+     * «не видели», старый баннер оставляли жить, а в контексте ошибки не было
+     * `createdBannerExternalId` — то есть `moderation/repair.ts` не мог подобрать
      * осиротевший баннер, как он это делает для VK_BANNER_REPLACE_ORPHAN.
      */
     startMock({ createdIdAsString: true });
     const before = vk.cabinet.banners.length;
 
-    await expect(
-      adapter.updateAdText(await ctx(), String(VK_IDS.bannerRejected), {
-        title: 'Мамонты с доставкой',
-        text: 'Привезём мамонта за сутки',
-      }),
-    ).rejects.toMatchObject({ code: 'VK_BANNER_CREATE_NO_ID' });
+    const res = await adapter.updateAdText(await ctx(), String(VK_IDS.bannerRejected), {
+      title: 'Мамонты с доставкой',
+      text: 'Привезём мамонта за сутки',
+    });
 
-    // Баннер в кабинете есть, старый жив, а связи между ними не знает никто.
+    // В группе ровно одна замена, и она названа: ничьих баннеров не осталось.
     expect(vk.cabinet.banners).toHaveLength(before + 1);
-    expect(vk.bannerById(VK_IDS.bannerRejected)?.status).toBe('active');
-    expect(vk.callsTo(`banners/${VK_IDS.bannerRejected}.json`)).toHaveLength(0);
+    const createdId = String(vk.cabinet.banners.at(-1)?.id);
+    expect(res.result).toEqual({
+      createdBannerExternalId: createdId,
+      deletedBannerExternalId: String(VK_IDS.bannerRejected),
+    });
+    expect(vk.bannerById(VK_IDS.bannerRejected)?.status).toBe('deleted');
+    expect(vk.callsTo(`banners/${VK_IDS.bannerRejected}.json`)).toHaveLength(1);
   });
 
   it('ДЕФЕКТ: без явного fields кампания заведётся без имени и без бюджета', async () => {

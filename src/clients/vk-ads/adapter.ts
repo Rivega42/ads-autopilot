@@ -35,7 +35,7 @@ import { createVkHttpClient, type VkHttpClient, type VkHttpDeps } from '@/client
 import {
   vkListSchema,
   vkAdPlanSchema,
-  vkBannerSchema,
+  vkCreatedSchema,
   type VkBanner,
 } from '@/clients/vk-ads/schemas.js';
 import { fetchVkStats, statLevelToPath } from '@/clients/vk-ads/stats.js';
@@ -71,8 +71,11 @@ export interface VkAdapterOptions {
   /**
    * Полная подмена фабрики — нужна там, где тест считает, сколько клиентов
    * создал адаптер. Кеш по кабинету применяется и к ней.
+   *
+   * Аргумент — не контекст, а функция его чтения: клиент переживает контекст, с
+   * которым его создали, и обязан спрашивать креды заново на каждом запросе.
    */
-  httpFactory?: (ctx: ChannelContext) => VkHttpClient;
+  httpFactory?: (currentCtx: () => ChannelContext) => VkHttpClient;
 }
 
 /**
@@ -88,30 +91,45 @@ function dry(plan: Record<string, unknown>): WriteResult {
 export class VkAdsAdapter implements ChannelAdapter {
   readonly channel: Provider = VK_CHANNEL;
 
-  private readonly httpFactory: (ctx: ChannelContext) => VkHttpClient;
+  private readonly httpFactory: (currentCtx: () => ChannelContext) => VkHttpClient;
   private readonly clients = new Map<string, VkHttpClient>();
+  /**
+   * Контекст последнего вызова по кабинету. Живёт отдельно от клиента, потому что
+   * кешируется разное: у клиента — очередь и снимок лимитов кабинета (их терять
+   * нельзя), у контекста — креды, которые другой процесс мог заменить минуту назад.
+   */
+  private readonly contexts = new Map<string, ChannelContext>();
 
   constructor(opts: VkAdapterOptions = {}) {
     const overrides = opts.http ?? {};
-    this.httpFactory = opts.httpFactory ?? ((ctx) => createVkHttpClient(ctx, overrides));
+    this.httpFactory =
+      opts.httpFactory ?? ((currentCtx) => createVkHttpClient(currentCtx, overrides));
   }
 
   /**
    * Один клиент на кабинет — иначе `Promise.all([listCampaigns, listAdGroups,
    * listAds])` поднимает три независимых очереди с пустым governor: тройной RPS
    * без всякого спейсинга, то есть гарантированный 429 на первом же синке.
+   *
+   * Контекст при этом обновляется всегда: токен в ключ кеша не входит, и клиент,
+   * замкнувший контекст первого вызова, слал бы отозванный токен до первого 401.
+   * Лечение через 401 стоит лишнего минта, а их всего пять на пару (client_id, user).
    */
   private http(ctx: ChannelContext): VkHttpClient {
     const key = cabinetKey(ctx);
+    this.contexts.set(key, ctx);
     const cached = this.clients.get(key);
     if (cached) return cached;
 
-    const client = this.httpFactory(ctx);
+    const client = this.httpFactory(() => this.contexts.get(key) ?? ctx);
     // Адаптер живёт всё время процесса, поэтому кеш ограничен: вытесняем самый
     // давний кабинет. Потеря его снимка лимитов стоит одного холодного старта.
     if (this.clients.size >= CLIENT_CACHE_LIMIT) {
       const oldest = this.clients.keys().next();
-      if (!oldest.done) this.clients.delete(oldest.value);
+      if (!oldest.done) {
+        this.clients.delete(oldest.value);
+        this.contexts.delete(oldest.value);
+      }
     }
     this.clients.set(key, client);
     return client;
@@ -507,12 +525,16 @@ export function buildRecreatePayload(
   return payload;
 }
 
+/**
+ * id созданного объекта — той же схемой, что и остальные создания клиента
+ * (`remarketing.ts`): `vkId` принимает и число, и строку. Схема баннера здесь не
+ * годится — её `id: z.number()` отвергал бы ответ `{"id":"9001"}`, а VK местами
+ * отдаёт id именно строкой (см. `vkId` в schemas.ts).
+ */
 function readCreatedId(created: unknown): string | undefined {
-  if (created && typeof created === 'object') {
-    const parsed = vkBannerSchema.partial().safeParse(created);
-    if (parsed.success && parsed.data.id !== undefined) return String(parsed.data.id);
-  }
-  return undefined;
+  const parsed = vkCreatedSchema.safeParse(created);
+  if (!parsed.success) return undefined;
+  return parsed.data.id !== undefined && parsed.data.id !== '' ? parsed.data.id : undefined;
 }
 
 /** Короткая выжимка ответа для лога: тело может быть каким угодно и большим. */

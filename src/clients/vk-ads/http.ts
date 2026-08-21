@@ -408,14 +408,23 @@ function defaultTransport(): VkTransport {
   };
 }
 
+/**
+ * Откуда клиент берёт контекст кабинета. Функция — не украшение: клиент живёт
+ * дольше одного вызова (адаптер кеширует его вместе с очередью и снимком лимитов),
+ * а креды в БД за это время могут подменить. Замкнув контекст навсегда, клиент
+ * слал бы отозванный токен до первого 401 — то есть тратил бы лишний минт из пяти.
+ */
+export type VkContextSource = ChannelContext | (() => ChannelContext);
+
 /** Клиент по контексту канала — обычный путь для адаптера. */
 export function createVkHttpClient(
-  ctx: ChannelContext,
+  source: VkContextSource,
   overrides: Partial<VkHttpDeps> = {},
 ): VkHttpClient {
+  const currentCtx = typeof source === 'function' ? source : (): ChannelContext => source;
   return new VkHttpClient({
     transport: overrides.transport ?? defaultTransport(),
-    getAccessToken: overrides.getAccessToken ?? ((opts) => getVkAccessToken(ctx, opts)),
+    getAccessToken: overrides.getAccessToken ?? ((opts) => getVkAccessToken(currentCtx(), opts)),
     ...(overrides.governor ? { governor: overrides.governor } : {}),
     ...(overrides.concurrency !== undefined ? { concurrency: overrides.concurrency } : {}),
     ...(overrides.attempts !== undefined ? { attempts: overrides.attempts } : {}),

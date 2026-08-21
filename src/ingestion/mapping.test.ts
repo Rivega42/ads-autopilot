@@ -150,6 +150,20 @@ describe('strategyName', () => {
     expect(strategyName({ BiddingStrategyType: 'AVERAGE_CPA' })).toBe('AVERAGE_CPA');
     expect(strategyName({})).toBeNull();
   });
+
+  /**
+   * Было сломано: адаптер VK кладёт в `RemoteCampaign.strategy` ключи
+   * `autobiddingMode` / `maxPrice` / `budgetLimit`, а читались только имена
+   * Директа — колонка `strategy` у всех кампаний VK оставалась null, хотя
+   * кабинет прислал режим автоставки.
+   */
+  it('достаёт режим автоставки VK, а не только имена Директа', () => {
+    expect(strategyName({ autobiddingMode: 'max_goals', maxPrice: null, budgetLimit: null })).toBe(
+      'max_goals',
+    );
+    // Автоставка выключена и режима нет — это по-прежнему «стратегия неизвестна».
+    expect(strategyName({ autobiddingMode: null, maxPrice: 120, budgetLimit: null })).toBeNull();
+  });
 });
 
 describe('toJsonObject', () => {

@@ -58,8 +58,9 @@ export const VK_STATUS_BLOCKED = 'blocked';
 export const VK_STATUS_DELETED = 'deleted';
 
 /**
- * Фильтр по умолчанию: всё, кроме удалённого. Без него удалённые сущности едят
- * бюджет батча в 200 объектов и тянут за собой пустую статистику.
+ * Фильтр по умолчанию для обхода списка: всё, кроме удалённого. Без него удалённые
+ * сущности едят бюджет батча в 200 объектов и тянут за собой пустую статистику.
+ * К чтению по `ids` не применяется — см. `listEntities`.
  *
  * @needs-live-token: словарь статусов подтверждён только для active/blocked/deleted.
  * Если у ads.vk.ru есть другие значения, перечисление их скроет — тогда заменить
@@ -78,9 +79,9 @@ export interface VkListOptions {
   /** Если задано — тянем только эти объекты, батчами по 200. */
   ids?: readonly string[];
   /**
-   * Значения для фильтра `_status__in`. По умолчанию — всё, кроме удалённого
-   * (`VK_DEFAULT_STATUSES`). Пустой массив — явный отказ от фильтра, то есть
-   * «включая удалённые».
+   * Значения для фильтра `_status__in`. По умолчанию фильтр ставится только при
+   * обходе списка (`VK_DEFAULT_STATUSES`); при чтении по `ids` его нет вовсе.
+   * Пустой массив — явный отказ от фильтра, то есть «включая удалённые».
    */
   statuses?: readonly string[];
   /** Список полей; VK по умолчанию отдаёт урезанный набор. */
@@ -119,7 +120,13 @@ export async function listEntities<T extends z.ZodTypeAny>(
 ): Promise<Array<z.infer<T>>> {
   const base: Record<string, unknown> = { ...opts.filters };
   if (opts.fields?.length) base['fields'] = opts.fields.join(',');
-  const statuses = opts.statuses ?? VK_DEFAULT_STATUSES;
+  // Фильтр статусов осмыслен только при обходе списка: там он бережёт батч на 200
+  // объектов от удалённых. При чтении по `ids` он ничего не экономит, зато прячет
+  // всё, чего нет в нашем неподтверждённом словаре, — отклонённый баннер (ТЗ §2.2:
+  // `rejected`) переставал находиться по собственному id, и пересоздание текста
+  // падало с VK_BANNER_NOT_FOUND. Перечислять статусы наугад опаснее: неизвестное
+  // площадке значение в `_status__in` роняет 400 весь запрос.
+  const statuses = opts.statuses ?? (opts.ids ? [] : VK_DEFAULT_STATUSES);
   if (statuses.length) base['_status__in'] = statuses.join(',');
 
   if (opts.ids) {

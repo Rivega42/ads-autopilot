@@ -134,6 +134,24 @@ describe('default status filter', () => {
     await listBanners(client, { statuses: [] });
     expect(calls[0]?.params?.['_status__in']).toBeUndefined();
   });
+
+  /**
+   * Было сломано: фильтр уходил и при чтении по id, поэтому объект в статусе вне
+   * нашего словаря (`rejected` из ТЗ §2.2) не возвращался даже по прямому запросу
+   * — `updateAdText` падал с VK_BANNER_NOT_FOUND, не начав пересоздание.
+   */
+  it('does not filter by status when ids address the objects themselves', async () => {
+    const { client, calls } = clientOf(() => ({ count: 0, items: [] }));
+    await listBanners(client, { ids: ['922'] });
+    expect(calls[0]?.params?.['_id__in']).toBe('922');
+    expect(calls[0]?.params?.['_status__in']).toBeUndefined();
+  });
+
+  it('still honours an explicit status filter alongside ids', async () => {
+    const { client, calls } = clientOf(() => ({ count: 0, items: [] }));
+    await listBanners(client, { ids: ['922'], statuses: ['active'] });
+    expect(calls[0]?.params?.['_status__in']).toBe('active');
+  });
 });
 
 describe('toVkNumericId', () => {
