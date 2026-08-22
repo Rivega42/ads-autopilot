@@ -1,6 +1,12 @@
 import { parseArgs } from 'node:util';
 
 import { backfillMetrikaConfig, clientBriefSchema } from '@/ai/onboarding/index.js';
+import { renderEntryBlock, renderPlanSummary, renderReadiness } from '@/bot/campaign-entry-text.js';
+import {
+  checkCampaignEntry,
+  launchCampaign,
+  type CampaignLaunchOptions,
+} from '@/bot/campaign-entry.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { registeredChannels } from '@/channels/registry.js';
 import { generateCreativeSetOnDemand } from '@/creatives/index.js';
@@ -11,9 +17,10 @@ import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 
 /**
- * Ручной прогон задач — пункт приёмки ТЗ § 9.3 («оптимизатор в --dry-run
- * показывает список рекомендаций») и единственный способ проверить пайплайн
- * на живых кабинетах, не дожидаясь крона.
+ * Ручной прогон задач — пункты приёмки ТЗ § 9.3 («оптимизатор в --dry-run
+ * показывает список рекомендаций») и § 9.1 (команда `campaign` — вход в создание
+ * кампании), а заодно единственный способ проверить пайплайн на живых кабинетах,
+ * не дожидаясь крона.
  */
 
 const log = logger.child({ scope: 'cli' });
@@ -28,6 +35,8 @@ function printUsage(): void {
       '  clients             список клиентов и их каналов',
       '  ingest              загрузить сущности и статистику из кабинетов',
       '  search-queries      загрузить поисковые запросы',
+      '  campaign            проверить готовность к запуску; с --apply — собрать план',
+      '                      и отправить его на апрув в Telegram',
       '  optimize            показать решения оптимизатора',
       '  creatives           сгенерировать тексты объявлений (платно, нужен --apply)',
       '  backfill-metrika    проставить настройки Метрики из готовых брифов (нужен --apply)',
@@ -36,6 +45,8 @@ function printUsage(): void {
       '  --client <id>       ограничить одним клиентом',
       '  --apply             применить решения (по умолчанию — только показать)',
       '  --segment <имя>     сегмент для creatives (по умолчанию — горячий спрос)',
+      '  --new               campaign: собрать новый план, даже если кампании уже созданы',
+      '  --chat <id>         campaign: куда слать карточки (по умолчанию — чат клиента)',
       '  --help',
       '',
       'Без --apply ни одна команда ничего не пишет и не тратит деньги.',
@@ -263,6 +274,94 @@ async function cmdCreatives(
   process.stdout.write(`Модель оплачена: $${set.totalCostUsd.toFixed(4)}\n`);
 }
 
+/**
+ * Вход в создание кампании (пункт приёмки ТЗ §9.1).
+ *
+ * Без `--apply` не тратится ничего: команда только сверяет бриф, доступы, бюджет
+ * и гео и печатает, во что это обойдётся. С `--apply` собирается план — два платных
+ * вызова модели — и на каждую кампанию плана выпускается карточка апрува.
+ *
+ * В кабинет отсюда не уходит ничего ни при каком флаге. Последний шаг — нажатие
+ * человека в Telegram: создание кампании тратит бюджет клиента с нуля, и права
+ * сделать это по одной командной строке у CLI нет (TZ §3.5).
+ */
+async function cmdCampaign(
+  clientId: string | undefined,
+  opts: { apply: boolean; fresh: boolean; chatId?: string },
+): Promise<void> {
+  if (!clientId) {
+    process.stdout.write('Нужен --client <id>: план собирается по брифу конкретного клиента.\n');
+    process.exitCode = 1;
+    return;
+  }
+
+  const launchOptions: CampaignLaunchOptions = {
+    fresh: opts.fresh,
+    ...(opts.chatId === undefined ? {} : { chatId: opts.chatId }),
+  };
+
+  if (!opts.apply) {
+    const check = await checkCampaignEntry(clientId, launchOptions);
+    if (check.kind !== 'ready') {
+      process.stdout.write(`${renderEntryBlock(check)}\n`);
+      process.exitCode = 1;
+      return;
+    }
+    process.stdout.write(`${renderReadiness(check)}\n\n`);
+    process.stdout.write(
+      'Ничего не сделано: команда без --apply только проверяет.\n' +
+        'Собрать план и отправить карточки: pnpm cli campaign --client ' +
+        `${clientId} --apply\n`,
+    );
+    return;
+  }
+
+  process.stdout.write('Готовлю план — если его ещё нет, это два платных вызова модели…\n');
+  const outcome = await launchCampaign(clientId, launchOptions);
+
+  if (outcome.kind === 'not_plannable') {
+    process.stdout.write(`План собрать нельзя: ${outcome.reason}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (outcome.kind !== 'submitted') {
+    process.stdout.write(`${renderEntryBlock(outcome)}\n`);
+    if (outcome.kind === 'already_created') {
+      process.stdout.write('Собрать новый план поверх созданных: повторить с --new\n');
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  process.stdout.write(`\n${renderPlanSummary(outcome.plan, { dryRun: outcome.dryRun })}\n`);
+  if (outcome.reused) {
+    process.stdout.write('\nПлан взят с прошлого захода — модель не звали, денег не потрачено.\n');
+  }
+  process.stdout.write(
+    `\nЗаявок выпущено: ${outcome.approvals.length} (план ${outcome.plan.id}).\n` +
+      'Кампании создаются только после ✅ в Telegram — до нажатия в кабинете ничего нет.\n',
+  );
+  // Недоставленную карточку нажать нельзя, а заявка при этом создана и через
+  // APPROVAL_TIMEOUT_HOURS тихо истечёт. Молчать об этом — обещать запуск,
+  // которого не будет.
+  const undelivered = outcome.approvals.filter((a) => a.error !== null);
+  for (const approval of outcome.approvals) {
+    process.stdout.write(
+      approval.error === null
+        ? `  • ${approval.id} → чат ${approval.chatId ?? '—'}\n`
+        : `  • ${approval.id} → НЕ ДОСТАВЛЕНА: ${approval.error}\n`,
+    );
+  }
+  if (undelivered.length > 0) {
+    process.stdout.write(
+      `\n⚠️  Карточек не доставлено: ${undelivered.length}. Нажать их некому — ` +
+        'проверьте TELEGRAM_BOT_TOKEN и чат клиента, потом повторите команду: ' +
+        'план уже собран, второй раз модель звать не придётся.\n',
+    );
+    process.exitCode = 1;
+  }
+}
+
 async function cmdBackfillMetrika(apply: boolean): Promise<void> {
   const result = await backfillMetrikaConfig({ apply });
   const verb = apply ? 'записано' : 'будет записано';
@@ -304,6 +403,8 @@ async function main(): Promise<void> {
       client: { type: 'string' },
       apply: { type: 'boolean', default: false },
       segment: { type: 'string' },
+      new: { type: 'boolean', default: false },
+      chat: { type: 'string' },
       help: { type: 'boolean', default: false },
     },
   });
@@ -328,6 +429,13 @@ async function main(): Promise<void> {
       break;
     case 'search-queries':
       await cmdSearchQueries(values.client);
+      break;
+    case 'campaign':
+      await cmdCampaign(values.client, {
+        apply: values.apply,
+        fresh: values.new,
+        ...(values.chat === undefined ? {} : { chatId: values.chat }),
+      });
       break;
     case 'optimize':
       await cmdOptimize(values.client, values.apply);

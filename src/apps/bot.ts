@@ -5,6 +5,7 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import { CALLBACK_PREFIX } from '@/approval/callback-data.js';
 import { handleApprovalCallback } from '@/approval/callbacks.js';
 import { createApiMessenger, setMessenger } from '@/approval/telegram.js';
+import { registerCampaignHandlers, type CampaignHandlerDeps } from '@/bot/campaign-handlers.js';
 import { registerOnboardingHandlers } from '@/bot/onboarding-handlers.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { prisma } from '@/db/prisma.js';
@@ -24,7 +25,16 @@ const BOT_INIT_TIMEOUT_MS = 30_000;
  * те же функции зовёт воркер (крон экспирации) и оптимизатор (создание карточек).
  */
 
-export function buildBot(token: string): Bot {
+export interface BotDeps {
+  /**
+   * Подмена зависимостей команды запуска. В проде пусто; сценарные тесты кладут
+   * сюда подставные агенты планировщика, чтобы прогнать команду целиком, не
+   * заплатив за живую модель.
+   */
+  campaigns?: CampaignHandlerDeps;
+}
+
+export function buildBot(token: string, deps: BotDeps = {}): Bot {
   const bot = new Bot(token);
 
   // Апрувы приходят пачкой после ночного прогона: 429 от Telegram здесь норма,
@@ -51,6 +61,7 @@ export function buildBot(token: string): Bot {
   });
 
   registerOnboardingHandlers(bot);
+  registerCampaignHandlers(bot, deps.campaigns ?? {});
 
   bot.catch((err) => {
     const inner = err.error;
