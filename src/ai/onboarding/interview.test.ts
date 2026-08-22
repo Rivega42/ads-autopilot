@@ -15,7 +15,9 @@ import {
   LANDING_URL_ATTEMPTS,
   MAX_QUESTIONS,
   NO_LANDING_REPLY,
+  QUESTION_BUDGET_REPLY,
   UNCONFIRMED_LANDING_REPLY,
+  type InterviewStep,
   type RunInterviewTurn,
 } from './interview.js';
 import type { ClientConfigStore } from './metrika-config.js';
@@ -104,6 +106,14 @@ function runner(script: Scripted[], onCall?: () => void): Runner {
   };
 
   return { run, calls };
+}
+
+type HaltedStep = Extract<InterviewStep, { kind: 'needs_human' }>;
+
+/** Сужение типа шага: у `question` и `complete` нет полей, которые тут проверяются. */
+function needsHuman(step: InterviewStep): HaltedStep {
+  if (step.kind !== 'needs_human') throw new Error(`ожидалось needs_human, а не ${step.kind}`);
+  return step;
 }
 
 let store: MemoryBriefStore;
@@ -694,6 +704,76 @@ describe('handleAnswer', () => {
 
     expect(step.kind).toBe('complete');
     expect(again.calls).toHaveLength(0);
+  });
+});
+
+/**
+ * Потолок ходов (задача 3).
+ *
+ * `needs_human` по исчерпанному бюджету вопросов не оставлял после себя ничего:
+ * статус строки прежний, пометки об остановке нет. Каждое следующее сообщение
+ * клиента снова уезжало в модель и снова возвращало «нужен человек» — а заодно
+ * могло подвинуть набор недостающих полей, на котором держится дедупликация писем
+ * Роману. То есть без остановки два фикса гасили друг друга.
+ */
+describe('после потолка вопросов интервью останавливается, а не спрашивает дальше', () => {
+  async function exhausted(): Promise<{ script: Runner; step: HaltedStep }> {
+    const script = runner([{ reply: 'Ещё вопрос?' }]);
+    let step: InterviewStep = await startInterview(CLIENT, { db: store.db, run: script.run });
+    for (let i = 0; step.kind === 'question' && i < MAX_QUESTIONS + 2; i += 1) {
+      step = await handleAnswer(CLIENT, 'не знаю', { db: store.db, run: script.run });
+    }
+    return { script, step: needsHuman(step) };
+  }
+
+  it('говорит клиенту про человека, а не задаёт двадцать шестой вопрос', async () => {
+    const { step } = await exhausted();
+
+    expect(step.text).toBe(QUESTION_BUDGET_REPLY);
+    expect(parseTranscript(store.get(CLIENT)?.transcript).halted?.reason).toBe('question-budget');
+  });
+
+  it('следующие сообщения клиента не оплачиваются моделью', async () => {
+    const { script, step } = await exhausted();
+    const paidTurns = script.calls.length;
+
+    for (const text of ['ладно', 'а что не так?', 'спасибо']) {
+      const next = needsHuman(await handleAnswer(CLIENT, text, { db: store.db, run: script.run }));
+      // Основание письма Роману — набор недостающих полей: лишний ход модели мог
+      // его подвинуть, и дедупликация законно пропустила бы второе письмо.
+      expect(next.missing).toEqual(step.missing);
+    }
+
+    expect(script.calls).toHaveLength(paidTurns);
+    expect(parseTranscript(store.get(CLIENT)?.transcript).turns.map((t) => t.text)).toContain(
+      'а что не так?',
+    );
+  });
+
+  it('ссылка не снимает эту паузу: кончились вопросы, а не сайт', async () => {
+    const { script } = await exhausted();
+    const paidTurns = script.calls.length;
+
+    const step = await handleAnswer(CLIENT, 'вот сайт okna-spb.ru', {
+      db: store.db,
+      run: script.run,
+    });
+
+    expect(step.kind).toBe('needs_human');
+    expect(script.calls).toHaveLength(paidTurns);
+  });
+
+  it('пауза читается из БД после перезапуска процесса', async () => {
+    await exhausted();
+
+    const fresh = runner([{ reply: 'Этого хода быть не должно.' }]);
+    const step = await startInterview(CLIENT, { db: store.db, run: fresh.run });
+
+    expect(fresh.calls).toHaveLength(0);
+    expect(step.kind).toBe('needs_human');
+    expect(step.text).toBe(QUESTION_BUDGET_REPLY);
+    const snapshot = await getInterviewState(CLIENT, { db: store.db });
+    expect(snapshot?.haltedReason).toBe('question-budget');
   });
 });
 

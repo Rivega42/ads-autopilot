@@ -35,8 +35,10 @@ export type TranscriptTurn = z.infer<typeof transcriptTurnSchema>;
  *
  * `no-landing` — сайта у клиента нет, и это его ответ, а не наша неудача.
  * `unconfirmed-landing` — адрес он назвал, но записать его мы не смогли.
+ * `question-budget` — кончились ходы: бриф не сошёлся, и следующий вопрос его уже
+ * не соберёт. Основание другое, природа та же — модель больше не зовём.
  */
-export const HALT_REASONS = ['no-landing', 'unconfirmed-landing'] as const;
+export const HALT_REASONS = ['no-landing', 'unconfirmed-landing', 'question-budget'] as const;
 
 export type HaltReason = (typeof HALT_REASONS)[number];
 

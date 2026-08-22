@@ -91,6 +91,18 @@ export const UNCONFIRMED_LANDING_REPLY =
   'не туда. Остальное по брифу собрано — с адресом разберётся человек и вернётся ' +
   'к тебе. Если проще прислать ссылку ещё раз обычным текстом — пришли, я попробую снова.';
 
+/**
+ * Что слышит клиент, на котором кончились вопросы.
+ *
+ * Раньше здесь уходил очередной вопрос модели: клиент отвечал, ход оплачивался, и
+ * в ответ приходил следующий вопрос — и так сколько угодно раз. Обещание про
+ * человека честнее: собрать бриф сами мы за отведённые ходы не смогли.
+ */
+export const QUESTION_BUDGET_REPLY =
+  'Кажется, мы ходим по кругу: вопросы, которые я умею задавать, кончились, а бриф ' +
+  'всё ещё не сходится. Дальше подключится человек — он посмотрит нашу переписку и ' +
+  'вернётся к тебе. Если что-то вспомнишь, пиши сюда: сохраню и передам.';
+
 /** Что слышит клиент, который пишет в остановленное интервью. */
 const HALT_REPEAT_REPLY: Readonly<Record<HaltReason, string>> = {
   'no-landing':
@@ -99,11 +111,15 @@ const HALT_REPEAT_REPLY: Readonly<Record<HaltReason, string>> = {
   'unconfirmed-landing':
     'По брифу пауза: адрес сайта ушёл на проверку человеку. Ещё раз прислать ссылку ' +
     'текстом можно в любой момент — тогда попробую записать сам.',
+  'question-budget':
+    'По брифу пауза: вопросы у меня кончились, дальше смотрит человек. Всё, что ' +
+    'напишешь, я сохраню и передам ему.',
 };
 
 const HALT_REPLY: Readonly<Record<HaltReason, string>> = {
   'no-landing': NO_LANDING_REPLY,
   'unconfirmed-landing': UNCONFIRMED_LANDING_REPLY,
+  'question-budget': QUESTION_BUDGET_REPLY,
 };
 
 /** Ответ клиента длиннее этого обрезаем: в TG прилетают простыни, а transcript в Json. */
@@ -300,10 +316,10 @@ export async function handleAnswer(
   transcript.turns.push({ role: 'user', text, at: now().toISOString() });
 
   if (halted !== null && halted !== undefined) {
-    // Ссылка снимает паузу: она — единственное, чего интервью ждёт. Всё остальное
-    // («ладно», «а без сайта никак?», «спасибо») записываем и не платим за модель:
-    // её ответ всё равно был бы заменён константой.
-    if (!mentionsWebAddress(text)) {
+    // Всё, что паузу не снимает («ладно», «а без сайта никак?», «спасибо»), просто
+    // записываем и не платим за модель: её ответ всё равно был бы заменён
+    // константой. Чем снимается какая пауза — в `liftsHalt`.
+    if (!liftsHalt(halted.reason, text)) {
       return haltedRepeat({ clientId, row, transcript, db, now }, halted.reason);
     }
     transcript.halted = null;
@@ -443,26 +459,36 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
   // Клиент, назвавший адрес, сайт имеет — даже если записать этот адрес не вышло.
   // Разница не косметическая: одному система говорит «в Директе так нельзя»,
   // другому — «разберётся человек».
-  const haltReason: HaltReason = answers.some(mentionsWebAddress)
+  const landingHalt: HaltReason = answers.some(mentionsWebAddress)
     ? 'unconfirmed-landing'
     : 'no-landing';
 
   transcript.askedCount += 1;
+
+  // Потолок ходов — такая же остановка, как отказ по ссылке, только основание другое:
+  // ещё один ответ клиента бриф не соберёт, а стоить будет как все предыдущие.
+  const outOfQuestions = parsed?.ok !== true && transcript.askedCount >= MAX_QUESTIONS;
+  const halt: HaltReason | null = outOfLandingAttempts
+    ? landingHalt
+    : outOfQuestions
+      ? 'question-budget'
+      : null;
+
   transcript.turns.push({
     role: 'assistant',
     // В расшифровку уезжает то же, что увидел клиент: иначе перезапуск повторил бы
     // ему вопрос модели вместо честного ответа (`startInterview` берёт текст отсюда).
-    text: outOfLandingAttempts ? HALT_REPLY[haltReason] : turn.reply,
+    text: halt === null ? turn.reply : HALT_REPLY[halt],
     at: ctx.now().toISOString(),
     aiRunId: run.aiRunId,
     promptVersion: prompt.version,
     asking,
   });
 
-  if (outOfLandingAttempts) {
+  if (halt !== null) {
     // Без пометки каждое следующее «ладно» и «спасибо» снова уезжало бы в модель,
     // а её ответ всё равно заменялся бы этой же константой.
-    transcript.halted = { reason: haltReason, at: ctx.now().toISOString() };
+    transcript.halted = { reason: halt, at: ctx.now().toISOString() };
   }
 
   if (turn.done && missing.length > 0) {
@@ -493,31 +519,11 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
     return { kind: 'complete', text: turn.reply, brief: parsed.brief, warnings };
   }
 
-  if (outOfLandingAttempts) {
-    if (haltReason === 'unconfirmed-landing') {
-      log.error(
-        { clientId, askedCount: transcript.askedCount, landingAsks },
-        'onboarding: client named a site we could not record, human needed',
-      );
-    } else {
-      log.warn(
-        { clientId, askedCount: transcript.askedCount, landingAsks },
-        'onboarding: client has no landing page, Direct campaign is impossible',
-      );
-    }
+  if (halt !== null) {
+    logHalt(halt, { clientId, askedCount: transcript.askedCount, landingAsks, missing });
     return {
       kind: 'needs_human',
-      text: HALT_REPLY[haltReason],
-      missing,
-      askedCount: transcript.askedCount,
-    };
-  }
-
-  if (transcript.askedCount >= MAX_QUESTIONS) {
-    log.error({ clientId, missing }, 'onboarding: question budget exhausted, human needed');
-    return {
-      kind: 'needs_human',
-      text: turn.reply,
+      text: HALT_REPLY[halt],
       missing,
       askedCount: transcript.askedCount,
     };
@@ -618,6 +624,44 @@ function isUniqueViolation(err: unknown): boolean {
     'code' in err &&
     (err as { code?: unknown }).code === 'P2002'
   );
+}
+
+/**
+ * Снимает ли это сообщение паузу.
+ *
+ * Ссылка снимает только те паузы, в которых её и ждали: у клиента с кончившимися
+ * ходами следующий вызов модели вернул бы то же «нужен человек» за те же деньги —
+ * там ждут не ссылку, а человека.
+ */
+function liftsHalt(reason: HaltReason, text: string): boolean {
+  if (reason === 'question-budget') return false;
+  return mentionsWebAddress(text);
+}
+
+interface HaltLogContext {
+  clientId: string;
+  askedCount: number;
+  landingAsks: number;
+  missing: BriefField[];
+}
+
+/**
+ * Уровень записи — по природе остановки.
+ *
+ * У клиента нет сайта — это факт о клиенте, а не сбой системы, и в аудите он не
+ * должен выглядеть ошибкой. Остальные два основания требуют человека: и адрес,
+ * который мы не смогли записать, и бриф, который не сошёлся за отведённые ходы.
+ */
+function logHalt(reason: HaltReason, ctx: HaltLogContext): void {
+  if (reason === 'no-landing') {
+    log.warn(ctx, 'onboarding: client has no landing page, Direct campaign is impossible');
+    return;
+  }
+  if (reason === 'unconfirmed-landing') {
+    log.error(ctx, 'onboarding: client named a site we could not record, human needed');
+    return;
+  }
+  log.error(ctx, 'onboarding: question budget exhausted, human needed');
 }
 
 /** Остановленное интервью после перезапуска: тот же ответ, без вызова модели. */
