@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { AdGroupTable } from '../../../components/ad-group-table';
 import {
   AttributionNote,
   MixedAttributionNotice,
@@ -23,6 +24,7 @@ import { formatMskDateTime, formatYmd, formatYmdShort } from '../../../lib/dates
 import type { SearchParams } from '../../../lib/filters';
 import { parseFilters, rangeLength, withFilters } from '../../../lib/filters';
 import {
+  formatBidRange,
   formatCompact,
   formatInteger,
   formatMoney,
@@ -37,8 +39,13 @@ import {
   providerLabel,
 } from '../../../lib/labels';
 import { cpa, cpaDeviation, ctr } from '../../../lib/metrics';
-import type { DailyMetrics } from '../../../lib/queries';
-import { getCampaign, getCampaignDaily, listChangesView } from '../../../lib/queries';
+import type { AdGroupBidSummary, DailyMetrics } from '../../../lib/queries';
+import {
+  getCampaign,
+  getCampaignDaily,
+  listAdGroupsView,
+  listChangesView,
+} from '../../../lib/queries';
 
 export const dynamic = 'force-dynamic';
 
@@ -53,6 +60,19 @@ function toPoints(
   }));
 }
 
+/**
+ * Подпись под плиткой ставки: сколько групп ею управляется.
+ *
+ * Число «у скольких задана» обязано стоять рядом с самой ставкой: диапазон
+ * «0,00 ₽ — 99,99 ₽» без него не отличить от кампании, где ставку задали одной
+ * группе из двухсот, а остальные отданы автостратегии.
+ */
+function bidHint(bids: AdGroupBidSummary): string {
+  if (bids.groups === 0) return 'групп объявлений нет';
+  if (bids.withBid === 0) return `цену назначает площадка · групп: ${formatInteger(bids.groups)}`;
+  return `задана у ${formatInteger(bids.withBid)} из ${formatInteger(bids.groups)} групп`;
+}
+
 export default async function CampaignPage({
   params,
   searchParams = {},
@@ -64,9 +84,10 @@ export default async function CampaignPage({
   const campaign = await getCampaign(params.id);
   if (!campaign) notFound();
 
-  const [daily, changeView] = await Promise.all([
+  const [daily, changeView, groupView] = await Promise.all([
     getCampaignDaily(campaign.id, filters.from, filters.to),
     listChangesView(filters, { campaignId: campaign.id, limit: 50 }),
+    listAdGroupsView(campaign.id),
   ]);
   const changes = changeView.rows;
 
@@ -154,6 +175,11 @@ export default async function CampaignPage({
           value={formatMoney(campaign.dailyBudget)}
           hint={campaign.strategy ?? 'стратегия не задана'}
         />
+        <StatTile
+          label="Ставка группы"
+          value={formatBidRange(groupView.bids)}
+          hint={bidHint(groupView.bids)}
+        />
       </div>
 
       <section className="stack">
@@ -212,6 +238,29 @@ export default async function CampaignPage({
           </div>
           <DailyTable rows={daily} />
         </div>
+      </section>
+
+      <section className="card">
+        <div className="card-head">
+          <h2>
+            Группы объявлений
+            {groupView.truncated ? (
+              // Плитка со ставкой считается по всему набору, а список обрезан
+              // потолком витрины: без этой строки «максимум 500 ₽» рядом со
+              // списком, где пятисот нет, читается как ошибка витрины.
+              <span className="muted">
+                {' '}
+                — первые {formatInteger(groupView.rows.length)} из {formatInteger(groupView.total)}
+              </span>
+            ) : null}
+          </h2>
+          <span className="muted">
+            {campaign.provider === 'VK_ADS'
+              ? 'у VK ключевых слов нет: ставка группы — единственный рычаг цены'
+              : 'пустая ставка означает, что цену назначает площадка'}
+          </span>
+        </div>
+        <AdGroupTable rows={groupView.rows} />
       </section>
 
       <section className="card">

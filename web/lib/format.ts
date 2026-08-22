@@ -43,6 +43,47 @@ export function formatMoneyPrecise(value: number | null | undefined): string {
   return MONEY_PRECISE.format(value);
 }
 
+/**
+ * Ставка группы объявлений.
+ *
+ * `null` — не ноль: колонка пуста, когда ручной ставки нет и цену назначает
+ * площадка (см. комментарий к `AdGroup.bid` в схеме). Прочерк здесь читался бы
+ * как «данных нет», а ноль — как «показы бесплатны»; оба ответа неверны.
+ */
+export function formatBid(value: number | null | undefined): string {
+  if (value === null || value === undefined) return NOT_SET;
+  return formatMoneyPrecise(value);
+}
+
+/** Подпись для «ставки нет»: у автостратегии цену назначает площадка. */
+export const NOT_SET = 'не задана';
+
+export interface BidRange {
+  readonly groups: number;
+  readonly withBid: number;
+  readonly min: number | null;
+  readonly max: number | null;
+}
+
+/**
+ * Ставки групп одним числом для плитки.
+ *
+ * Три состояния, которые нельзя схлопывать: групп нет вовсе (прочерк), группы
+ * есть, но ставку никто не задавал (её назначает площадка), и разброс между
+ * минимумом и максимумом. Отдельная ветка на `min === max` нужна, чтобы
+ * кампания с одной группой не показывала «12,34 ₽ — 12,34 ₽».
+ *
+ * `min`/`max` при непустом `withBid` не бывают `null`, но ветка на них есть:
+ * плитка обязана выдавать строку, а не `NaN`, на любых данных.
+ */
+export function formatBidRange(range: BidRange): string {
+  if (range.groups === 0) return NO_VALUE;
+  if (range.withBid === 0) return NOT_SET;
+  if (range.min === null || range.max === null) return NO_VALUE;
+  if (range.min === range.max) return formatMoneyPrecise(range.min);
+  return `${formatMoneyPrecise(range.min)} — ${formatMoneyPrecise(range.max)}`;
+}
+
 export function formatInteger(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return NO_VALUE;
   return INTEGER.format(value);

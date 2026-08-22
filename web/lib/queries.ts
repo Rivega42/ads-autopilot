@@ -1,5 +1,6 @@
 import { StatEntityType } from '@prisma/client';
 import type {
+  AdGroupStatus,
   ApprovalDecision,
   ApprovalKind,
   CampaignStatus,
@@ -144,6 +145,41 @@ export interface DailyMetrics {
   readonly cpa: number | null;
   /** `null` — за этот день строки статистики нет, а не «источник неизвестен». */
   readonly conversionSource: ConversionSource | null;
+}
+
+/**
+ * Группа объявлений на витрине.
+ *
+ * `bid` — `null`, а не 0, когда ручной ставки нет: у автостратегии цену назначает
+ * площадка. Подмена на ноль превратила бы «мы ставкой не управляем» в «мы
+ * поставили ноль», а это противоположные утверждения.
+ */
+export interface AdGroupRow {
+  readonly id: string;
+  readonly externalId: string;
+  readonly name: string;
+  readonly status: AdGroupStatus;
+  readonly bid: number | null;
+}
+
+/**
+ * Сводка по ставкам групп — по всему набору, а не по показанным строкам.
+ *
+ * Считает Postgres: список групп режется потолком витрины, и свёртка обрезка
+ * назвала бы максимальной ставкой ту, что случайно попала в первые двести строк.
+ * Ровно эта ошибка уже была на `/campaigns` с деньгами.
+ */
+export interface AdGroupBidSummary {
+  readonly groups: number;
+  /** У скольких групп ставка задана. Остальные — на автостратегии площадки. */
+  readonly withBid: number;
+  /** `null` — ставка не задана ни у одной группы, а не «ставка ноль». */
+  readonly min: number | null;
+  readonly max: number | null;
+}
+
+export interface AdGroupsView extends ListWindow<AdGroupRow> {
+  readonly bids: AdGroupBidSummary;
 }
 
 export interface ChangeRow {
@@ -720,6 +756,61 @@ export async function listChangesView(
   ]);
 
   return { rows, total, limit: options.limit ?? ROW_LIMIT, truncated: rows.length < total };
+}
+
+/**
+ * Группы объявлений кампании и сводка по их ставкам.
+ *
+ * `AdGroup.bid` — единственный рычаг управления ценой у VK: ключевых слов у
+ * канала нет вовсе, и то, что колонка не читалась ни одной страницей, означало,
+ * что главное число VK-кампании не видно нигде.
+ *
+ * Строки и сводка считают разные множества намеренно: строки режутся потолком
+ * витрины, сводка — нет. Поэтому `truncated` обязан быть виден на странице:
+ * «минимум 1 ₽, максимум 500 ₽» рядом со списком, где пятисот нет, без пометки
+ * об обрезке читается как ошибка витрины.
+ */
+export async function listAdGroupsView(
+  campaignId: string,
+  options: { readonly limit?: number } = {},
+): Promise<AdGroupsView> {
+  const limit = options.limit ?? ROW_LIMIT;
+  const [rows, aggregate] = await Promise.all([
+    getPrisma().adGroup.findMany({
+      where: { campaignId },
+      select: { id: true, externalId: true, name: true, status: true, bid: true },
+      orderBy: [{ name: 'asc' }, { externalId: 'asc' }],
+      take: limit,
+    }),
+    // `_count.bid` считает только непустые: это и есть «у скольких ставка задана».
+    getPrisma().adGroup.aggregate({
+      where: { campaignId },
+      _count: { _all: true, bid: true },
+      _min: { bid: true },
+      _max: { bid: true },
+    }),
+  ]);
+
+  const total = aggregate._count._all;
+
+  return {
+    rows: rows.map((group) => ({
+      id: group.id,
+      externalId: group.externalId,
+      name: group.name,
+      status: group.status,
+      bid: decimalToNumber(group.bid),
+    })),
+    total,
+    limit,
+    truncated: rows.length < total,
+    bids: {
+      groups: total,
+      withBid: aggregate._count.bid,
+      min: decimalToNumber(aggregate._min.bid),
+      max: decimalToNumber(aggregate._max.bid),
+    },
+  };
 }
 
 /**
