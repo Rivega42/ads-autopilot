@@ -29,36 +29,37 @@
 
 ## Эпики
 
-| # | Эпик | Файл | Задач | Оценка |
-|---|---|---|---|---|
-| E01 | Каркас проекта | [E01-scaffold.md](backlog/E01-scaffold.md) | 18 | 1 день |
-| E02 | База данных (Prisma) | [E02-database.md](backlog/E02-database.md) | 16 | 1 день |
-| E03 | Security & credentials | [E03-security.md](backlog/E03-security.md) | 14 | 1 день |
-| E04 | Telegram Bot (Grammy) | [E04-telegram-bot.md](backlog/E04-telegram-bot.md) | 20 | 2 дня |
-| E05 | Yandex Direct API | [E05-yandex-direct.md](backlog/E05-yandex-direct.md) | 32 | 4 дня |
-| E06 | VK Реклама API | [E06-vk-ads.md](backlog/E06-vk-ads.md) | 26 | 3 дня |
-| E07 | AI-Онбординг клиента | [E07-ai-onboarding.md](backlog/E07-ai-onboarding.md) | 14 | 1.5 дня |
-| E08 | AI-Стратег | [E08-ai-strategist.md](backlog/E08-ai-strategist.md) | 16 | 2 дня |
-| E09 | AI-Креативы | [E09-ai-creatives.md](backlog/E09-ai-creatives.md) | 24 | 3 дня |
-| E10 | AI-Модератор | [E10-ai-moderator.md](backlog/E10-ai-moderator.md) | 14 | 1.5 дня |
-| E11 | AI-Оптимизатор | [E11-ai-optimizer.md](backlog/E11-ai-optimizer.md) | 20 | 2.5 дня |
-| E12 | AI-Аналитик | [E12-ai-analyst.md](backlog/E12-ai-analyst.md) | 14 | 1.5 дня |
-| E13 | AI-Конкурентная разведка | [E13-ai-competitive.md](backlog/E13-ai-competitive.md) | 12 | 1.5 дня |
-| E14 | AI-Wordstat | [E14-ai-wordstat.md](backlog/E14-ai-wordstat.md) | 12 | 1.5 дня |
-| E15 | AI-Follow-up лидов | [E15-ai-followup.md](backlog/E15-ai-followup.md) | 14 | 1.5 дня |
-| E16 | Cron & очереди (BullMQ) | [E16-cron-queue.md](backlog/E16-cron-queue.md) | 16 | 1.5 дня |
-| E17 | Импорт существующих кампаний | [E17-import-campaigns.md](backlog/E17-import-campaigns.md) | 22 | 2.5 дня |
-| E18 | Web-дашборд (Next.js) | [E18-dashboard.md](backlog/E18-dashboard.md) | 26 | 3 дня |
-| E19 | Доп. каналы (TikTok/LinkedIn/Meta/Google/TG Ads) | [E19-extra-channels.md](backlog/E19-extra-channels.md) | 30 | 5 дней |
-| E20 | Observability | [E20-observability.md](backlog/E20-observability.md) | 14 | 1.5 дня |
-| E21 | Deployment | [E21-deployment.md](backlog/E21-deployment.md) | 16 | 2 дня |
-| E22 | Документация & runbooks | [E22-docs.md](backlog/E22-docs.md) | 12 | 1.5 дня |
+| #   | Эпик                                             | Файл                                                       | Задач | Оценка  |
+| --- | ------------------------------------------------ | ---------------------------------------------------------- | ----- | ------- |
+| E01 | Каркас проекта                                   | [E01-scaffold.md](backlog/E01-scaffold.md)                 | 18    | 1 день  |
+| E02 | База данных (Prisma)                             | [E02-database.md](backlog/E02-database.md)                 | 16    | 1 день  |
+| E03 | Security & credentials                           | [E03-security.md](backlog/E03-security.md)                 | 14    | 1 день  |
+| E04 | Telegram Bot (Grammy)                            | [E04-telegram-bot.md](backlog/E04-telegram-bot.md)         | 20    | 2 дня   |
+| E05 | Yandex Direct API                                | [E05-yandex-direct.md](backlog/E05-yandex-direct.md)       | 32    | 4 дня   |
+| E06 | VK Реклама API                                   | [E06-vk-ads.md](backlog/E06-vk-ads.md)                     | 26    | 3 дня   |
+| E07 | AI-Онбординг клиента                             | [E07-ai-onboarding.md](backlog/E07-ai-onboarding.md)       | 14    | 1.5 дня |
+| E08 | AI-Стратег                                       | [E08-ai-strategist.md](backlog/E08-ai-strategist.md)       | 16    | 2 дня   |
+| E09 | AI-Креативы                                      | [E09-ai-creatives.md](backlog/E09-ai-creatives.md)         | 24    | 3 дня   |
+| E10 | AI-Модератор                                     | [E10-ai-moderator.md](backlog/E10-ai-moderator.md)         | 14    | 1.5 дня |
+| E11 | AI-Оптимизатор                                   | [E11-ai-optimizer.md](backlog/E11-ai-optimizer.md)         | 20    | 2.5 дня |
+| E12 | AI-Аналитик                                      | [E12-ai-analyst.md](backlog/E12-ai-analyst.md)             | 14    | 1.5 дня |
+| E13 | AI-Конкурентная разведка                         | [E13-ai-competitive.md](backlog/E13-ai-competitive.md)     | 12    | 1.5 дня |
+| E14 | AI-Wordstat                                      | [E14-ai-wordstat.md](backlog/E14-ai-wordstat.md)           | 12    | 1.5 дня |
+| E15 | AI-Follow-up лидов                               | [E15-ai-followup.md](backlog/E15-ai-followup.md)           | 14    | 1.5 дня |
+| E16 | Cron & очереди (BullMQ)                          | [E16-cron-queue.md](backlog/E16-cron-queue.md)             | 16    | 1.5 дня |
+| E17 | Импорт существующих кампаний                     | [E17-import-campaigns.md](backlog/E17-import-campaigns.md) | 22    | 2.5 дня |
+| E18 | Web-дашборд (Next.js)                            | [E18-dashboard.md](backlog/E18-dashboard.md)               | 26    | 3 дня   |
+| E19 | Доп. каналы (TikTok/LinkedIn/Meta/Google/TG Ads) | [E19-extra-channels.md](backlog/E19-extra-channels.md)     | 30    | 5 дней  |
+| E20 | Observability                                    | [E20-observability.md](backlog/E20-observability.md)       | 14    | 1.5 дня |
+| E21 | Deployment                                       | [E21-deployment.md](backlog/E21-deployment.md)             | 16    | 2 дня   |
+| E22 | Документация & runbooks                          | [E22-docs.md](backlog/E22-docs.md)                         | 12    | 1.5 дня |
 
 **Итого:** ~412 атомарных задач, ~44 дня работы (в одиночку, без параллелизма).
 
 ## MVP-скоуп (первые 15 дней)
 
 Порядок эпиков для MVP:
+
 1. E01 → E02 → E03 (фундамент, 3 дня)
 2. E04 (бот, 2 дня)
 3. E05 (Директ, 4 дня — параллельно с E04)
@@ -74,6 +75,7 @@
 `<type>/T<epic>.<task>-<slug>`
 
 Примеры:
+
 - `feat/T05.03-yandex-oauth-flow`
 - `fix/T11.07-bid-change-rollback`
 - `refactor/T04.12-callback-router`

@@ -1,0 +1,633 @@
+import { MatchType, Provider } from '@prisma/client';
+import { describe, expect, it, vi } from 'vitest';
+
+import { applyPlan, type ApplyStore } from '@/campaigns/apply.js';
+import {
+  campaignCreateKey,
+  createInMemoryCampaignIdempotency,
+  type CampaignIdempotency,
+} from '@/campaigns/idempotency.js';
+import { campaignPlanSchema, type CampaignPlan } from '@/campaigns/plan.schema.js';
+import { CAMPAIGN_PLAN_PROVIDER } from '@/campaigns/store.js';
+import {
+  markCreateOutcome,
+  type AdCreateSpec,
+  type AdGroupCreateSpec,
+  type CampaignCreateSpec,
+  type CampaignWriter,
+  type KeywordCreateSpec,
+} from '@/campaigns/writer.js';
+import type { ChannelContext } from '@/channels/types.js';
+import { ChannelError } from '@/lib/errors.js';
+
+/**
+ * Заливка плана. Ни площадки, ни БД: writer, Prisma и контекст канала подменены.
+ * Проверяем ровно то, что стоит денег, — dry-run и повторное создание.
+ */
+
+const LANDING = 'https://example.com/course';
+
+const PLAN: CampaignPlan = campaignPlanSchema.parse({
+  id: 'plan-1',
+  clientId: 'c1',
+  createdAt: '2026-08-08T09:00:00.000Z',
+  totalDailyBudgetRub: 5_000,
+  summary: 'Поиск плюс сети',
+  campaigns: [
+    {
+      channel: Provider.YANDEX_DIRECT,
+      placement: 'search',
+      name: 'Поиск — Курсы',
+      dailyBudgetRub: 3_500,
+      targetCpaRub: 2_000,
+      strategy: { search: { type: 'HIGHEST_POSITION' }, network: { type: 'SERVING_OFF' } },
+      negativeKeywords: ['скачать'],
+      adGroups: [
+        {
+          name: 'Горячий спрос',
+          regionIds: [213],
+          keywords: [{ phrase: 'курсы английского', bidRub: 100 }],
+          negativeKeywords: [],
+          ads: [{ title: 'Английский для IT', text: 'Разговорный курс.', href: LANDING }],
+        },
+      ],
+    },
+    {
+      channel: Provider.YANDEX_DIRECT,
+      placement: 'network',
+      name: 'РСЯ — Курсы',
+      dailyBudgetRub: 1_500,
+      targetCpaRub: 2_000,
+      strategy: { search: { type: 'SERVING_OFF' }, network: { type: 'MAXIMUM_COVERAGE' } },
+      negativeKeywords: [],
+      adGroups: [
+        {
+          name: 'Горячий спрос',
+          regionIds: [213],
+          keywords: [{ phrase: 'курсы английского', bidRub: 50 }],
+          negativeKeywords: [],
+          ads: [{ title: 'Английский для IT', text: 'Разговорный курс.', href: LANDING }],
+        },
+      ],
+    },
+  ],
+  warnings: [],
+  prompts: ['campaign-structure@1.0.0'],
+});
+
+interface WriterHarness {
+  writer: CampaignWriter;
+  calls: {
+    campaigns: CampaignCreateSpec[];
+    groups: AdGroupCreateSpec[];
+    keywords: KeywordCreateSpec[];
+    ads: AdCreateSpec[];
+    moderated: string[];
+  };
+}
+
+function makeWriter(overrides: Partial<CampaignWriter> = {}): WriterHarness {
+  const calls: WriterHarness['calls'] = {
+    campaigns: [],
+    groups: [],
+    keywords: [],
+    ads: [],
+    moderated: [],
+  };
+  let counter = 0;
+
+  const writer: CampaignWriter = {
+    channel: Provider.YANDEX_DIRECT,
+    createCampaign: (_ctx, spec) => {
+      calls.campaigns.push(spec);
+      counter += 1;
+      return Promise.resolve({ externalId: `ext-${counter}` });
+    },
+    createAdGroups: (_ctx, _campaignExternalId, groups) => {
+      calls.groups.push(...groups);
+      return Promise.resolve(groups.map((g, i) => ({ externalId: `g${i}`, name: g.name })));
+    },
+    createKeywords: (_ctx, keywords) => {
+      calls.keywords.push(...keywords);
+      return Promise.resolve(keywords.map((_, i) => ({ externalId: `k${i}` })));
+    },
+    createAds: (_ctx, ads) => {
+      calls.ads.push(...ads);
+      return Promise.resolve(ads.map((_, i) => ({ externalId: `a${i}` })));
+    },
+    submitForModeration: (_ctx, ids) => {
+      calls.moderated.push(...ids);
+      return Promise.resolve();
+    },
+    ...overrides,
+  };
+
+  return { writer, calls };
+}
+
+interface DbHarness {
+  db: ApplyStore;
+  campaigns: Record<string, unknown>[];
+  adGroups: Record<string, unknown>[];
+  keywords: Record<string, unknown>[];
+}
+
+function makeDb(plan: CampaignPlan = PLAN): DbHarness {
+  const campaigns: Record<string, unknown>[] = [];
+  const adGroups: Record<string, unknown>[] = [];
+  const keywords: Record<string, unknown>[] = [];
+  // Апсерт обязан быть апсертом: тот же внешний id — та же строка. Иначе повторный
+  // проход выглядел бы как новая группа, и дубли фраз тест бы не поймал.
+  const ids = new Map<string, string>();
+  const idFor = (key: string, prefix: string): string => {
+    const known = ids.get(key);
+    if (known) return known;
+    const fresh = `${prefix}-${ids.size + 1}`;
+    ids.set(key, fresh);
+    return fresh;
+  };
+
+  const db = {
+    creative: {
+      findUnique: () =>
+        Promise.resolve({
+          id: plan.id,
+          provider: CAMPAIGN_PLAN_PROVIDER,
+          payload: JSON.parse(JSON.stringify(plan)) as unknown,
+        }),
+    },
+    campaign: {
+      upsert: (args: {
+        where: { provider_externalId: { externalId: string } };
+        create: Record<string, unknown>;
+      }) => {
+        campaigns.push(args.create);
+        return Promise.resolve({
+          id: idFor(`campaign:${args.where.provider_externalId.externalId}`, 'db-campaign'),
+        });
+      },
+    },
+    adGroup: {
+      upsert: (args: {
+        where: { campaignId_externalId: { campaignId: string; externalId: string } };
+        create: Record<string, unknown>;
+      }) => {
+        adGroups.push(args.create);
+        const { campaignId, externalId } = args.where.campaignId_externalId;
+        return Promise.resolve({ id: idFor(`group:${campaignId}:${externalId}`, 'db-group') });
+      },
+    },
+    keyword: {
+      /**
+       * Апсерт по `@@unique([adGroupId, matchType, phrase])`.
+       *
+       * Поиск и вставка — в одном синхронном куске, до первого `await`: именно
+       * так ведёт себя настоящий `INSERT ... ON CONFLICT`, и только так тест
+       * может отличить атомарную запись от «нашли — не нашли — оба создали».
+       */
+      upsert: (args: {
+        where: {
+          adGroupId_matchType_phrase: { adGroupId: string; matchType: string; phrase: string };
+        };
+        create: Record<string, unknown>;
+        update: Record<string, unknown>;
+      }) => {
+        const key = args.where.adGroupId_matchType_phrase;
+        const existing = keywords.find(
+          (k) =>
+            k['adGroupId'] === key.adGroupId &&
+            k['matchType'] === key.matchType &&
+            k['phrase'] === key.phrase,
+        );
+        if (existing) {
+          Object.assign(existing, args.update);
+          return Promise.resolve({ id: existing['id'] });
+        }
+        const row = { id: `db-keyword-${keywords.length + 1}`, ...args.create };
+        keywords.push(row);
+        return Promise.resolve({ id: row.id });
+      },
+    },
+    idempotencyKey: {},
+  } as unknown as ApplyStore;
+
+  return { db, campaigns, adGroups, keywords };
+}
+
+function ctxFor(dryRun: boolean): ChannelContext {
+  return { clientId: 'c1', credentials: { token: 'x' }, dryRun };
+}
+
+function deps(dryRun: boolean, idempotency: CampaignIdempotency) {
+  return {
+    buildContext: () => Promise.resolve(ctxFor(dryRun)),
+    idempotency,
+  };
+}
+
+describe('applyPlan: dry-run', () => {
+  it('ничего не отправляет и не резервирует ключ', async () => {
+    const { db } = makeDb();
+    const { writer, calls } = makeWriter();
+    const idempotency = createInMemoryCampaignIdempotency();
+    const reserve = vi.spyOn(idempotency, 'reserve');
+
+    const result = await applyPlan('plan-1', {
+      db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      ...deps(true, idempotency),
+    });
+
+    expect(result.dryRun).toBe(true);
+    expect(result.campaigns.map((c) => c.status)).toEqual(['planned', 'planned']);
+    expect(calls.campaigns).toEqual([]);
+    expect(calls.groups).toEqual([]);
+    expect(calls.ads).toEqual([]);
+    // Ключ не занят: dry-run не должен мешать настоящему запуску того же плана.
+    expect(reserve).not.toHaveBeenCalled();
+  });
+
+  it('возвращает полный план того, что было бы создано', async () => {
+    const { db } = makeDb();
+    const { writer } = makeWriter();
+
+    const result = await applyPlan('plan-1', {
+      db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      ...deps(true, createInMemoryCampaignIdempotency()),
+    });
+
+    expect(result.campaigns[0]?.plan).toMatchObject({
+      action: 'Campaigns.add',
+      name: 'Поиск — Курсы',
+      dailyBudgetRub: 3_500,
+      adGroups: 1,
+      keywords: 1,
+      ads: 1,
+    });
+  });
+
+  it('dryRun из опций включается даже при разрешающем контексте', async () => {
+    const { db } = makeDb();
+    const { writer, calls } = makeWriter();
+
+    const result = await applyPlan('plan-1', {
+      db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      buildContext: () => Promise.resolve(ctxFor(false)),
+      idempotency: createInMemoryCampaignIdempotency(),
+      dryRun: true,
+    });
+
+    expect(result.campaigns.every((c) => c.status === 'planned')).toBe(true);
+    expect(calls.campaigns).toEqual([]);
+  });
+});
+
+describe('applyPlan: создание', () => {
+  it('создаёт кампанию, группы, фразы и объявления и шлёт их на модерацию', async () => {
+    const { db, campaigns, keywords } = makeDb();
+    const { writer, calls } = makeWriter();
+
+    const result = await applyPlan('plan-1', {
+      db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      ...deps(false, createInMemoryCampaignIdempotency()),
+    });
+
+    expect(result.campaigns.map((c) => c.status)).toEqual(['created', 'created']);
+    expect(result.campaigns.map((c) => c.externalId)).toEqual(['ext-1', 'ext-2']);
+    expect(calls.campaigns).toHaveLength(2);
+    expect(calls.campaigns[0]).toMatchObject({
+      name: 'Поиск — Курсы',
+      dailyBudgetRub: 3_500,
+      negativeKeywords: ['скачать'],
+    });
+    expect(calls.campaigns[0]?.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(calls.keywords).toHaveLength(2);
+    expect(calls.ads).toHaveLength(2);
+    expect(calls.moderated).toEqual(['a0', 'a0']);
+
+    expect(campaigns).toHaveLength(2);
+    expect(campaigns[0]).toMatchObject({ clientId: 'c1', externalId: 'ext-1', status: 'DRAFT' });
+    expect(keywords).toHaveLength(2);
+  });
+
+  it('повторное зеркалирование не плодит копии фраз', async () => {
+    // Ключ идемпотентности защищает кабинет, но не БД: тот же план могут залить
+    // после потери строки ключа (истёк TTL, чинили руками) — зеркало обязано
+    // сойтись, а не удвоить каждую фразу. externalId у фраз ещё null, и
+    // `@@unique([adGroupId, externalId])` от дублей не спасает: NULL != NULL.
+    const harness = makeDb();
+    // Тот же внешний id: зеркалим одну и ту же кампанию второй раз.
+    const { writer } = makeWriter({
+      createCampaign: () => Promise.resolve({ externalId: 'ext-1' }),
+    });
+
+    for (const _pass of [1, 2]) {
+      await applyPlan('plan-1', {
+        db: harness.db,
+        writers: { [Provider.YANDEX_DIRECT]: writer },
+        campaignIndex: 0,
+        ...deps(false, createInMemoryCampaignIdempotency()),
+      });
+    }
+
+    expect(harness.keywords).toHaveLength(1);
+    expect(harness.keywords[0]).toMatchObject({ phrase: 'курсы английского' });
+  });
+
+  it('одновременное зеркалирование одной кампании не удваивает фразы', async () => {
+    // Два воркера подхватили один и тот же план (ретрай очереди наложился на
+    // исходный запуск). «Найти и создать» между собой не атомарны: оба не
+    // находят фразу и оба её создают. Ключ идемпотентности здесь не помогает —
+    // он про кабинет, а не про зеркало в БД.
+    const harness = makeDb();
+    const { writer } = makeWriter({
+      createCampaign: () => Promise.resolve({ externalId: 'ext-1' }),
+    });
+
+    const run = (): Promise<unknown> =>
+      applyPlan('plan-1', {
+        db: harness.db,
+        writers: { [Provider.YANDEX_DIRECT]: writer },
+        campaignIndex: 0,
+        ...deps(false, createInMemoryCampaignIdempotency()),
+      });
+
+    await Promise.all([run(), run()]);
+
+    expect(harness.keywords).toHaveLength(1);
+    expect(harness.keywords[0]).toMatchObject({
+      phrase: 'курсы английского',
+      matchType: MatchType.PHRASE,
+    });
+  });
+
+  it('применяет одну кампанию плана по индексу', async () => {
+    const { db } = makeDb();
+    const { writer, calls } = makeWriter();
+
+    const result = await applyPlan('plan-1', {
+      db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      campaignIndex: 1,
+      ...deps(false, createInMemoryCampaignIdempotency()),
+    });
+
+    expect(result.campaigns).toHaveLength(1);
+    expect(result.campaigns[0]?.name).toBe('РСЯ — Курсы');
+    expect(calls.campaigns).toHaveLength(1);
+  });
+
+  it('без реализации для канала не падает, а возвращает failed', async () => {
+    const { db } = makeDb();
+
+    const result = await applyPlan('plan-1', {
+      db,
+      writers: {},
+      ...deps(false, createInMemoryCampaignIdempotency()),
+    });
+
+    expect(result.campaigns.every((c) => c.status === 'failed')).toBe(true);
+    expect(result.campaigns[0]?.note).toContain('нет реализации');
+  });
+});
+
+describe('applyPlan: идемпотентность', () => {
+  it('повторная заливка того же плана не создаёт вторую кампанию', async () => {
+    const idempotency = createInMemoryCampaignIdempotency();
+    const { writer, calls } = makeWriter();
+
+    const first = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      ...deps(false, idempotency),
+    });
+    const second = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      ...deps(false, idempotency),
+    });
+
+    expect(first.campaigns.map((c) => c.status)).toEqual(['created', 'created']);
+    expect(second.campaigns.map((c) => c.status)).toEqual(['skipped', 'skipped']);
+    // Главная проверка эпика: площадка увидела ровно два вызова, а не четыре.
+    expect(calls.campaigns).toHaveLength(2);
+    expect(second.campaigns[0]?.externalId).toBe('ext-1');
+    expect(second.campaigns[0]?.note).toContain('уже создана');
+  });
+
+  it('ключ детерминирован: тот же план и та же позиция — тот же ключ', () => {
+    expect(campaignCreateKey('plan-1', 0)).toBe('campaigns.create:plan-1:0');
+    expect(campaignCreateKey('plan-1', 0)).toBe(campaignCreateKey('plan-1', 0));
+    expect(campaignCreateKey('plan-1', 1)).not.toBe(campaignCreateKey('plan-1', 0));
+  });
+
+  it('доказанный отказ площадки освобождает ключ — повтор должен быть возможен', async () => {
+    const idempotency = createInMemoryCampaignIdempotency();
+    const failing = makeWriter({
+      // Так падает writer, когда Директ разобрал запрос и отказал: кампании нет.
+      createCampaign: () =>
+        Promise.reject(
+          markCreateOutcome(
+            new ChannelError(Provider.YANDEX_DIRECT, 'Директ отклонил кампанию', {
+              code: 'YANDEX_CREATE_REJECTED',
+            }),
+            'not-created',
+          ),
+        ),
+    });
+
+    const failed = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: failing.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+    expect(failed.campaigns[0]?.status).toBe('failed');
+    expect(failed.campaigns[0]?.note).toContain('Директ отклонил кампанию');
+
+    const retry = makeWriter();
+    const second = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: retry.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+    expect(second.campaigns[0]?.status).toBe('created');
+    expect(retry.calls.campaigns).toHaveLength(1);
+  });
+
+  it('потерянный ответ не освобождает ключ: исход unknown, повтор ничего не создаёт', async () => {
+    const idempotency = createInMemoryCampaignIdempotency();
+    // Кампания могла быть создана: ответ 5xx/таймаут/чужая форма тела не доказывает
+    // обратного. Освободить здесь ключ — значит разрешить вторую кампанию с тем же
+    // дневным бюджетом по следующему нажатию «повторить».
+    const lost = makeWriter({
+      createCampaign: () =>
+        Promise.reject(
+          new ChannelError(Provider.YANDEX_DIRECT, 'Yandex Direct HTTP 502', {
+            code: 'YANDEX_HTTP_5XX',
+            retryable: true,
+          }),
+        ),
+    });
+
+    const first = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: lost.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+    expect(first.campaigns[0]?.status).toBe('unknown');
+    expect(first.campaigns[0]?.externalId).toBeNull();
+    expect(first.campaigns[0]?.note).toContain('проверьте кабинет вручную');
+
+    const retry = makeWriter();
+    const second = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: retry.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+    expect(second.campaigns[0]?.status).toBe('skipped');
+    expect(second.campaigns[0]?.note).toContain('вручную');
+    expect(retry.calls.campaigns).toEqual([]);
+  });
+
+  it('ошибка без пометки считается неизвестным исходом', async () => {
+    const idempotency = createInMemoryCampaignIdempotency();
+    const failing = makeWriter({
+      createCampaign: () => Promise.reject(new Error('socket hang up')),
+    });
+
+    const result = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: failing.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+
+    expect(result.campaigns[0]?.status).toBe('unknown');
+  });
+
+  it('незавершённая попытка не создаёт вторую кампанию, а требует разбора', async () => {
+    const idempotency = createInMemoryCampaignIdempotency();
+    // Кампания создана, но внешний id дописать не успели: процесс умер между шагами.
+    await idempotency.reserve(campaignCreateKey('plan-1', 0));
+
+    const { writer, calls } = makeWriter();
+    const result = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+
+    expect(result.campaigns[0]?.status).toBe('skipped');
+    expect(result.campaigns[0]?.externalId).toBeNull();
+    expect(result.campaigns[0]?.note).toContain('вручную');
+    expect(calls.campaigns).toEqual([]);
+  });
+
+  it('падение на группах оставляет кампанию созданной и не даёт создать её снова', async () => {
+    const idempotency = createInMemoryCampaignIdempotency();
+    const broken = makeWriter({
+      createAdGroups: () => Promise.reject(new Error('группы не приняты')),
+    });
+
+    const first = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: broken.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+    expect(first.campaigns[0]?.status).toBe('created');
+    expect(first.campaigns[0]?.note).toContain('структура создана не полностью');
+
+    const retry = makeWriter();
+    const second = await applyPlan('plan-1', {
+      db: makeDb().db,
+      writers: { [Provider.YANDEX_DIRECT]: retry.writer },
+      campaignIndex: 0,
+      ...deps(false, idempotency),
+    });
+    expect(second.campaigns[0]?.status).toBe('skipped');
+    expect(retry.calls.campaigns).toEqual([]);
+  });
+});
+
+describe('applyPlan: одноимённые группы', () => {
+  /**
+   * План, сохранённый до того, как планировщик научился разводить имена, лежит в
+   * базе и заливается этой же функцией. Сопоставление созданного с планом по имени
+   * складывало обе группы в одну: все фразы и все объявления уезжали в ту, что
+   * попала в `Map` последней, а первая оставалась пустой — при статусе `created`.
+   */
+  const DUPLICATE_PLAN: CampaignPlan = campaignPlanSchema.parse({
+    id: 'plan-1',
+    clientId: 'c1',
+    createdAt: '2026-08-08T09:00:00.000Z',
+    totalDailyBudgetRub: 3_500,
+    summary: 'Две группы с одним именем',
+    campaigns: [
+      {
+        channel: Provider.YANDEX_DIRECT,
+        placement: 'search',
+        name: 'Поиск — Курсы',
+        dailyBudgetRub: 3_500,
+        targetCpaRub: 2_000,
+        strategy: { search: { type: 'HIGHEST_POSITION' }, network: { type: 'SERVING_OFF' } },
+        negativeKeywords: [],
+        adGroups: [
+          {
+            name: 'Горячий спрос',
+            regionIds: [213],
+            keywords: [{ phrase: 'курсы английского', bidRub: 100 }],
+            negativeKeywords: [],
+            ads: [{ title: 'Первое объявление', text: 'Разговорный курс.', href: LANDING }],
+          },
+          {
+            name: 'Горячий спрос',
+            regionIds: [213],
+            keywords: [{ phrase: 'английский для айтишников', bidRub: 100 }],
+            negativeKeywords: [],
+            ads: [{ title: 'Второе объявление', text: 'Курс с практикой.', href: LANDING }],
+          },
+        ],
+      },
+    ],
+    warnings: [],
+    prompts: [],
+  });
+
+  it('фразы и объявления остаются каждая в своей группе', async () => {
+    const { db, adGroups, keywords } = makeDb(DUPLICATE_PLAN);
+    const { writer, calls } = makeWriter();
+
+    const result = await applyPlan('plan-1', {
+      db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      ...deps(false, createInMemoryCampaignIdempotency()),
+    });
+
+    expect(result.campaigns[0]?.adGroups).toBe(2);
+    expect(calls.keywords).toEqual([
+      { adGroupExternalId: 'g0', phrase: 'курсы английского', bidRub: 100 },
+      { adGroupExternalId: 'g1', phrase: 'английский для айтишников', bidRub: 100 },
+    ]);
+    expect(calls.ads.map((ad) => [ad.adGroupExternalId, ad.title])).toEqual([
+      ['g0', 'Первое объявление'],
+      ['g1', 'Второе объявление'],
+    ]);
+
+    // Зеркало в БД — две разные группы, у каждой своя фраза.
+    expect(adGroups.map((g) => g['externalId'])).toEqual(['g0', 'g1']);
+    expect(new Set(keywords.map((k) => k['adGroupId'])).size).toBe(2);
+    expect(keywords.map((k) => k['phrase'])).toEqual([
+      'курсы английского',
+      'английский для айтишников',
+    ]);
+  });
+});

@@ -1,0 +1,35 @@
+import { createHash } from 'node:crypto';
+
+import type { AdTextDraft } from '@/campaigns/limits.js';
+
+/**
+ * Общие типы модуля креативов (TZ §13.3).
+ *
+ * Модуль отвечает за три вещи и ни за что больше: сгенерировать варианты, проверить
+ * их лимитами площадки и выбрать победителя по статистике. Заливкой в кабинет
+ * занимаются адаптеры каналов — сюда попадает только то, что уже можно заливать.
+ */
+
+/** Площадка, под лимиты которой проверяется текст. */
+export type CreativePlatform = 'yandex_direct' | 'vk_ads';
+
+export const CREATIVE_PLATFORMS: readonly CreativePlatform[] = ['yandex_direct', 'vk_ads'];
+
+/**
+ * Вариант текста объявления.
+ *
+ * `id` — не порядковый номер, а отпечаток содержимого: A/B-тест сравнивает тексты,
+ * а не позиции в списке. Перегенерировали набор, один текст совпал дословно —
+ * это тот же вариант, и его статистику нужно продолжить, а не начать заново.
+ */
+export interface TextVariant extends AdTextDraft {
+  id: string;
+  /** Посыл варианта: цена / скорость / результат. Нужен, чтобы варианты различались. */
+  angle: string;
+}
+
+/** Стабильный id варианта. Пишется в `Ad.llmVariant` и служит ключом A/B-отчёта. */
+export function textVariantId(ad: AdTextDraft): string {
+  const payload = [ad.title.trim(), ad.title2?.trim() ?? '', ad.text.trim()].join('\u0000');
+  return `t-${createHash('sha256').update(payload).digest('hex').slice(0, 12)}`;
+}

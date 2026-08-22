@@ -1,0 +1,827 @@
+import { StatEntityType } from '@prisma/client';
+import type {
+  AdGroupStatus,
+  ApprovalDecision,
+  ApprovalKind,
+  CampaignStatus,
+  ChangeActor,
+  ClientStatus,
+  ConversionSource,
+  HandoverMode,
+  Prisma,
+  Provider,
+} from '@prisma/client';
+
+import type { AttributionSummary, ConversionSourceCounts } from './attribution';
+import { addCounts, emptyCounts, summarizeAttribution } from './attribution';
+import { dateColumnToYmd, eachDay, mskDateToUtc, shiftYmd, ymdToDateColumn } from './dates';
+import type { DashboardFilters } from './filters';
+import { cpa, ctr } from './metrics';
+import { getPrisma } from './prisma';
+import { bigIntToString, decimalToNumber, decimalToNumberOr, toJsonSafe } from './serialize';
+import type { JsonSafe } from './serialize';
+
+/** Потолок выборки строк: дашборд — витрина, а не выгрузка. */
+const ROW_LIMIT = 200;
+
+/**
+ * Сколько id уезжает в один `where: { in: [...] }`.
+ *
+ * `CampaignStat` полиморфна и внешнего ключа на `Campaign` не имеет, поэтому
+ * агрегат по набору кампаний собирается списком id — а каждый id это отдельный
+ * bind-параметр, и их у Prisma не больше 32 767 (int16). Дальше запрос не
+ * тормозит, а падает с `P2029`, и страница отвечает 500. Замерено на живой базе:
+ * 32 000 кампаний под фильтром — 142 мс, 33 000 — отказ. Чанк держится на
+ * порядок ниже стены, чтобы в неё упирался не размер кабинета, а память.
+ */
+export const STAT_ID_CHUNK = 5_000;
+
+function chunkIds(ids: readonly string[]): readonly (readonly string[])[] {
+  const chunks: string[][] = [];
+  for (let start = 0; start < ids.length; start += STAT_ID_CHUNK) {
+    chunks.push(ids.slice(start, start + STAT_ID_CHUNK));
+  }
+  return chunks;
+}
+
+/**
+ * Список для страницы: строки и честный размер набора за ними.
+ *
+ * `total` считается по тому же фильтру, что и строки, поэтому обрезка перестаёт
+ * быть невидимой — страница обязана сказать «показаны первые N из M». Кабинет
+ * агентства на три сотни кампаний — рабочий режим, а не край.
+ */
+export interface ListWindow<Row> {
+  readonly rows: readonly Row[];
+  /** Сколько строк под фильтром всего — до потолка выборки. */
+  readonly total: number;
+  readonly limit: number;
+  readonly truncated: boolean;
+}
+
+export interface CampaignsView extends ListWindow<CampaignRow> {
+  /**
+   * Итог за период по всему набору под фильтром, а не по показанным строкам:
+   * свёртка обрезка занижала бы плитку «Расход за период» ровно на хвост и
+   * расходилась бы с теми же деньгами на `/clients`.
+   */
+  readonly totals: PeriodTotals;
+}
+
+export type ClientsView = ListWindow<ClientRow>;
+
+export type ChangesView = ListWindow<ChangeRow>;
+
+export interface ApprovalsView extends ListWindow<ApprovalRow> {
+  /** false — это очередь ждущих решения, и она периодом не режется. */
+  readonly periodApplies: boolean;
+  /**
+   * Вся очередь ждущих решения — ровно то число, что стоит в шапке.
+   *
+   * Отличается от `total`, когда фильтр по клиенту сузил набор страницы. Тогда
+   * страница обязана назвать оба числа: снять фильтр с бейджа нельзя (layout не
+   * получает `searchParams`), а молчащее расхождение читается как ошибка.
+   * `null` — показана история решений, с очередью её никто не сравнивает.
+   */
+  readonly queueTotal: number | null;
+}
+
+export interface PeriodTotals {
+  readonly impressions: number;
+  readonly clicks: number;
+  readonly spend: number;
+  readonly conversions: number;
+  readonly cpa: number | null;
+  readonly ctr: number | null;
+  /** Чьи конверсии сложены в `conversions`. При `mixed` `cpa` несопоставим. */
+  readonly attribution: AttributionSummary;
+}
+
+export interface ClientRow {
+  readonly id: string;
+  readonly name: string;
+  readonly status: ClientStatus;
+  readonly tgUsername: string | null;
+  readonly channels: readonly Provider[];
+  readonly campaignCount: number;
+  readonly activeCampaignCount: number;
+  readonly totals: PeriodTotals;
+}
+
+export interface CampaignRow {
+  readonly id: string;
+  readonly name: string;
+  readonly clientId: string;
+  readonly clientName: string;
+  readonly provider: Provider;
+  readonly status: CampaignStatus;
+  readonly dailyBudget: number;
+  readonly targetCpa: number | null;
+  readonly totals: PeriodTotals;
+}
+
+export interface CampaignDetail {
+  readonly id: string;
+  readonly name: string;
+  readonly externalId: string;
+  readonly clientId: string;
+  readonly clientName: string;
+  readonly provider: Provider;
+  readonly status: CampaignStatus;
+  readonly dailyBudget: number;
+  readonly targetCpa: number | null;
+  readonly strategy: string | null;
+  readonly handoverMode: HandoverMode;
+  readonly importedAt: string | null;
+  readonly adGroupCount: number;
+}
+
+export interface DailyMetrics {
+  readonly date: string;
+  readonly impressions: number;
+  readonly clicks: number;
+  readonly spend: number;
+  readonly conversions: number;
+  readonly cpa: number | null;
+  /** `null` — за этот день строки статистики нет, а не «источник неизвестен». */
+  readonly conversionSource: ConversionSource | null;
+}
+
+/**
+ * Группа объявлений на витрине.
+ *
+ * `bid` — `null`, а не 0, когда ручной ставки нет: у автостратегии цену назначает
+ * площадка. Подмена на ноль превратила бы «мы ставкой не управляем» в «мы
+ * поставили ноль», а это противоположные утверждения.
+ */
+export interface AdGroupRow {
+  readonly id: string;
+  readonly externalId: string;
+  readonly name: string;
+  readonly status: AdGroupStatus;
+  readonly bid: number | null;
+}
+
+/**
+ * Сводка по ставкам групп — по всему набору, а не по показанным строкам.
+ *
+ * Считает Postgres: список групп режется потолком витрины, и свёртка обрезка
+ * назвала бы максимальной ставкой ту, что случайно попала в первые двести строк.
+ * Ровно эта ошибка уже была на `/campaigns` с деньгами.
+ */
+export interface AdGroupBidSummary {
+  readonly groups: number;
+  /** У скольких групп ставка задана. Остальные — на автостратегии площадки. */
+  readonly withBid: number;
+  /** `null` — ставка не задана ни у одной группы, а не «ставка ноль». */
+  readonly min: number | null;
+  readonly max: number | null;
+}
+
+export interface AdGroupsView extends ListWindow<AdGroupRow> {
+  readonly bids: AdGroupBidSummary;
+}
+
+export interface ChangeRow {
+  readonly id: string;
+  readonly appliedAt: string;
+  readonly campaignId: string | null;
+  readonly campaignName: string | null;
+  readonly entityType: string;
+  readonly entityId: string;
+  readonly action: string;
+  readonly prevValue: JsonSafe;
+  readonly newValue: JsonSafe;
+  readonly reason: string | null;
+  readonly actor: ChangeActor;
+  readonly approvedBy: string | null;
+  readonly provider: Provider | null;
+  readonly rolledBackAt: string | null;
+}
+
+export interface ApprovalRow {
+  readonly id: string;
+  readonly clientId: string;
+  readonly clientName: string;
+  readonly kind: ApprovalKind;
+  readonly summary: string | null;
+  readonly payload: JsonSafe;
+  readonly decision: ApprovalDecision;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly decidedAt: string | null;
+  readonly respondedBy: string | null;
+  readonly error: string | null;
+  /** BigInt — строкой: в number он потерял бы точность. */
+  readonly tgMessageId: string | null;
+}
+
+interface RawTotals {
+  readonly impressions: number;
+  readonly clicks: number;
+  readonly spend: number;
+  readonly conversions: number;
+}
+
+function totalsOf(raw: RawTotals, counts: ConversionSourceCounts = emptyCounts()): PeriodTotals {
+  return {
+    ...raw,
+    cpa: cpa(raw.spend, raw.conversions),
+    ctr: ctr(raw.clicks, raw.impressions),
+    attribution: summarizeAttribution(counts),
+  };
+}
+
+function addRaw(left: RawTotals, right: RawTotals): RawTotals {
+  return {
+    impressions: left.impressions + right.impressions,
+    clicks: left.clicks + right.clicks,
+    spend: left.spend + right.spend,
+    conversions: left.conversions + right.conversions,
+  };
+}
+
+const ZERO: RawTotals = { impressions: 0, clicks: 0, spend: 0, conversions: 0 };
+
+/**
+ * Суммы `CampaignStat` по кампаниям за период.
+ *
+ * `CampaignStat` полиморфна: без `entityType` в выборку попали бы строки групп
+ * и объявлений, у которых `entityId` из другой таблицы, но формально сравним.
+ *
+ * Группировка идёт ещё и по `conversionSource`: одна строка на кампанию скрыла
+ * бы, что часть дней окна посчитала Метрика, а часть — площадка, и суммарный
+ * CPA молча получился бы из двух несовместимых моделей атрибуции.
+ */
+async function campaignTotals(
+  campaignIds: readonly string[],
+  from: string,
+  to: string,
+): Promise<Map<string, PeriodTotals>> {
+  const result = new Map<string, PeriodTotals>();
+  if (campaignIds.length === 0) return result;
+
+  const accumulated = new Map<string, { totals: RawTotals; counts: ConversionSourceCounts }>();
+  for (const chunk of chunkIds(campaignIds)) {
+    const grouped = await getPrisma().campaignStat.groupBy({
+      by: ['entityId', 'conversionSource'],
+      where: {
+        entityType: StatEntityType.CAMPAIGN,
+        entityId: { in: [...chunk] },
+        date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
+      },
+      _sum: { impressions: true, clicks: true, spend: true, conversions: true },
+      _count: { _all: true },
+    });
+
+    for (const row of grouped) {
+      const previous = accumulated.get(row.entityId) ?? { totals: ZERO, counts: emptyCounts() };
+      const counts = emptyCounts();
+      counts[row.conversionSource] = row._count._all;
+
+      accumulated.set(row.entityId, {
+        totals: addRaw(previous.totals, {
+          impressions: row._sum.impressions ?? 0,
+          clicks: row._sum.clicks ?? 0,
+          // spend — Decimal: без явного преобразования сюда приехал бы объект.
+          spend: decimalToNumberOr(row._sum.spend, 0),
+          conversions: row._sum.conversions ?? 0,
+        }),
+        counts: addCounts(previous.counts, counts),
+      });
+    }
+  }
+
+  for (const [entityId, entry] of accumulated) {
+    result.set(entityId, totalsOf(entry.totals, entry.counts));
+  }
+  return result;
+}
+
+/**
+ * Итог за период по набору кампаний целиком.
+ *
+ * Суммирует Postgres: одна строка на источник конверсий на каждый чанк id,
+ * чанки складываются здесь. Список id передаётся явно, потому что
+ * `CampaignStat` полиморфна и внешнего ключа на `Campaign` у неё нет — join'а,
+ * который сделал бы фильтр кампаний частью агрегата, в схеме просто нет.
+ */
+async function periodTotals(
+  campaignIds: readonly string[],
+  from: string,
+  to: string,
+): Promise<PeriodTotals> {
+  if (campaignIds.length === 0) return totalsOf(ZERO);
+
+  let raw = ZERO;
+  let counts: ConversionSourceCounts = emptyCounts();
+  for (const chunk of chunkIds(campaignIds)) {
+    const grouped = await getPrisma().campaignStat.groupBy({
+      by: ['conversionSource'],
+      where: {
+        entityType: StatEntityType.CAMPAIGN,
+        entityId: { in: [...chunk] },
+        date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
+      },
+      _sum: { impressions: true, clicks: true, spend: true, conversions: true },
+      _count: { _all: true },
+    });
+
+    for (const row of grouped) {
+      raw = addRaw(raw, {
+        impressions: row._sum.impressions ?? 0,
+        clicks: row._sum.clicks ?? 0,
+        spend: decimalToNumberOr(row._sum.spend, 0),
+        conversions: row._sum.conversions ?? 0,
+      });
+      const one = emptyCounts();
+      one[row.conversionSource] = row._count._all;
+      counts = addCounts(counts, one);
+    }
+  }
+
+  return totalsOf(raw, counts);
+}
+
+function clientWhere(filters: DashboardFilters): Prisma.ClientWhereInput {
+  return {
+    status: filters.clientStatus ?? undefined,
+    ...(filters.provider ? { campaigns: { some: { provider: filters.provider } } } : {}),
+  };
+}
+
+function campaignWhere(filters: DashboardFilters): Prisma.CampaignWhereInput {
+  return {
+    provider: filters.provider ?? undefined,
+    status: filters.status ?? undefined,
+    clientId: filters.clientId ?? undefined,
+    ...(filters.clientStatus ? { client: { status: filters.clientStatus } } : {}),
+  };
+}
+
+/** Строки таблицы клиентов — до `ROW_LIMIT`. Размер набора — в `listClientsView`. */
+export async function listClients(filters: DashboardFilters): Promise<ClientRow[]> {
+  const clients = await getPrisma().client.findMany({
+    where: clientWhere(filters),
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      tgUsername: true,
+      // Из Credential берётся только провайдер: шифротекст и IV браузеру не нужны.
+      credentials: { select: { provider: true } },
+      campaigns: { select: { id: true, provider: true, status: true } },
+    },
+    orderBy: { name: 'asc' },
+    take: ROW_LIMIT,
+  });
+
+  const visible = clients.map((client) => ({
+    client,
+    campaigns: client.campaigns.filter(
+      (campaign) => filters.provider === null || campaign.provider === filters.provider,
+    ),
+  }));
+
+  const totals = await campaignTotals(
+    visible.flatMap((entry) => entry.campaigns.map((campaign) => campaign.id)),
+    filters.from,
+    filters.to,
+  );
+
+  return visible.map(({ client, campaigns }) => {
+    const channels = new Set<Provider>();
+    for (const credential of client.credentials) channels.add(credential.provider);
+    for (const campaign of client.campaigns) channels.add(campaign.provider);
+
+    // Смешение вылезает чаще всего именно здесь: у одной кампании клиента
+    // Метрика настроена, у соседней — нет, а в строке клиента они складываются.
+    const summed = campaigns.reduce<{ totals: RawTotals; counts: ConversionSourceCounts }>(
+      (accumulator, campaign) => {
+        const stat = totals.get(campaign.id);
+        if (!stat) return accumulator;
+        return {
+          totals: addRaw(accumulator.totals, stat),
+          counts: addCounts(accumulator.counts, stat.attribution.counts),
+        };
+      },
+      { totals: ZERO, counts: emptyCounts() },
+    );
+
+    return {
+      id: client.id,
+      name: client.name,
+      status: client.status,
+      tgUsername: client.tgUsername,
+      channels: [...channels].filter(
+        (provider) => filters.provider === null || provider === filters.provider,
+      ),
+      campaignCount: campaigns.length,
+      activeCampaignCount: campaigns.filter((campaign) => campaign.status === 'ACTIVE').length,
+      totals: totalsOf(summed.totals, summed.counts),
+    };
+  });
+}
+
+/**
+ * Строки таблицы кампаний — до `ROW_LIMIT`.
+ *
+ * Суммировать их нельзя: за потолком остаётся хвост, и сумма получилась бы
+ * итогом по обрезку. Для итогов за период есть `listCampaignsView`.
+ */
+export async function listCampaigns(filters: DashboardFilters): Promise<CampaignRow[]> {
+  const campaigns = await getPrisma().campaign.findMany({
+    where: campaignWhere(filters),
+    select: {
+      id: true,
+      name: true,
+      clientId: true,
+      provider: true,
+      status: true,
+      dailyBudget: true,
+      targetCpa: true,
+      client: { select: { name: true } },
+    },
+    orderBy: [{ client: { name: 'asc' } }, { name: 'asc' }],
+    take: ROW_LIMIT,
+  });
+
+  const totals = await campaignTotals(
+    campaigns.map((campaign) => campaign.id),
+    filters.from,
+    filters.to,
+  );
+
+  return campaigns.map((campaign) => ({
+    id: campaign.id,
+    name: campaign.name,
+    clientId: campaign.clientId,
+    clientName: campaign.client.name,
+    provider: campaign.provider,
+    status: campaign.status,
+    dailyBudget: decimalToNumberOr(campaign.dailyBudget, 0),
+    targetCpa: decimalToNumber(campaign.targetCpa),
+    totals: totals.get(campaign.id) ?? totalsOf(ZERO),
+  }));
+}
+
+export async function listClientsView(filters: DashboardFilters): Promise<ClientsView> {
+  const [rows, total] = await Promise.all([
+    listClients(filters),
+    getPrisma().client.count({ where: clientWhere(filters) }),
+  ]);
+
+  return { rows, total, limit: ROW_LIMIT, truncated: rows.length < total };
+}
+
+/**
+ * Страница кампаний целиком: обрезанный список и итог за период по всему набору.
+ *
+ * Плитки считаются не по `rows`: на 205 кампаниях свёртка обрезка показывала бы
+ * 2000 ₽ там, где `/clients` за тот же период показывает 2050 ₽. Две страницы за
+ * один период не имеют права показывать разные деньги.
+ *
+ * Id всего набора тянутся без потолка намеренно: агрегат собирается списком id
+ * (`STAT_ID_CHUNK`), а `JOIN` потребовал бы продублировать `campaignWhere` в
+ * сыром SQL — и первая же правка фильтров развела бы строки и итог. Цена
+ * известна и линейна: 32 000 кампаний — 780 КиБ id и 142 мс на всю страницу.
+ */
+export async function listCampaignsView(filters: DashboardFilters): Promise<CampaignsView> {
+  const [rows, matching] = await Promise.all([
+    listCampaigns(filters),
+    getPrisma().campaign.findMany({ where: campaignWhere(filters), select: { id: true } }),
+  ]);
+
+  const totals = await periodTotals(
+    matching.map((campaign) => campaign.id),
+    filters.from,
+    filters.to,
+  );
+
+  return {
+    rows,
+    total: matching.length,
+    limit: ROW_LIMIT,
+    truncated: rows.length < matching.length,
+    totals,
+  };
+}
+
+export async function getCampaign(id: string): Promise<CampaignDetail | null> {
+  const campaign = await getPrisma().campaign.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      name: true,
+      externalId: true,
+      clientId: true,
+      provider: true,
+      status: true,
+      dailyBudget: true,
+      targetCpa: true,
+      strategy: true,
+      handoverMode: true,
+      importedAt: true,
+      client: { select: { name: true } },
+      _count: { select: { adGroups: true } },
+    },
+  });
+  if (!campaign) return null;
+
+  return {
+    id: campaign.id,
+    name: campaign.name,
+    externalId: campaign.externalId,
+    clientId: campaign.clientId,
+    clientName: campaign.client.name,
+    provider: campaign.provider,
+    status: campaign.status,
+    dailyBudget: decimalToNumberOr(campaign.dailyBudget, 0),
+    targetCpa: decimalToNumber(campaign.targetCpa),
+    strategy: campaign.strategy,
+    handoverMode: campaign.handoverMode,
+    importedAt: campaign.importedAt?.toISOString() ?? null,
+    adGroupCount: campaign._count.adGroups,
+  };
+}
+
+/**
+ * Дневной ряд по кампании, без дыр в оси.
+ *
+ * Дни, которых нет в `CampaignStat`, добиваются нулями: площадка не присылает
+ * строку за день без показов, и разрыв в графике читался бы как «данные не
+ * загрузились». А вот CPA за такой день остаётся `null` — конверсий не было,
+ * и ноль рублей за конверсию был бы выдумкой.
+ */
+export async function getCampaignDaily(
+  campaignId: string,
+  from: string,
+  to: string,
+): Promise<DailyMetrics[]> {
+  const rows = await getPrisma().campaignStat.findMany({
+    where: {
+      entityType: StatEntityType.CAMPAIGN,
+      entityId: campaignId,
+      date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
+    },
+    select: {
+      date: true,
+      impressions: true,
+      clicks: true,
+      spend: true,
+      conversions: true,
+      conversionSource: true,
+    },
+    orderBy: { date: 'asc' },
+  });
+
+  const byDate = new Map(rows.map((row) => [dateColumnToYmd(row.date), row]));
+
+  return eachDay(from, to).map((date) => {
+    const row = byDate.get(date);
+    const spend = decimalToNumberOr(row?.spend, 0);
+    const conversions = row?.conversions ?? 0;
+    return {
+      date,
+      impressions: row?.impressions ?? 0,
+      clicks: row?.clicks ?? 0,
+      spend,
+      conversions,
+      cpa: cpa(spend, conversions),
+      conversionSource: row?.conversionSource ?? null,
+    };
+  });
+}
+
+function changeWhere(
+  filters: DashboardFilters,
+  options: { readonly campaignId?: string } = {},
+): Prisma.ChangeLogWhereInput {
+  return {
+    campaignId: options.campaignId ?? undefined,
+    provider: filters.provider ?? undefined,
+    // appliedAt — timestamp, поэтому границы московские, а не UTC-полночь.
+    appliedAt: { gte: mskDateToUtc(filters.from), lt: mskDateToUtc(shiftYmd(filters.to, 1)) },
+    ...(filters.clientId ? { campaign: { clientId: filters.clientId } } : {}),
+  };
+}
+
+/**
+ * Строки истории — до потолка выборки. Суммировать и пересчитывать по ним
+ * ничего нельзя: размер набора знает только `listChangesView`.
+ */
+export async function listChanges(
+  filters: DashboardFilters,
+  options: { readonly campaignId?: string; readonly limit?: number } = {},
+): Promise<ChangeRow[]> {
+  const changes = await getPrisma().changeLog.findMany({
+    where: changeWhere(filters, options),
+    select: {
+      id: true,
+      appliedAt: true,
+      campaignId: true,
+      entityType: true,
+      entityId: true,
+      action: true,
+      prevValue: true,
+      newValue: true,
+      reason: true,
+      actor: true,
+      approvedBy: true,
+      provider: true,
+      rolledBackAt: true,
+      campaign: { select: { name: true } },
+    },
+    orderBy: { appliedAt: 'desc' },
+    take: options.limit ?? ROW_LIMIT,
+  });
+
+  return changes.map((change) => ({
+    id: change.id,
+    appliedAt: change.appliedAt.toISOString(),
+    campaignId: change.campaignId,
+    campaignName: change.campaign?.name ?? null,
+    entityType: change.entityType,
+    entityId: change.entityId,
+    action: change.action,
+    prevValue: toJsonSafe(change.prevValue),
+    newValue: toJsonSafe(change.newValue),
+    reason: change.reason,
+    actor: change.actor,
+    approvedBy: change.approvedBy,
+    provider: change.provider,
+    rolledBackAt: change.rolledBackAt?.toISOString() ?? null,
+  }));
+}
+
+/**
+ * Режется ли выборка апрувов периодом.
+ *
+ * Очередь ждущих решения — состояние «сейчас», а не событие внутри окна: апрув,
+ * прождавший дольше периода, — ровно тот, о котором забыли, и прятать его
+ * нельзя. Принятые решения — наоборот, история, и период к ним применим.
+ */
+export function approvalsArePeriodBound(filters: DashboardFilters): boolean {
+  return (filters.decision ?? 'PENDING') !== 'PENDING';
+}
+
+function approvalWhere(filters: DashboardFilters): Prisma.PendingApprovalWhereInput {
+  return {
+    decision: filters.decision ?? 'PENDING',
+    clientId: filters.clientId ?? undefined,
+    ...(approvalsArePeriodBound(filters)
+      ? {
+          createdAt: {
+            gte: mskDateToUtc(filters.from),
+            lt: mskDateToUtc(shiftYmd(filters.to, 1)),
+          },
+        }
+      : {}),
+    ...(filters.clientStatus ? { client: { status: filters.clientStatus } } : {}),
+  };
+}
+
+export async function listApprovals(filters: DashboardFilters): Promise<ApprovalRow[]> {
+  const approvals = await getPrisma().pendingApproval.findMany({
+    where: approvalWhere(filters),
+    select: {
+      id: true,
+      clientId: true,
+      kind: true,
+      summary: true,
+      payload: true,
+      decision: true,
+      createdAt: true,
+      expiresAt: true,
+      decidedAt: true,
+      respondedBy: true,
+      error: true,
+      tgMessageId: true,
+      client: { select: { name: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: ROW_LIMIT,
+  });
+
+  return approvals.map((approval) => ({
+    id: approval.id,
+    clientId: approval.clientId,
+    clientName: approval.client.name,
+    kind: approval.kind,
+    summary: approval.summary,
+    payload: toJsonSafe(approval.payload),
+    decision: approval.decision,
+    createdAt: approval.createdAt.toISOString(),
+    expiresAt: approval.expiresAt.toISOString(),
+    decidedAt: approval.decidedAt?.toISOString() ?? null,
+    respondedBy: approval.respondedBy,
+    error: approval.error,
+    tgMessageId: bigIntToString(approval.tgMessageId),
+  }));
+}
+
+export async function listApprovalsView(filters: DashboardFilters): Promise<ApprovalsView> {
+  const periodApplies = approvalsArePeriodBound(filters);
+  const [rows, total, queueTotal] = await Promise.all([
+    listApprovals(filters),
+    getPrisma().pendingApproval.count({ where: approvalWhere(filters) }),
+    periodApplies ? null : countPendingApprovals(),
+  ]);
+
+  return {
+    rows,
+    total,
+    limit: ROW_LIMIT,
+    truncated: rows.length < total,
+    periodApplies,
+    queueTotal,
+  };
+}
+
+/**
+ * Страница истории изменений целиком: обрезанный список и размер набора.
+ *
+ * `/changes` — то место, куда человек идёт разбираться, что система сделала с
+ * кабинетом. Список без хвоста отвечает на этот вопрос неполно; молчащий об
+ * обрезке — ещё и не признаётся в этом.
+ */
+export async function listChangesView(
+  filters: DashboardFilters,
+  options: { readonly campaignId?: string; readonly limit?: number } = {},
+): Promise<ChangesView> {
+  const where = changeWhere(filters, options);
+  const [rows, total] = await Promise.all([
+    listChanges(filters, options),
+    getPrisma().changeLog.count({ where }),
+  ]);
+
+  return { rows, total, limit: options.limit ?? ROW_LIMIT, truncated: rows.length < total };
+}
+
+/**
+ * Группы объявлений кампании и сводка по их ставкам.
+ *
+ * `AdGroup.bid` — единственный рычаг управления ценой у VK: ключевых слов у
+ * канала нет вовсе, и то, что колонка не читалась ни одной страницей, означало,
+ * что главное число VK-кампании не видно нигде.
+ *
+ * Строки и сводка считают разные множества намеренно: строки режутся потолком
+ * витрины, сводка — нет. Поэтому `truncated` обязан быть виден на странице:
+ * «минимум 1 ₽, максимум 500 ₽» рядом со списком, где пятисот нет, без пометки
+ * об обрезке читается как ошибка витрины.
+ */
+export async function listAdGroupsView(
+  campaignId: string,
+  options: { readonly limit?: number } = {},
+): Promise<AdGroupsView> {
+  const limit = options.limit ?? ROW_LIMIT;
+  const [rows, aggregate] = await Promise.all([
+    getPrisma().adGroup.findMany({
+      where: { campaignId },
+      select: { id: true, externalId: true, name: true, status: true, bid: true },
+      orderBy: [{ name: 'asc' }, { externalId: 'asc' }],
+      take: limit,
+    }),
+    // `_count.bid` считает только непустые: это и есть «у скольких ставка задана».
+    getPrisma().adGroup.aggregate({
+      where: { campaignId },
+      _count: { _all: true, bid: true },
+      _min: { bid: true },
+      _max: { bid: true },
+    }),
+  ]);
+
+  const total = aggregate._count._all;
+
+  return {
+    rows: rows.map((group) => ({
+      id: group.id,
+      externalId: group.externalId,
+      name: group.name,
+      status: group.status,
+      bid: decimalToNumber(group.bid),
+    })),
+    total,
+    limit,
+    truncated: rows.length < total,
+    bids: {
+      groups: total,
+      withBid: aggregate._count.bid,
+      min: decimalToNumber(aggregate._min.bid),
+      max: decimalToNumber(aggregate._max.bid),
+    },
+  };
+}
+
+/**
+ * Счётчик у ссылки «Апрувы» в шапке: вся очередь ждущих решения.
+ *
+ * Фильтров интерфейса он не знает и знать не может — layout Next.js не получает
+ * `searchParams`. Периодом очередь и не режется (`approvalsArePeriodBound`), а
+ * вот фильтры по клиенту (`clientId`, `clientStatus`) на `/approvals` набор
+ * сужают: тогда это законно другое число, чем `total` страницы, и назвать оба
+ * обязана страница (`ApprovalsView.queueTotal`). Совпадение здесь не обещано.
+ */
+export async function countPendingApprovals(): Promise<number> {
+  return getPrisma().pendingApproval.count({ where: { decision: 'PENDING' } });
+}

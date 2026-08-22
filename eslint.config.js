@@ -6,7 +6,10 @@ import globals from 'globals';
 
 export default [
   {
-    ignores: ['dist/**', 'coverage/**', 'node_modules/**', '**/*.d.ts'],
+    // `**/.next/**` — сборка дашборда (пакет `web`). Flat-config не каскадный:
+    // конфиг внутри пакета корневой `eslint .` не увидит, а без этой строки
+    // линтер уходит проверять минифицированный вывод Next.
+    ignores: ['dist/**', 'coverage/**', 'node_modules/**', '**/.next/**', '**/*.d.ts'],
   },
   js.configs.recommended,
   {

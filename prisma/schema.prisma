@@ -49,6 +49,17 @@ enum AdGroupStatus {
   ARCHIVED
 }
 
+/// Отдельный enum, а не переиспользование AdGroupStatus: набор значений сейчас
+/// совпадает, но объявление — единственный уровень, у которого жизненный цикл
+/// уже соседствует с модерацией, и первое же расхождение (DRAFT до отправки в
+/// кабинет) иначе стало бы правкой статуса группы. Так же разведены ClientStatus
+/// и KeywordStatus при одинаковом наборе значений.
+enum AdStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
 enum AdFormat {
   TEXT
   IMAGE
@@ -77,6 +88,19 @@ enum KeywordStatus {
   ARCHIVED
 }
 
+/// Чьи конверсии лежат в строке. Без явного признака колонка молча смешивала
+/// две модели атрибуции: Метрика перезаписывала только отчитанные ей пары, а
+/// остальные оставались директовскими, и CPA соседних кампаний становился
+/// несопоставимым.
+enum ConversionSource {
+  /// Собственные конверсии рекламной площадки — Директа, VK, TikTok. Не «Яндекс
+  /// Директ»: значение пишется для всех каналов, и имя DIRECT читалось бы как
+  /// название площадки.
+  PLATFORM
+  METRIKA
+  NONE
+}
+
 enum StatEntityType {
   CAMPAIGN
   ADGROUP
@@ -92,6 +116,10 @@ enum ChangeActor {
 
 enum ApprovalKind {
   BUDGET_CHANGE
+  BID_CHANGE
+  CREATIVE_UPLOAD
+  NEGATIVE_KEYWORDS
+  RESUME_ENTITIES
   NEW_CAMPAIGN
   MASS_PAUSE
   STRATEGY_CHANGE
@@ -103,6 +131,9 @@ enum ApprovalDecision {
   APPROVED
   REJECTED
   EXPIRED
+  APPLYING
+  APPLIED
+  FAILED
 }
 
 // ============================================================================
@@ -110,19 +141,32 @@ enum ApprovalDecision {
 // ============================================================================
 
 model Client {
-  id          String       @id @default(cuid())
-  tgUserId    BigInt       @unique
-  tgUsername  String?
-  name        String
-  status      ClientStatus @default(ACTIVE)
-  industry    String?
-  timezone    String       @default("Europe/Moscow")
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
+  id                 String       @id @default(cuid())
+  tgUserId           BigInt       @unique
+  tgUsername         String?
+  name               String
+  status             ClientStatus @default(ACTIVE)
+  industry           String?
+  timezone           String       @default("Europe/Moscow")
+  /// Счётчик и цель Метрики. Не секрет, поэтому лежат тут, а не в Credential:
+  /// их заполняет онбординг и читает загрузка статистики.
+  metrikaCounterId   Int?
+  metrikaGoalId      Int?
+  metrikaAttribution String?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
 
   credentials      Credential[]
   campaigns        Campaign[]
   pendingApprovals PendingApproval[]
+  brief            ClientBrief?
+  creatives        Creative[]
+  aiRuns           AiRun[]
+  reports          Report[]
+  competitors      CompetitorSnapshot[]
+  leads            Lead[]
+  keywordSets      KeywordSet[]
+  errors           ErrorLog[]
 
   @@index([status])
 }
@@ -146,21 +190,21 @@ model Credential {
 }
 
 model Campaign {
-  id             String         @id @default(cuid())
-  clientId       String
-  externalId     String
-  provider       Provider
-  name           String
-  status         CampaignStatus @default(DRAFT)
-  dailyBudget    Decimal        @db.Decimal(12, 2)
-  strategy       String?
-  targetCpa      Decimal?       @db.Decimal(12, 2)
-  handoverMode   HandoverMode   @default(FULL)
-  importedAt     DateTime?
-  importSource   String?
-  baselineData   Json?
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  id           String         @id @default(cuid())
+  clientId     String
+  externalId   String
+  provider     Provider
+  name         String
+  status       CampaignStatus @default(DRAFT)
+  dailyBudget  Decimal        @db.Decimal(12, 2)
+  strategy     String?
+  targetCpa    Decimal?       @db.Decimal(12, 2)
+  handoverMode HandoverMode   @default(FULL)
+  importedAt   DateTime?
+  importSource String?
+  baselineData Json?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
 
   client     Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
   adGroups   AdGroup[]
@@ -176,34 +220,73 @@ model AdGroup {
   externalId String
   name       String
   status     AdGroupStatus @default(ACTIVE)
+  /// Ставка группы в рублях. Есть не у всех каналов: у Директа торг идёт по фразам
+  /// (`Keyword.bid`), а у VK ключевых слов нет вовсе — показы покупаются аудиториями,
+  /// и цена задаётся на группе (`max_price`). Без этой колонки применённая ставка VK
+  /// оставалась только в кабинете: `approval/local-state.ts` писал её в `Keyword`,
+  /// которых у VK ноль, и каждая карточка ставки заканчивалась «обновлено частично».
+  ///
+  /// NULL — не ноль, а «ручной ставки нет»: у автостратегии цену назначает площадка.
+  /// Отсюда же правило записи в `ingestion/entities.ts`: молчание кабинета (поля нет
+  /// в ответе) колонку не трогает, а явный null — обнуляет.
+  bid        Decimal?      @db.Decimal(12, 2)
   targetings Json?
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
-  campaign Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
-  ads      Ad[]
-  keywords Keyword[]
+  campaign      Campaign          @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  ads           Ad[]
+  keywords      Keyword[]
+  searchQueries SearchQueryStat[]
 
   @@unique([campaignId, externalId])
   @@index([status])
 }
 
 model Ad {
-  id                String           @id @default(cuid())
-  adGroupId         String
-  externalId        String
-  format            AdFormat
-  title             String
-  body              String
-  imageUrl          String?
-  videoUrl          String?
-  cta               String?
-  moderationStatus  ModerationStatus @default(PENDING)
-  moderationReason  String?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  id                    String           @id @default(cuid())
+  adGroupId             String
+  externalId            String
+  format                AdFormat
+  title                 String
+  body                  String
+  imageUrl              String?
+  videoUrl              String?
+  cta                   String?
+  /// Крутится ли объявление в кабинете. Это не то же самое, что moderationStatus:
+  /// одобренное модерацией объявление бывает выключено, а выключенное — отклонено.
+  /// Источник — листинг площадки (`Ad.State` у Директа, `banner.status` у VK), но
+  /// собственную паузу пишем сразу после успешной записи в кабинет
+  /// (`optimizer/local-state.ts`, `approval/local-state.ts`): иначе оптимизатор
+  /// считает от устаревшей строки и отправляет то же изменение ещё раз.
+  /// Читают поле отбор групп-кандидатов и сама оценка A/B (`creatives/scheduled.ts`,
+  /// `creatives/ab/experiment.ts`), правила оптимизатора (`optimizer/engine.ts` →
+  /// `optimizer/rules.ts`) и модерация (`moderation/`). Отчёты (`reporter/`) поле не
+  /// читают вовсе. ACTIVE по умолчанию — «статус неизвестен, считаем работающим»:
+  /// спрятать живое объявление из A/B дороже, чем лишний раз предложить его паузу.
+  status                AdStatus         @default(ACTIVE)
+  moderationStatus      ModerationStatus @default(PENDING)
+  moderationReason      String?
+  moderationRetries     Int              @default(0)
+  llmVariant            String?
+  /// Внешние id, которые эта строка оставила позади, меняя текст.
+  ///
+  /// У VK правка текста — это создание нового баннера с удалением старого, и когда
+  /// удаление не проходит, старый остаётся в листинге ничьим (`moderation/repair.ts`
+  /// переводит строку на новый id). Без пометки очередная загрузка завела бы под него
+  /// работающее объявление со своим счётчиком попыток. Список, а не одно значение:
+  /// строку переписывают до трёх раз подряд, и каждая неудавшаяся уборка оставляет в
+  /// кабинете ещё один такой баннер — помнить надо все.
+  ///
+  /// Читает `ingestion/entities.ts`. Раньше эта связь восстанавливалась перебором
+  /// `ChangeLog`: журнал — про историю, и выборка росла вместе со всем проектом.
+  supersededExternalIds String[]
+  creativeId            String?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
 
-  adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+  adGroup  AdGroup   @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+  creative Creative? @relation(fields: [creativeId], references: [id], onDelete: SetNull)
 
   @@unique([adGroupId, externalId])
   @@index([moderationStatus])
@@ -222,22 +305,28 @@ model Keyword {
 
   adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
 
+  @@unique([adGroupId, externalId])
+  /// Делает upsert атомарным. matchType в ключе намеренно: одна и та же фраза
+  /// может быть и ключом, и минус-словом — это не дубликат.
+  @@unique([adGroupId, matchType, phrase])
   @@index([adGroupId, status])
 }
 
 model CampaignStat {
-  id          BigInt         @id @default(autoincrement())
-  entityType  StatEntityType
-  entityId    String
-  date        DateTime       @db.Date
-  impressions Int            @default(0)
-  clicks      Int            @default(0)
-  spend       Decimal        @default(0) @db.Decimal(14, 4)
-  conversions Int            @default(0)
-  ctr         Decimal?       @db.Decimal(6, 4)
-  cpc         Decimal?       @db.Decimal(12, 4)
-  cpa         Decimal?       @db.Decimal(12, 4)
-  createdAt   DateTime       @default(now())
+  id               BigInt           @id @default(autoincrement())
+  entityType       StatEntityType
+  entityId         String
+  date             DateTime         @db.Date
+  impressions      Int              @default(0)
+  clicks           Int              @default(0)
+  spend            Decimal          @default(0) @db.Decimal(14, 4)
+  conversions      Int              @default(0)
+  ctr              Decimal?         @db.Decimal(6, 4)
+  cpc              Decimal?         @db.Decimal(12, 4)
+  cpa              Decimal?         @db.Decimal(12, 4)
+  /// Из какой модели атрибуции взято `conversions`.
+  conversionSource ConversionSource @default(PLATFORM)
+  createdAt        DateTime         @default(now())
 
   @@unique([entityType, entityId, date])
   @@index([entityId, date])
@@ -254,6 +343,9 @@ model ChangeLog {
   newValue     Json?
   reason       String?
   actor        ChangeActor
+  /// Telegram username подтвердившего. actor говорит «человек», это — «какой».
+  approvedBy   String?
+  provider     Provider?
   appliedAt    DateTime    @default(now())
   rolledBackAt DateTime?
 
@@ -264,15 +356,24 @@ model ChangeLog {
 }
 
 model PendingApproval {
-  id           String           @id @default(cuid())
-  clientId     String
-  kind         ApprovalKind
-  payload      Json
-  tgMessageId  BigInt?
-  expiresAt    DateTime
-  decision     ApprovalDecision @default(PENDING)
-  decidedAt    DateTime?
-  createdAt    DateTime         @default(now())
+  id          String           @id @default(cuid())
+  clientId    String
+  kind        ApprovalKind
+  payload     Json
+  /// Текст карточки в Telegram — то, на основании чего человек принял решение.
+  /// Хранится отдельно от payload, чтобы потом было видно, что именно ему показали.
+  summary     String?
+  /// Чат, куда ушла карточка. Сверяется при нажатии: пересланная карточка
+  /// не должна давать право одобрять чужую трату.
+  chatId      String?
+  tgMessageId BigInt?
+  expiresAt   DateTime
+  decision    ApprovalDecision @default(PENDING)
+  decidedAt   DateTime?
+  respondedBy String?
+  /// Ошибка применения при decision = FAILED.
+  error       String?
+  createdAt   DateTime         @default(now())
 
   client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
 
@@ -292,4 +393,222 @@ model AuditLog {
 
   @@index([actor, createdAt])
   @@index([resource, createdAt])
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum BriefStatus {
+  IN_PROGRESS
+  COMPLETE
+}
+
+enum CreativeKind {
+  TEXT
+  IMAGE
+  VIDEO
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  ESCALATED
+  LOST
+}
+
+enum ReportKind {
+  DAILY
+  WEEKLY
+}
+
+// ============================================================================
+// AI-слой
+// ============================================================================
+
+/// Результат AI-онбординга (TZ § 13.1). Источник правды для стратега и креативов.
+model ClientBrief {
+  id          String      @id @default(cuid())
+  clientId    String      @unique
+  status      BriefStatus @default(IN_PROGRESS)
+  data        Json
+  transcript  Json?
+  completedAt DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+}
+
+/// Журнал вызовов LLM: стоимость, латентность, воспроизводимость решений.
+model AiRun {
+  id        BigInt   @id @default(autoincrement())
+  clientId  String?
+  agent     String
+  model     String
+  input     Json
+  output    Json?
+  tokensIn  Int?
+  tokensOut Int?
+  costUsd   Decimal? @db.Decimal(12, 6)
+  latencyMs Int?
+  error     String?
+  createdAt DateTime @default(now())
+
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([clientId, agent, createdAt])
+  @@index([createdAt])
+}
+
+model Creative {
+  id        String       @id @default(cuid())
+  clientId  String
+  kind      CreativeKind
+  provider  String
+  prompt    String
+  payload   Json
+  costUsd   Decimal?     @db.Decimal(12, 6)
+  createdAt DateTime     @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  ads    Ad[]
+
+  @@index([clientId, kind, createdAt])
+}
+
+model Report {
+  id         String     @id @default(cuid())
+  clientId   String
+  kind       ReportKind
+  periodFrom DateTime   @db.Date
+  periodTo   DateTime   @db.Date
+  body       String
+  metrics    Json       @default("{}")
+  sentAt     DateTime?
+  createdAt  DateTime   @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, kind, periodFrom, periodTo])
+}
+
+/// Еженедельный срез по конкурентам (TZ § 13.7).
+model CompetitorSnapshot {
+  id        String    @id @default(cuid())
+  clientId  String
+  provider  Provider?
+  domain    String
+  data      Json
+  createdAt DateTime  @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, createdAt])
+}
+
+/// Лиды из лид-форм для AI-Follow-up (TZ § 13.9).
+model Lead {
+  id         String     @id @default(cuid())
+  clientId   String
+  provider   Provider
+  externalId String?
+  contact    Json
+  status     LeadStatus @default(NEW)
+  transcript Json       @default("[]")
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, status])
+}
+
+// ============================================================================
+// Семантика
+// ============================================================================
+
+model KeywordSet {
+  id        String   @id @default(cuid())
+  clientId  String
+  seed      String
+  phrases   Json
+  negatives Json     @default("[]")
+  createdAt DateTime @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, createdAt])
+}
+
+/// Поисковые запросы — сырьё для минус-слов (TZ § 3.4, задача wordstat-mine).
+/// Ключ по adGroupId, а не по кампании: правило 4 оптимизатора вешает
+/// минус-слово именно на группу, и агрегат по кампании потерял бы адрес.
+/// Сами минус-слова хранятся в Keyword с matchType: NEGATIVE.
+model SearchQueryStat {
+  id          BigInt   @id @default(autoincrement())
+  adGroupId   String
+  date        DateTime @db.Date
+  query       String
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  spend       Decimal  @default(0) @db.Decimal(14, 4)
+  conversions Int      @default(0)
+  negated     Boolean  @default(false)
+
+  adGroup AdGroup @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
+
+  @@unique([adGroupId, date, query])
+  @@index([adGroupId, negated])
+}
+
+// ============================================================================
+// Надёжность
+// ============================================================================
+
+model ErrorLog {
+  id        BigInt    @id @default(autoincrement())
+  clientId  String?
+  provider  Provider?
+  scope     String
+  code      String?
+  message   String
+  context   Json      @default("{}")
+  createdAt DateTime  @default(now())
+
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([provider, code, createdAt])
+}
+
+/// Защита от двойного применения при ретраях (TZ § 7).
+/// Форма согласована с src/optimizer/apply.ts: reserve = create, P2002
+/// трактуется как 'duplicate'; release = delete. Ключ детерминированный,
+/// вида opt:<campaignId>:<YYYY-MM-DD>:<entityType>:<entityId>:<action>[:phrase],
+/// поэтому повторный прогон в тот же день схлопывается.
+model IdempotencyKey {
+  key         String   @id
+  scope       String
+  entityType  String
+  entityId    String
+  changeLogId String?
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+
+  @@index([expiresAt])
+}
+
+/// Учёт баллов Яндекс Директа (TZ § 2.1) — чтобы не ловить error_code 52.
+model UnitsLedger {
+  id         BigInt   @id @default(autoincrement())
+  clientId   String
+  method     String
+  spent      Int
+  remaining  Int
+  dailyLimit Int
+  createdAt  DateTime @default(now())
+
+  @@index([clientId, createdAt])
 }

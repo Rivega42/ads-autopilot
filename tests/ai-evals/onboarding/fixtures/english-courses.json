@@ -1,0 +1,198 @@
+{
+  "id": "english-courses",
+  "description": "Кооперативный клиент из TZ §13.1: курсы английского для айтишников, бюджет на канал",
+  "promptVersion": "1.1.0",
+  "promptFingerprint": "dcebd26d024bf9f6",
+  "source": "handwritten",
+  "style": "дружелюбно, короткими фразами",
+  "persona": {
+    "продукт": "курсы английского для айтишников",
+    "аудитория": "разработчики 25-40 лет, доход от 150 000 ₽, Москва и Питер",
+    "гео": ["Москва", "Санкт-Петербург", "Екатеринбург"],
+    "минус-города": "нет",
+    "утп": ["преподаватели сами из IT", "занятия в 7 утра до работы", "разбираем рабочие созвоны"],
+    "конкуренты": ["Skyeng — skyeng.ru", "Englishdom — englishdom.com"],
+    "цель": "заявка на пробный урок с формы",
+    "лендинг": "https://it-english.ru/trial",
+    "целевой CPA": "2000 ₽",
+    "дневной бюджет": "5 тыщ в день на канал",
+    "метрика": "счётчик 12345678, цель «заявка с формы» id 44001"
+  },
+  "answers": [
+    "Курсы английского для айтишников",
+    "Разработчики 25-40 лет, доход от 150 тысяч, в основном Москва и Питер",
+    "Москва, Санкт-Петербург и Екатеринбург",
+    "Нет, таких нет",
+    "Преподаватели сами из IT, занятия в 7 утра до работы, разбираем рабочие созвоны",
+    "Skyeng и Englishdom, skyeng.ru и englishdom.com",
+    "Заявка на пробный урок с формы на сайте",
+    "https://it-english.ru/trial",
+    "2000 ₽",
+    "5 тыщ в день",
+    "На канал",
+    "Да, счётчик 12345678, цель заявка с формы — 44001"
+  ],
+  "recorded": [
+    {
+      "reply": "Привет! Я — AI-медиабайер. Задам 15-20 вопросов и запущу твою рекламу. Что продаём? Одним предложением.",
+      "asking": "product",
+      "updates": {},
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Классно. Кто твой клиент? Возраст, доход, где живёт?",
+      "asking": "audience",
+      "updates": {
+        "product": "Курсы английского для айтишников"
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Понял. По каким городам показываем?",
+      "asking": "geo",
+      "updates": {
+        "audience": {
+          "description": "Разработчики, доход от 150 000 ₽, Москва и Санкт-Петербург",
+          "ageFrom": 25,
+          "ageTo": 40,
+          "income": "от 150 000 ₽"
+        }
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Есть города, где показывать точно не надо?",
+      "asking": "negativeCities",
+      "updates": {
+        "geo": ["Москва", "Санкт-Петербург", "Екатеринбург"]
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Ок. Чем вы лучше Skyeng и других школ? 2-3 пункта.",
+      "asking": "usp",
+      "updates": {
+        "negativeCities": []
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Отлично. Кого считаешь основными конкурентами? Названия или сайты.",
+      "asking": "competitors",
+      "updates": {
+        "usp": [
+          "Преподаватели сами из IT",
+          "Занятия в 7 утра до работы",
+          "Разбираем рабочие созвоны"
+        ]
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Записал. Что считаем целевым действием — заявка, звонок, покупка?",
+      "asking": "conversionGoals",
+      "updates": {
+        "competitors": [
+          {
+            "name": "Skyeng",
+            "site": "https://skyeng.ru"
+          },
+          {
+            "name": "Englishdom",
+            "site": "https://englishdom.com"
+          }
+        ]
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Куда ведём трафик? Дай ссылку на страницу.",
+      "asking": "landingUrl",
+      "updates": {
+        "conversionGoals": [
+          {
+            "name": "заявка на пробный урок с формы"
+          }
+        ]
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Теперь про деньги. Сколько готов платить за одну заявку?",
+      "asking": "targetCpaRub",
+      "updates": {
+        "landingUrl": "https://it-english.ru/trial"
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Принял, 2000 ₽ за заявку. Какой дневной бюджет?",
+      "asking": "dailyBudgetRub",
+      "updates": {
+        "targetCpaRub": 2000
+      },
+      "evidence": {
+        "targetCpaRub": "2000 ₽"
+      },
+      "done": false
+    },
+    {
+      "reply": "5000 ₽ в сутки — это на каждый канал или общий на всю рекламу?",
+      "asking": "budgetScope",
+      "updates": {
+        "dailyBudgetRub": 5000
+      },
+      "evidence": {
+        "dailyBudgetRub": "5 тыщ в день"
+      },
+      "done": false
+    },
+    {
+      "reply": "Последнее: есть Яндекс.Метрика? Нужен номер счётчика и цель, которую считаем заявкой.",
+      "asking": "metrika",
+      "updates": {
+        "budgetScope": "per_channel"
+      },
+      "evidence": {},
+      "done": false
+    },
+    {
+      "reply": "Собрал бриф: курсы английского для айтишников, Москва/Питер/Екатеринбург, CPA 2000 ₽, 5000 ₽ в сутки на канал, цель — заявка на пробный урок, счётчик Метрики 12345678. Стартуем?",
+      "asking": null,
+      "updates": {
+        "metrika": {
+          "counterId": 12345678,
+          "goalId": 44001
+        }
+      },
+      "evidence": {
+        "metrika": "счётчик 12345678, цель заявка с формы — 44001"
+      },
+      "done": true
+    }
+  ],
+  "expect": {
+    "outcome": "complete",
+    "brief": {
+      "product": "Курсы английского для айтишников",
+      "targetCpaRub": 2000,
+      "dailyBudgetRub": 5000,
+      "budgetScope": "per_channel",
+      "negativeCities": [],
+      "metrika": {
+        "counterId": 12345678,
+        "goalId": 44001
+      }
+    },
+    "maxTurns": 20
+  }
+}

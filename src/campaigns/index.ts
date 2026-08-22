@@ -1,0 +1,139 @@
+/**
+ * Публичный фасад модуля кампаний (пункт приёмки ТЗ §9.1: «по команде „запусти“
+ * кампания создаётся в песочнице Яндекс Директа через API»).
+ *
+ * Путь целиком: `ClientBrief` → `planCampaigns` → карточка апрува
+ * (`submitCampaignPlan`) → нажатие человека → `applyPlan` → `Campaigns.add`.
+ *
+ * Наружу торчат ровно эти четыре шага; всё остальное — детали реализации.
+ */
+export {
+  planCampaigns,
+  planBudgets,
+  startingBid,
+  biddingStrategyFor,
+  EmptyPlanError,
+  IncompleteBriefError,
+  STRUCTURE_AGENT,
+  TEXTS_AGENT,
+  type CampaignBudget,
+  type PlanCampaignsOptions,
+  type PlannerStore,
+  type RunStructureAgent,
+  type RunTextsAgent,
+} from '@/campaigns/planner.js';
+
+export {
+  applyPlan,
+  applyLoadedPlan,
+  campaignWriters,
+  describeCampaign,
+  type ApplyPlanDeps,
+  type ApplyPlanOptions,
+  type ApplyStore,
+  type BuildChannelContext,
+  type CampaignApplyResult,
+  type CampaignApplyStatus,
+  type PlanApplyResult,
+} from '@/campaigns/apply.js';
+
+export {
+  registerCampaignApprovalExecutor,
+  submitCampaignPlan,
+  executeCreateCampaign,
+  type SubmitCampaignPlanOptions,
+} from '@/campaigns/approval.js';
+
+// Вход человека («запусти») и его формулировки. Лежат здесь, а не в боте: про
+// Telegram они не знают ничего, а зовут их и бот, и CLI.
+export {
+  checkCampaignEntry,
+  launchCampaign,
+  type CampaignEntryBlock,
+  type CampaignEntryCheck,
+  type CampaignEntryOptions,
+  type CampaignEntryReady,
+  type CampaignEntryStore,
+  type CampaignLaunchOptions,
+  type CampaignLaunchOutcome,
+  type LiveApproval,
+  type ReusablePlan,
+} from '@/campaigns/entry.js';
+
+export {
+  campaignSlot,
+  createAddresses,
+  createdCampaigns,
+  type CreateAddressFor,
+  type CreatedCampaign,
+  type CreatedStore,
+} from '@/campaigns/created.js';
+
+export {
+  renderEntryBlock,
+  renderPlanSummary,
+  renderReadiness,
+  type PlanSummaryOptions,
+} from '@/campaigns/entry-text.js';
+
+export {
+  loadPlan,
+  savePlan,
+  CAMPAIGN_PLAN_PROVIDER,
+  PlanCorruptedError,
+  PlanNotFoundError,
+  type PlanStore,
+} from '@/campaigns/store.js';
+
+export {
+  campaignPlanSchema,
+  readPlanRef,
+  type CampaignPlacement,
+  type CampaignPlan,
+  type CampaignPlanRef,
+  type PlannedAd,
+  type PlannedAdGroup,
+  type PlannedCampaign,
+} from '@/campaigns/plan.schema.js';
+
+export {
+  campaignCreateKey,
+  createInMemoryCampaignIdempotency,
+  createPrismaCampaignIdempotency,
+  CAMPAIGN_CREATE_SCOPE,
+  CAMPAIGN_KEY_NEVER_EXPIRES_AT,
+  type CampaignIdempotency,
+  type Reservation,
+} from '@/campaigns/idempotency.js';
+
+export {
+  YandexCampaignWriter,
+  yandexCampaignWriter,
+  type YandexCampaignWriterOptions,
+} from '@/campaigns/yandex-writer.js';
+
+export {
+  createOutcomeOf,
+  markCreateOutcome,
+  type AdCreateSpec,
+  type AdGroupCreateSpec,
+  type CampaignCreateSpec,
+  type CampaignWriter,
+  type CreateOutcome,
+  type CreatedEntity,
+  type CreatedNamedEntity,
+  type KeywordCreateSpec,
+} from '@/campaigns/writer.js';
+
+export {
+  fitAdText,
+  findAdTextViolations,
+  truncateToLimit,
+  isValidKeyword,
+  DIRECT_MIN_DAILY_BUDGET_RUB,
+  DIRECT_TEXT_MAX,
+  DIRECT_TITLE2_MAX,
+  DIRECT_TITLE_MAX,
+} from '@/campaigns/limits.js';
+
+export { splitBudget, totalDailyBudget, type BudgetSplit } from '@/campaigns/budget.js';

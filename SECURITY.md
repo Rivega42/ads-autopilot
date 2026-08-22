@@ -9,10 +9,12 @@
 **НЕ создавай публичный GitHub Issue** для уязвимостей.
 
 Напиши напрямую:
+
 - **Email:** roman.v.gudkov@gmail.com
 - **Telegram:** [@Rivega42](https://t.me/Rivega42)
 
 Включи в отчёт:
+
 1. Описание уязвимости
 2. Шаги воспроизведения (proof of concept, если возможно)
 3. Возможное влияние (impact)

@@ -4,9 +4,12 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    setupFiles: ['dotenv/config'],
+    setupFiles: ['./vitest.setup.ts'],
     fileParallelism: false,
-    include: ['src/**/*.test.ts', 'src/**/__tests__/**/*.test.ts'],
+    // tests/ai-evals — eval-наборы AI-агентов (CLAUDE.md §8). По умолчанию они
+    // гоняются на записанных фикстурах, без сети и ключей, поэтому им место в
+    // обычном прогоне: иначе CI не увидит регрессию.
+    include: ['src/**/*.test.ts', 'src/**/__tests__/**/*.test.ts', 'tests/**/*.test.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov', 'html'],

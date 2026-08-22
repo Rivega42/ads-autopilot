@@ -17,6 +17,14 @@ export const logger = pino({
       '*.token',
       '*.apiKey',
       '*.password',
+      // Контакты аудиторий VK. В сеть они уходят только SHA-256-хешами, но в
+      // лог могут попасть до хеширования — из валидации или из контекста ошибки.
+      'email',
+      'phone',
+      'contacts',
+      '*.email',
+      '*.phone',
+      '*.contacts',
     ],
     censor: '[Redacted]',
   },

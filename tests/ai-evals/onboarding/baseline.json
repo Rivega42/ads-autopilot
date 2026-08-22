@@ -1,0 +1,12 @@
+{
+  "promptVersion": "1.1.0",
+  "promptFingerprint": "dcebd26d024bf9f6",
+  "source": "offline-replay",
+  "recordedAt": "2026-08-17T06:10:38.818Z",
+  "cases": {
+    "dentistry-spb": 1,
+    "english-courses": 1,
+    "evasive-cpa": 1
+  },
+  "aggregate": 1
+}
