@@ -322,3 +322,42 @@ describe('reads', () => {
     ).rejects.toThrow(/credentials are missing or malformed/);
   });
 });
+
+describe('пообъектный отказ Директа', () => {
+  /** Ответ вида «HTTP 200, а внутри отказ по каждому объекту». */
+  const rejection = {
+    data: {
+      result: {
+        UpdateResults: [{ Errors: [{ Code: 8000, Message: 'Ad text is too long' }] }],
+      },
+    },
+  };
+
+  it('переписывание текста не считается успешным, когда площадка его отклонила', async () => {
+    const transport = transportOf([rejection]);
+
+    // Раньше здесь возвращалось applied: true, и модерация записывала объявление
+    // переписанным: новый текст, потраченная попытка, запись в журнале — при том
+    // что в кабинете оставался старый текст и отказ модерации.
+    await expect(
+      adapterOf(transport).updateAdText(ctxOf(false), '5', { title: 'T', text: 'X' }),
+    ).rejects.toMatchObject({ code: 'YANDEX_WRITE_REJECTED' });
+  });
+
+  it('частичный успех остаётся успехом: часть изменений в кабинете уже есть', async () => {
+    const partial = {
+      data: {
+        result: {
+          UpdateResults: [{ Id: 5 }, { Errors: [{ Code: 8000, Message: 'nope' }] }],
+        },
+      },
+    };
+    const res = await adapterOf(transportOf([partial])).setBids(ctxOf(false), [
+      { keywordExternalId: '5', bid: 100 },
+      { keywordExternalId: '6', bid: 200 },
+    ]);
+
+    expect(res.applied).toBe(true);
+    expect((res.result as { failed: unknown[] }).failed).toHaveLength(1);
+  });
+});

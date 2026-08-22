@@ -117,10 +117,36 @@ function toIds(externalIds: readonly string[]): number[] {
 }
 
 /** Единая форма ответа write-метода: применено или только спланировано. */
+/**
+ * Итог записи в кабинет.
+ *
+ * Пообъектная ошибка Директа — это не исключение транспорта: HTTP отдаёт 200, а
+ * отказ лежит внутри, в `UpdateResults`. Пока `applied` возвращал `true` не глядя,
+ * отказ по единственному объекту читался вызывающим как успех: модерация,
+ * например, записывала объявление переписанным — новый текст, потраченная попытка,
+ * запись в журнале, новый отпечаток варианта, — тогда как в кабинете оставался
+ * старый текст. Через три таких цикла человек получал разбор текстов, которых
+ * площадка никогда не видела.
+ *
+ * Поэтому: ни одного успешного объекта при непустых отказах — это провал, и он
+ * обязан быть исключением. Частичный успех остаётся `applied: true`: три из пяти
+ * изменений в кабинете уже есть, и сказать «не применено» было бы неправдой хуже
+ * прежней — отказавшиеся видны в `result`.
+ *
+ * Так же устроен VK (`writeResultOf` в его адаптере) — поведение каналов должно
+ * совпадать, иначе вызывающий обязан помнить, у кого какая семантика.
+ */
 function applied(
   plan: Record<string, unknown>,
   summary: ActionSummary,
 ): WriteResult<ActionSummary> {
+  if (summary.succeeded.length === 0 && summary.failed.length > 0) {
+    throw new ChannelError(YANDEX_CHANNEL, 'Yandex Direct rejected every object of the write', {
+      code: 'YANDEX_WRITE_REJECTED',
+      retryable: false,
+      context: { plan, failed: summary.failed },
+    });
+  }
   return { applied: true, plan, result: summary };
 }
 
