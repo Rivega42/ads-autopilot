@@ -39,6 +39,34 @@ const boolish = (def: boolean) =>
       return z.NEVER;
     });
 
+/**
+ * Мастер-ключ шифрования кред: строго 32 байта в base64.
+ *
+ * Проверяем здесь, а не при первом обращении к кредам: ленивая проверка означает, что
+ * процесс поднимается зелёным, проходит health-check и падает через час внутри
+ * воркера. Плохой ключ обязан ронять старт.
+ *
+ * Round-trip нужен потому, что декодер Node молча выбрасывает недопустимые
+ * символы: человеческая парольная фраза из 44 знаков превращается в 32 байта и
+ * проходит проверку длины, хотя энтропии в ней далеко не 256 бит.
+ */
+function assertEncryptionKey(value: string, ctx: z.RefinementCtx): void {
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.toString('base64') !== value) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'должен быть корректным base64 (сгенерировать: openssl rand -base64 32)',
+    });
+    return;
+  }
+  if (decoded.byteLength !== 32) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `ожидается 32 байта, получено ${decoded.byteLength}`,
+    });
+  }
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -49,10 +77,12 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().default('redis://localhost:6379'),
 
-  CREDENTIALS_ENCRYPTION_KEY: z
-    .string()
-    .min(44)
-    .default('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='),
+  // Значения по умолчанию здесь нет и быть не может. Раньше стояло
+  // `.default('AAAA…=')` — 32 нулевых байта, — и без переменной система молча
+  // шифровала токены всех кабинетов ключом, лежащим в открытых исходниках:
+  // дамп базы плюс публичный репозиторий давали доступ ко всем кабинетам всех
+  // клиентов. Отсутствие ключа обязано ронять запуск, а не подставлять «какой-то».
+  CREDENTIALS_ENCRYPTION_KEY: z.string().superRefine(assertEncryptionKey),
 
   // ── Предохранители. DRY_RUN по умолчанию true: выключать защиту нужно
   // осознанно, а не забыть включить.

@@ -7,7 +7,13 @@ process.env.NODE_ENV ??= 'test';
 process.env.LOG_LEVEL ??= 'silent';
 process.env.DATABASE_URL ??= 'postgresql://test:test@localhost:5432/test';
 process.env.REDIS_URL ??= 'redis://localhost:6379';
-process.env.CREDENTIALS_ENCRYPTION_KEY ??= 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+// Ключ тестов намеренно не нулевой: пока в коде лежал дефолт из 32 нулей, его
+// скопировали в реальный `.env`, и всё, что там зашифровано, оказалось открыто
+// любому, у кого есть исходники. Значение должно выглядеть как ключ, а не как
+// заглушка, которую не стыдно унести в прод.
+process.env.CREDENTIALS_ENCRYPTION_KEY ??= Buffer.from('vitest-only-key-'.repeat(2)).toString(
+  'base64',
+);
 
 // Предохранитель обязан быть включён в тестах: случайный реальный вызов
 // площадки из теста стоил бы денег клиента.
