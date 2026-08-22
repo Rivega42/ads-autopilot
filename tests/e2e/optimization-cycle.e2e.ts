@@ -10,12 +10,25 @@ import {
   seedDriftAccount,
   type DriftFixture,
 } from './support/optimizer-drift-seed.js';
+import {
+  createVkBidCabinet,
+  seedVkBidAccount,
+  VK_BID_APP,
+  VK_BID_DAYS,
+  VK_BID_IDS,
+  VK_BID_RULE_STEP,
+  VK_BID_START,
+  vkBidRunAt,
+  type VkBidFixture,
+} from './support/optimizer-vk-seed.js';
 import { runAt, seedAccount, type Fixture } from './support/seed.js';
 import { createTelegramMock, type TelegramMock } from './support/telegram-mock.js';
+import { createVkApiMock, type VkApiMock } from './support/vk-api-mock.js';
 import { createYandexApiMock, type YandexApiMock } from './support/yandex-api-mock.js';
 
 import { applyApproval, setMessenger } from '@/approval/index.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
+import { clearVkTokenCache } from '@/clients/vk-ads/auth.js';
 import { resetYandexRuntimeState } from '@/clients/yandex-direct/http.js';
 import { prisma } from '@/db/prisma.js';
 import {
@@ -456,5 +469,120 @@ describe('ставка за неделю', () => {
     expect(DRIFT_RULE_STEP).toBeLessThan(DEFAULT_GUARDRAILS.maxBidChangePct);
 
     expect(await prisma.errorLog.count()).toBe(0);
+  });
+});
+
+/**
+ * Ставка на уровне группы объявлений.
+ *
+ * У VK ключевых фраз нет вовсе: показы покупаются аудиториями, цена задаётся на
+ * группе. Колонка `AdGroup.bid` появилась раньше правил, загрузка её читала,
+ * применение умело её писать — а решений на этот уровень не приходило ни одного,
+ * то есть управлять ставками VK было нечем.
+ *
+ * Проверяется весь путь и трое суток подряд: решение по группе, запись в кабинет
+ * (`max_price`), запись в журнал под своим типом сущности, отражение в нашей строке
+ * и — главное — что оконный предохранитель находит точку отсчёта и для группы.
+ * Без последнего −15% в сутки уводили бы ставку на −39% за трое суток, ни разу не
+ * нарушив лимита в 30%: ровно тот дефект, который у фраз уже чинили.
+ */
+describe('ставка группы объявлений в VK', () => {
+  let fixture: VkBidFixture;
+  let vk: VkApiMock;
+  let vkTelegram: TelegramMock;
+
+  const bidPatches = (): unknown[] =>
+    vk.callsTo('ad_groups/mass_action.json').map((call) => call.body);
+
+  beforeAll(async () => {
+    await resetDatabase();
+    clearVkTokenCache();
+    bootstrapChannels();
+
+    vk = createVkApiMock({ app: VK_BID_APP, cabinet: createVkBidCabinet() });
+    // 'error' обязателен: без него незамоканный запрос ушёл бы в настоящий ads.vk.ru.
+    vk.server.listen({ onUnhandledRequest: 'error' });
+
+    vkTelegram = createTelegramMock();
+    setMessenger(vkTelegram);
+
+    fixture = await seedVkBidAccount();
+  });
+
+  afterAll(async () => {
+    vk?.server.close();
+    setMessenger(null);
+    clearVkTokenCache();
+    await prisma.$disconnect();
+  });
+
+  it('трое суток подряд двигают ставку группы и упираются в лимит окна', async () => {
+    const summaries: ScheduledOptimizationSummary[] = [];
+    for (let day = 0; day < VK_BID_DAYS; day += 1) {
+      summaries.push(await runScheduledOptimization({ dryRun: false, now: vkBidRunAt(day) }));
+    }
+
+    // Первые двое суток шаг помещается в остаток лимита целиком, третьи — только
+    // частично (потому и clamped). Режим FULL и шаг в 15% — ниже порога апрува в 20%:
+    // человека не зовут, решение применяется само.
+    expect(summaries.map((s) => s.autoApply)).toEqual([1, 1, 1]);
+    expect(summaries.map((s) => s.clamped)).toEqual([0, 0, 1]);
+    expect(summaries.every((s) => s.failed === 0 && s.applyFailed === 0)).toBe(true);
+    expect(summaries.every((s) => s.approvals === 0 && s.localStateFailed === 0)).toBe(true);
+    expect(VK_BID_RULE_STEP).toBeLessThan(DEFAULT_GUARDRAILS.maxBidChangePct);
+
+    // Журнал: решение адресовано группе и лежит под её типом сущности — именно по
+    // этой паре его завтра ищет точка отсчёта окна.
+    const rows = await prisma.changeLog.findMany({
+      orderBy: [{ appliedAt: 'asc' }, { id: 'asc' }],
+    });
+    expect(rows.map((r) => [r.entityType, r.action])).toEqual([
+      ['ADGROUP', 'BID_DECREASE'],
+      ['ADGROUP', 'BID_DECREASE'],
+      ['ADGROUP', 'BID_DECREASE'],
+    ]);
+    expect(rows.every((r) => r.entityId === fixture.adGroupId && r.actor === 'AI')).toBe(true);
+    expect(rows.map((r) => (r.newValue as { amount: number }).amount)).toEqual([170, 144.5, 140]);
+
+    // Кабинет увидел ровно то же самое: ставка группы — это `max_price`.
+    // Число, а не строка: `toVkMoney` квантует до копеек и отдаёт число намеренно.
+    expect(bidPatches()).toEqual([
+      [{ id: VK_BID_IDS.group, max_price: 170 }],
+      [{ id: VK_BID_IDS.group, max_price: 144.5 }],
+      [{ id: VK_BID_IDS.group, max_price: 140 }],
+    ]);
+    // Кабинет хранит деньги строкой — так их отдаёт и настоящий VK.
+    expect(vk.adGroupById(VK_BID_IDS.group)?.max_price).toBe('140.00');
+
+    // Наша строка приведена к кабинету — иначе завтрашний прогон считал бы от
+    // прежней ставки и отправил бы то же изменение заново.
+    const group = await prisma.adGroup.findUniqueOrThrow({ where: { id: fixture.adGroupId } });
+    expect(Number(group.bid)).toBe(140);
+
+    // Ровно предохранитель, а не «примерно»: за окно ставка ушла на 30%, а не на 39%,
+    // как уходила бы тремя шагами по 15% без точки отсчёта.
+    const drop = 1 - Number(group.bid) / VK_BID_START;
+    expect(drop).toBeCloseTo(DEFAULT_GUARDRAILS.maxBidChangePct, 10);
+    expect(await prisma.errorLog.count()).toBe(0);
+  });
+
+  it('четвёртые сутки не двигают ставку вовсе: лимит окна исчерпан', async () => {
+    const writesBefore = bidPatches().length;
+
+    const summary = await runScheduledOptimization({ dryRun: false, now: vkBidRunAt(VK_BID_DAYS) });
+
+    // Правило просит своё снижение каждые сутки — предохранитель обязан держать
+    // оборону постоянно, а не «успокоить» источник решений.
+    expect(summary).toMatchObject({ autoApply: 0, rejected: 1, clamped: 0, failed: 0 });
+    expect(bidPatches()).toHaveLength(writesBefore);
+    expect(await prisma.changeLog.count()).toBe(VK_BID_DAYS);
+  });
+
+  it('фразам VK ставку не предлагают: их у канала нет', async () => {
+    // Проверка по состоянию базы, а не по аналогии с Директом: у VK ноль строк
+    // `Keyword`, и решение уровня фразы применить было бы нечем.
+    expect(await prisma.keyword.count()).toBe(0);
+    const rows = await prisma.changeLog.findMany({ where: { entityType: 'KEYWORD' } });
+    expect(rows).toEqual([]);
   });
 });

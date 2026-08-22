@@ -78,9 +78,13 @@ function patchFor(decision: Decision): Patch | null {
     case 'status':
       return { column: 'status', status: next.status };
     case 'bid':
-      // Ставка есть только у фразы: у остальных уровней колонки нет, и запись
-      // «куда-нибудь» превратилась бы в тихую порчу данных.
-      return decision.entityType === 'KEYWORD' ? { column: 'bid', bid: next.amount } : null;
+      // Ставка живёт на том уровне, на котором ею торгует канал: у Директа это
+      // фраза, у VK — группа (`AdGroup.bid` ← `max_price`). Уровень выбран ещё в
+      // движке (`bidLevelOf`), сюда решение приходит уже адресованным; у остальных
+      // уровней колонки нет, и запись «куда-нибудь» была бы тихой порчей данных.
+      return decision.entityType === 'KEYWORD' || decision.entityType === 'ADGROUP'
+        ? { column: 'bid', bid: next.amount }
+        : null;
     case 'budget':
       return decision.entityType === 'CAMPAIGN'
         ? { column: 'dailyBudget', dailyBudget: next.amount }
@@ -110,10 +114,12 @@ async function applyPatch(
 ): Promise<number> {
   const where = { id: { in: ids } };
 
-  // Ставка и бюджет уже привязаны к своему уровню в `patchFor`, поэтому здесь
-  // ветвление по entityType нужно только статусу — он есть у всех четырёх.
+  // Бюджет привязан к своему уровню в `patchFor`, а ставка бывает на двух: пишем
+  // ровно в ту таблицу, которую решение адресовало.
   if (patch.column === 'bid') {
-    return (await prisma.keyword.updateMany({ where, data: { bid: patch.bid } })).count;
+    return entityType === 'ADGROUP'
+      ? (await prisma.adGroup.updateMany({ where, data: { bid: patch.bid } })).count
+      : (await prisma.keyword.updateMany({ where, data: { bid: patch.bid } })).count;
   }
   if (patch.column === 'dailyBudget') {
     return (await prisma.campaign.updateMany({ where, data: { dailyBudget: patch.dailyBudget } }))

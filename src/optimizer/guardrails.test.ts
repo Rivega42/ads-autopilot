@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { bidHistoryKey, noBidHistory, type BidHistory } from './bid-history.js';
 import {
@@ -514,9 +514,11 @@ describe('property: no rule output escapes the guardrails', () => {
     targets: OptimizationTargets;
   } {
     const entityCount = 1 + Math.floor(random() * 6);
+    // Группы объявлений здесь наравне с фразами: у VK ставка живёт на них, и
+    // предохранитель обязан ловить её тем же коридором, а не только уровень фраз.
     const entities: EntityMetrics[] = Array.from({ length: entityCount }, (_unused, index) => ({
-      entityType: random() < 0.75 ? 'KEYWORD' : 'AD',
-      entityId: `kw-${index}`,
+      entityType: entityTypeOf(random()),
+      entityId: `e-${index}`,
       label: null,
       impressions: Math.floor(random() * 3000),
       clicks: Math.floor(random() * 300),
@@ -551,14 +553,20 @@ describe('property: no rule output escapes the guardrails', () => {
         dailyBudget,
         dailySpend: Math.round(random() * dailyBudget * 100) / 100,
         handoverMode: 'FULL',
+        bidLevel: random() < 0.5 ? 'ADGROUP' : 'KEYWORD',
       },
     };
+  }
+
+  function entityTypeOf(draw: number): EntityMetrics['entityType'] {
+    if (draw < 0.55) return 'KEYWORD';
+    return draw < 0.8 ? 'ADGROUP' : 'AD';
   }
 
   it('holds over 500 pseudo-random accounts', () => {
     const random = createRandom(20260808);
     const settings = config();
-    const seen = { proposed: 0, allowed: 0, clamped: 0, rejected: 0 };
+    const seen = { proposed: 0, allowed: 0, clamped: 0, rejected: 0, groupBids: 0 };
 
     for (let iteration = 0; iteration < 500; iteration += 1) {
       const scenario = buildCase(random);
@@ -606,6 +614,9 @@ describe('property: no rule output escapes the guardrails', () => {
       );
 
       seen.proposed += decisions.length;
+      seen.groupBids += outcome.allowed.filter(
+        (allowed) => allowed.entityType === 'ADGROUP' && allowed.nextValue.kind === 'bid',
+      ).length;
       seen.allowed += outcome.allowed.length;
       seen.clamped += outcome.clamped.length;
       seen.rejected += outcome.rejected.length;
@@ -655,5 +666,51 @@ describe('property: no rule output escapes the guardrails', () => {
     expect(seen.proposed).toBeGreaterThan(100);
     expect(seen.allowed).toBeGreaterThan(0);
     expect(seen.rejected).toBeGreaterThan(0);
+    // Уровень группы обязан быть не только сгенерирован, но и пройден насквозь:
+    // иначе расширение свойства проверяло бы ровно то же, что и раньше.
+    expect(seen.groupBids).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Потолок дневного бюджета — вторая переменная того же класса, что и
+ * `MAX_BID_CHANGE_PCT`: `DAILY_BUDGET_HARD_LIMIT_MULT` объявлена в `.env.example`,
+ * а `budgetCeilingRatio` хранил ту же цифру отдельно. Тест смотрит на сумму в
+ * решении, вышедшем из `applyGuardrails`, — единственной точки, через которую
+ * проходит любое изменение.
+ */
+describe('потолок бюджета из окружения', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  const budgetDecision = decision({
+    action: 'BUDGET_CHANGE',
+    entityType: 'CAMPAIGN',
+    entityId: 'c-1',
+    prevValue: { kind: 'budget', amount: 5000 },
+    nextValue: { kind: 'budget', amount: 20000 },
+  });
+  const budgetContext = context({}, [['CAMPAIGN:c-1', { impressions: 1000, days: 7 }]]);
+
+  it('DAILY_BUDGET_HARD_LIMIT_MULT задаёт потолок, до которого урезан бюджет', async () => {
+    vi.stubEnv('DAILY_BUDGET_HARD_LIMIT_MULT', '1.05');
+    vi.resetModules();
+    const fresh = await import('./guardrails.js');
+
+    const outcome = fresh.applyGuardrails([budgetDecision], budgetContext);
+
+    expect(outcome.allowed[0]?.nextValue).toEqual({ kind: 'budget', amount: 5250 });
+    expect(outcome.clamped[0]?.rail).toBe('BUDGET_CEILING');
+  });
+
+  it('без переменной потолок остаётся прежним', async () => {
+    vi.resetModules();
+    const fresh = await import('./guardrails.js');
+
+    const outcome = fresh.applyGuardrails([budgetDecision], budgetContext);
+
+    expect(outcome.allowed[0]?.nextValue).toEqual({ kind: 'budget', amount: 6000 });
   });
 });

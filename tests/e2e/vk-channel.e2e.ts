@@ -208,13 +208,16 @@ describe('канал VK: кабинет → база → решения → ка
     expect(summary).toMatchObject({
       campaigns: 1,
       autoApply: 0,
-      plannedOnly: 1,
+      // Пауза проигравшего баннера и подъём ставки группы: с появлением правил на
+      // уровне группы у VK стало чем управлять, и решений теперь два, а не одно.
+      plannedOnly: 2,
       noop: 0,
       applyFailed: 0,
       // Кампания заведена загрузкой, режим по умолчанию FULL — человека не зовём.
       approvals: 0,
       // Тот же диагноз, но история двое суток: предохранитель MIN_OBSERVATIONS.
-      rejected: 1,
+      // Второй отказ — вторая группа упирается в потолок доли изменённых сущностей.
+      rejected: 2,
       clamped: 0,
       // Цель по CPA доехала из брифа: своей у импортированной кампании нет.
       noTargetCpa: 0,
@@ -232,11 +235,12 @@ describe('канал VK: кабинет → база → решения → ка
 
     expect(summary).toMatchObject({
       campaigns: 1,
-      autoApply: 1,
+      // Пауза баннера и подъём ставки группы — оба доезжают до кабинета.
+      autoApply: 2,
       plannedOnly: 0,
       noop: 0,
       applyFailed: 0,
-      rejected: 1,
+      rejected: 2,
       failed: 0,
     });
 
@@ -259,14 +263,20 @@ describe('канал VK: кабинет → база → решения → ка
   });
 
   it('повтор в те же сутки не пишет в кабинет второй раз', async () => {
-    const writesBefore = vk.calls.filter((c) => c.method !== 'GET').length;
+    const pausesBefore = vk.callsTo('banners/mass_action.json').length;
 
     const summary = await runScheduledOptimization({ dryRun: false, now: vkRunAt(0) });
 
-    expect(summary).toMatchObject({ autoApply: 0, plannedOnly: 0, noop: 0, applyFailed: 0 });
-    // Решение отсеклось на ключе идемпотентности до выхода в сеть.
-    expect(vk.calls.filter((c) => c.method !== 'GET')).toHaveLength(writesBefore);
-    expect(await prisma.changeLog.count()).toBe(1);
+    // Повторённое решение отсекается ключом идемпотентности, но прогон не пустой:
+    // баннер уже погашен и на паузу больше не предлагается, поэтому потолок доли
+    // изменённых сущностей освобождается — и вторая группа доезжает со своим
+    // подъёмом ставки. Это не двойная запись: сущность другая, ключ другой.
+    expect(summary).toMatchObject({ autoApply: 1, plannedOnly: 0, noop: 0, applyFailed: 0 });
+    // Суть теста цела: повторённое решение в кабинет не уходит. Проверяем это по
+    // тому каналу, которым оно уходило бы, — а не по общему счётчику записей,
+    // который теперь двигает решение по другой сущности.
+    expect(vk.callsTo('banners/mass_action.json')).toHaveLength(pausesBefore);
+    expect(await prisma.changeLog.count()).toBe(3);
   });
 
   it('минус-слов у VK нет: решение не уходит в сеть, а честно помечается пропущенным', async () => {
@@ -331,6 +341,14 @@ describe('канал VK: кабинет → база → решения → ка
       data: { decision: 'APPROVED', decidedAt: new Date(), respondedBy: 'roman' },
     });
 
+    const regionsBidBefore = Number(
+      (
+        await prisma.adGroup.findFirstOrThrow({
+          where: { externalId: String(VK_IDS.groupRegions) },
+        })
+      ).bid,
+    );
+
     const outcome = await applyApproval(approval.id, 'roman');
 
     /**
@@ -356,10 +374,13 @@ describe('канал VK: кабинет → база → решения → ка
     expect(Number(moscow.bid)).toBe(150);
 
     // Соседняя группа не тронута: id уникален в кабинете, но не в нашей таблице.
+    // Сверяем со снимком до применения, а не с числом: ставку этой группы двигает
+    // оптимизатор в тестах выше, и зашитая константа проверяла бы не то, что
+    // обещает подпись, — она зеленела бы по постороннему поводу.
     const regions = await prisma.adGroup.findFirstOrThrow({
       where: { externalId: String(VK_IDS.groupRegions) },
     });
-    expect(Number(regions.bid)).toBe(90);
+    expect(Number(regions.bid)).toBe(regionsBidBefore);
   });
 
   it('одобренная карточка меняет дневной бюджет, сверив его с живым значением', async () => {

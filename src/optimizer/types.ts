@@ -94,6 +94,16 @@ export interface SearchQueryMetrics {
   days: number;
 }
 
+/**
+ * Уровень, на котором канал держит ставку.
+ *
+ * У Директа торг идёт по ключевым фразам (`Keyword.bid`), у VK фраз нет вовсе:
+ * показы покупаются аудиториями, а цена задаётся на группе (`AdGroup.bid`).
+ * Решать, какой из уровней адресовать, обязан тот, кто знает про канал, — поэтому
+ * значение приходит в правила готовым, а не вычисляется в них.
+ */
+export type BidLevel = Extract<OptimizerEntityType, 'KEYWORD' | 'ADGROUP'>;
+
 export interface OptimizationTargets {
   campaignId: string;
   targetCpa: number | null;
@@ -101,6 +111,8 @@ export interface OptimizationTargets {
   /** Average spend per day with data over the window; compared against `dailyBudget`. */
   dailySpend: number;
   handoverMode: HandoverModeName;
+  /** Уровень, на который каналу можно адресовать изменение ставки. */
+  bidLevel: BidLevel;
 }
 
 export interface RuleInput {

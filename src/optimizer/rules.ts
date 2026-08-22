@@ -1,5 +1,6 @@
 import { formatMoney, formatPercent, formatRatio, roundMoney } from './money.js';
 import type {
+  BidLevel,
   Decision,
   DerivedMetrics,
   EntityMetrics,
@@ -106,7 +107,7 @@ export function decreaseBidOnHighCpa(input: RuleInput, targets: OptimizationTarg
   const decisions: Decision[] = [];
 
   for (const entity of input.entities) {
-    const bid = biddableBid(entity);
+    const bid = biddableBid(entity, targets.bidLevel);
     if (bid === null) continue;
     if (!isServing(entity)) continue;
     if (entity.impressions <= minImpressions) continue;
@@ -153,7 +154,7 @@ export function increaseBidOnLowCpa(input: RuleInput, targets: OptimizationTarge
   const decisions: Decision[] = [];
 
   for (const entity of input.entities) {
-    const bid = biddableBid(entity);
+    const bid = biddableBid(entity, targets.bidLevel);
     if (bid === null) continue;
     if (!isServing(entity)) continue;
 
@@ -243,8 +244,17 @@ function isServing(entity: EntityMetrics): boolean {
   return entity.status === null || entity.status === 'ACTIVE';
 }
 
-function biddableBid(entity: EntityMetrics): number | null {
-  if (entity.entityType !== 'KEYWORD') return null;
+/**
+ * Ставка сущности, если этой сущностью канал вообще торгуется.
+ *
+ * Уровень задаёт канал, а не правило: предложить ставку группы каналу, у которого
+ * цена живёт на фразах (и наоборот), — значит показать человеку карточку про
+ * изменение, которое применить нечем. Ноль и отрицательное ставкой не считаются,
+ * а `null` в колонке — это «ручной ставки нет, цену назначает автостратегия»:
+ * относительный шаг от неё неисчислим.
+ */
+function biddableBid(entity: EntityMetrics, bidLevel: BidLevel): number | null {
+  if (entity.entityType !== bidLevel) return null;
   if (entity.currentBid === null || entity.currentBid <= 0) return null;
   return entity.currentBid;
 }

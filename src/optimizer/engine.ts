@@ -1,3 +1,5 @@
+import type { Provider } from '@prisma/client';
+
 import { loadBidHistory, type BidHistory, type BidHistoryDb } from './bid-history.js';
 import {
   applyGuardrails,
@@ -11,6 +13,7 @@ import {
 import { classifyDecisions, type ApprovalRequest, type PolicyContext } from './policy.js';
 import { runMvpRules } from './rules.js';
 import type {
+  BidLevel,
   Decision,
   DecisionLayer,
   EntityMetrics,
@@ -23,9 +26,13 @@ import type {
   SearchQueryMetrics,
 } from './types.js';
 
+import { keepsBidOnAdGroup } from '@/clients/vk-ads/local-state.js';
+
 export interface CampaignRecord {
   id: string;
   clientId: string;
+  /** Канал кабинета: от него зависит, на каком уровне живёт ставка. */
+  provider: Provider;
   name: string;
   status: string;
   dailyBudget: Numeric;
@@ -35,6 +42,15 @@ export interface CampaignRecord {
 
 export interface AdGroupRecord {
   id: string;
+  /** Имя группы — подпись для карточки апрува. Необязательно: фикстуры его не несут. */
+  name?: string | null;
+  /**
+   * Ставка группы там, где канал держит её на этом уровне (VK: `max_price`).
+   * `null` — ручной ставки нет, цену назначает автостратегия площадки.
+   */
+  bid?: Numeric | null;
+  /** Статус из кабинета. `undefined` читается как «неизвестен» — см. `toEntityStatus`. */
+  status?: string | null;
 }
 
 export interface KeywordRecord {
@@ -249,18 +265,24 @@ export async function runOptimizer(
   // окно, это заметно в ErrorLog и в аудите атрибуции.
   if (hasMixedAttribution(stats)) return empty('MIXED_ATTRIBUTION');
 
-  const bidByKeywordId = new Map<string, number | null>(
-    keywords.map((keyword) => [keyword.id, toNumber(keyword.bid)]),
-  );
+  // Ставка лежит на том уровне, на котором ею торгует канал: у Директа это фраза,
+  // у VK — группа. Собираем обе, а выбор уровня делает `bidLevel` в правилах: колонка
+  // сама по себе не даёт права двигать ставку.
+  const bidByEntityId = new Map<string, number | null>([
+    ...keywords.map((keyword): [string, number | null] => [keyword.id, toNumber(keyword.bid)]),
+    ...adGroups.map((group): [string, number | null] => [group.id, toNumber(group.bid)]),
+  ]);
   const labelByEntityId = new Map<string, string>([[campaign.id, campaign.name]]);
+  for (const group of adGroups) if (group.name) labelByEntityId.set(group.id, group.name);
   for (const keyword of keywords) labelByEntityId.set(keyword.id, keyword.phrase);
   for (const ad of ads) if (ad.title) labelByEntityId.set(ad.id, ad.title);
 
   const statusByEntityId = new Map<string, EntityStatusName | null>();
+  for (const group of adGroups) statusByEntityId.set(group.id, toEntityStatus(group.status));
   for (const keyword of keywords) statusByEntityId.set(keyword.id, toEntityStatus(keyword.status));
   for (const ad of ads) statusByEntityId.set(ad.id, toEntityStatus(ad.status));
 
-  const aggregates = aggregateStats(stats, bidByKeywordId, labelByEntityId, statusByEntityId);
+  const aggregates = aggregateStats(stats, bidByEntityId, labelByEntityId, statusByEntityId);
   const entities = aggregates.filter((entity) => entity.entityId !== campaign.id);
 
   const targetCpaSource = resolveTargetCpaSource(campaign, options.fallbackTargetCpa ?? null);
@@ -369,7 +391,20 @@ function buildTargets(
     dailyBudget,
     dailySpend,
     handoverMode: campaign.handoverMode,
+    bidLevel: bidLevelOf(campaign.provider),
   };
+}
+
+/**
+ * Уровень ставки канала.
+ *
+ * Знание живёт в одном месте — `keepsBidOnAdGroup` в клиенте VK, — и читается
+ * отсюда, а не повторяется списком провайдеров: вторая копия этого знания
+ * разъехалась бы с первой при добавлении любого нового канала, и разъехалась бы
+ * молча — решение просто уехало бы не на тот уровень.
+ */
+export function bidLevelOf(provider: Provider): BidLevel {
+  return keepsBidOnAdGroup(provider) ? 'ADGROUP' : 'KEYWORD';
 }
 
 function buildGuardrailContext(
@@ -412,7 +447,7 @@ export function toEntityStatus(raw: string | null | undefined): EntityStatusName
 
 function aggregateStats(
   stats: readonly CampaignStatRecord[],
-  bidByKeywordId: ReadonlyMap<string, number | null>,
+  bidByEntityId: ReadonlyMap<string, number | null>,
   labelByEntityId: ReadonlyMap<string, string>,
   statusByEntityId: ReadonlyMap<string, EntityStatusName | null>,
 ): EntityMetrics[] {
@@ -429,7 +464,7 @@ function aggregateStats(
       spend: 0,
       conversions: 0,
       days: 0,
-      currentBid: bidByKeywordId.get(row.entityId) ?? null,
+      currentBid: bidByEntityId.get(row.entityId) ?? null,
       status: statusByEntityId.get(row.entityId) ?? null,
       dates: new Set<string>(),
     };

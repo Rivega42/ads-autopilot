@@ -144,14 +144,27 @@ describe('syncAppliedDecisions', () => {
     expect(h.prisma.campaign.updateMany).not.toHaveBeenCalled();
   });
 
-  it('ставка на сущности без колонки bid не пишется никуда', async () => {
+  it('ставка группы пишется в колонку группы, а не в колонку фраз', async () => {
+    // У VK ключевых фраз нет вовсе: цена живёт на группе. Пока эта ветка считалась
+    // пропуском, применённая ставка оставалась только в кабинете, и следующий прогон
+    // предлагал ровно то же изменение заново.
     const result = await syncAppliedDecisions([
       decision({ entityType: 'ADGROUP', entityId: 'ag-1' }),
     ]);
 
-    expect(result).toEqual({ updated: 0, skipped: 1 });
+    expect(h.prisma.adGroup.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['ag-1'] } },
+      data: { bid: 170 },
+    });
     expect(h.prisma.keyword.updateMany).not.toHaveBeenCalled();
-    expect(h.prisma.adGroup.updateMany).not.toHaveBeenCalled();
+    expect(result).toEqual({ updated: 1, skipped: 0 });
+  });
+
+  it('ставка на уровне, у которого колонки нет, видна в счётчике', async () => {
+    const result = await syncAppliedDecisions([decision({ entityType: 'AD', entityId: 'ad-1' })]);
+
+    expect(result).toEqual({ updated: 0, skipped: 1 });
+    expect(h.prisma.ad.updateMany).not.toHaveBeenCalled();
   });
 
   it('пустой список в базу не ходит', async () => {

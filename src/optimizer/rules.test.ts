@@ -47,6 +47,7 @@ function targets(overrides: Partial<OptimizationTargets> = {}): OptimizationTarg
     dailyBudget: 5000,
     dailySpend: 1000,
     handoverMode: 'FULL',
+    bidLevel: 'KEYWORD',
     ...overrides,
   };
 }
@@ -578,5 +579,72 @@ describe('runMvpRules', () => {
       targets({ targetCpa: null }),
     );
     expect(decisions).toEqual([]);
+  });
+});
+
+/**
+ * Уровень, на котором канал держит ставку.
+ *
+ * У Директа торг идёт по фразам, у VK фраз нет вовсе — цена задаётся на группе.
+ * Правило обязано предлагать ставку ровно того уровня, который канал умеет
+ * применить: предложение не в тот уровень — это карточка человеку про изменение,
+ * которого система не сделает, и молчаливо разошедшиеся уровни хуже, чем ни одного.
+ */
+describe('уровень ставки канала', () => {
+  /** CPA 1000 при цели 500: снижение ставки. Пауза группам не грозит — их нет в списке. */
+  const group = entity({
+    entityType: 'ADGROUP',
+    entityId: 'ag-1',
+    label: 'Москва — интересы',
+    currentBid: 120,
+  });
+
+  it('канал со ставкой на группе получает решение по группе', () => {
+    const decisions = decreaseBidOnHighCpa(input([group]), targets({ bidLevel: 'ADGROUP' }));
+
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.entityType).toBe('ADGROUP');
+    expect(decisions[0]?.prevValue).toEqual({ kind: 'bid', amount: 120 });
+    expect(decisions[0]?.nextValue).toEqual({ kind: 'bid', amount: 102 });
+  });
+
+  it('повышение ставки тоже адресует группу', () => {
+    const decisions = increaseBidOnLowCpa(
+      input([entity({ ...group, conversions: 4 })]),
+      targets({ bidLevel: 'ADGROUP' }),
+    );
+
+    expect(decisions[0]?.entityType).toBe('ADGROUP');
+    expect(decisions[0]?.nextValue).toEqual({ kind: 'bid', amount: 132 });
+  });
+
+  it('каналу со ставкой на фразах ставку группы не предлагают', () => {
+    expect(decreaseBidOnHighCpa(input([group]), targets())).toEqual([]);
+    expect(increaseBidOnLowCpa(input([entity({ ...group, conversions: 4 })]), targets())).toEqual(
+      [],
+    );
+  });
+
+  it('каналу со ставкой на группе ставку фразы не предлагают', () => {
+    const keyword = entity({ currentBid: 120 });
+
+    expect(decreaseBidOnHighCpa(input([keyword]), targets({ bidLevel: 'ADGROUP' }))).toEqual([]);
+    expect(
+      increaseBidOnLowCpa(
+        input([entity({ ...keyword, conversions: 4 })]),
+        targets({ bidLevel: 'ADGROUP' }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('группа без ставки в кабинете решения не получает', () => {
+    // NULL в `AdGroup.bid` — не ноль, а «ручной ставки нет»: цену назначает
+    // автостратегия площадки, и относительный шаг от неё неисчислим.
+    expect(
+      decreaseBidOnHighCpa(
+        input([entity({ ...group, currentBid: null })]),
+        targets({ bidLevel: 'ADGROUP' }),
+      ),
+    ).toEqual([]);
   });
 });

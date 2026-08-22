@@ -16,10 +16,15 @@ function at(day: number): Date {
   return new Date(Date.UTC(2026, 7, day, 3, 0, 0));
 }
 
-function bidDecision(entityId: string, previous = 100, next = 90): Decision {
+function bidDecision(
+  entityId: string,
+  previous = 100,
+  next = 90,
+  entityType: Decision['entityType'] = 'KEYWORD',
+): Decision {
   return {
     action: next < previous ? 'BID_DECREASE' : 'BID_INCREASE',
-    entityType: 'KEYWORD',
+    entityType,
     entityId,
     prevValue: { kind: 'bid', amount: previous },
     nextValue: { kind: 'bid', amount: next },
@@ -31,8 +36,13 @@ function bidDecision(entityId: string, previous = 100, next = 90): Decision {
   };
 }
 
-function row(entityId: string, previous: unknown, appliedAt: Date): BidHistoryRow {
-  return { entityType: 'KEYWORD', entityId, prevValue: previous, appliedAt };
+function row(
+  entityId: string,
+  previous: unknown,
+  appliedAt: Date,
+  entityType = 'KEYWORD',
+): BidHistoryRow {
+  return { entityType, entityId, prevValue: previous, appliedAt };
 }
 
 interface Recorded {
@@ -231,5 +241,52 @@ describe('noBidHistory', () => {
     expect(history.anchors.size).toBe(0);
     expect(history.unavailable.size).toBe(0);
     expect(history.windowDays).toBe(7);
+  });
+});
+
+/**
+ * Ставка группы объявлений ищет свою точку отсчёта там же, где и ставка фразы.
+ *
+ * У VK ставка живёт на группе, и якорь для неё обязан находиться в той же форме:
+ * иначе оконный коридор схлопывается в шаговый — то есть предохранителя, ради
+ * которого суммарный лимит и заводился, на этом уровне просто нет.
+ */
+describe('якорь для группы объявлений', () => {
+  it('находится по своему типу сущности', async () => {
+    const db = createDb([
+      row('ag-1', { kind: 'bid', amount: 150 }, at(3), 'ADGROUP'),
+      row('ag-1', { kind: 'bid', amount: 130 }, at(5), 'ADGROUP'),
+    ]);
+
+    const history = await loadBidHistory(db, [bidDecision('ag-1', 120, 102, 'ADGROUP')], {
+      start: WINDOW_START,
+      days: 7,
+    });
+
+    // Первая строка окна, а не последняя: якорь — то, чем ставка была на его начале.
+    expect(history.anchors.get(bidHistoryKey('ADGROUP', 'ag-1'))).toBe(150);
+    expect(history.unavailable.size).toBe(0);
+    expect(db.seen.map((query) => query.entityType)).toEqual(['ADGROUP']);
+  });
+
+  it('не путает группу с фразой, у которой тот же id', async () => {
+    // `CampaignStat.entityId` и журнал полиморфны: без типа в ключе история одной
+    // сущности стала бы точкой отсчёта для другой.
+    const db = createDb([
+      row('x-1', { kind: 'bid', amount: 150 }, at(3), 'ADGROUP'),
+      row('x-1', { kind: 'bid', amount: 40 }, at(3), 'KEYWORD'),
+    ]);
+
+    const history = await loadBidHistory(
+      db,
+      [bidDecision('x-1', 120, 102, 'ADGROUP'), bidDecision('x-1', 30, 25)],
+      { start: WINDOW_START, days: 7 },
+    );
+
+    expect(history.anchors.get(bidHistoryKey('ADGROUP', 'x-1'))).toBe(150);
+    expect(history.anchors.get(bidHistoryKey('KEYWORD', 'x-1'))).toBe(40);
+    expect(new Set(db.seen.map((query) => query.entityType))).toEqual(
+      new Set(['ADGROUP', 'KEYWORD']),
+    );
   });
 });

@@ -2,6 +2,8 @@ import { bidHistoryKey, type BidHistory } from './bid-history.js';
 import { ceilMoney, floorMoney, formatMoney, formatPercent } from './money.js';
 import type { Decision } from './types.js';
 
+import { env } from '@/env.js';
+
 export type GuardrailRail =
   | 'MAX_BID_CHANGE'
   | 'MAX_BID_CHANGE_WINDOW'
@@ -32,9 +34,22 @@ export interface GuardrailConfig {
   dryRun: boolean;
 }
 
+/**
+ * Настройки по умолчанию — из окружения, а не рядом с ним.
+ *
+ * `MAX_BID_CHANGE_PCT` и `DAILY_BUDGET_HARD_LIMIT_MULT` объявлены в `src/env.ts` и
+ * в `.env.example` с теми же цифрами, что раньше стояли здесь литералами, и не
+ * читались ниоткуда. Человек, выставивший переменную в проде, считал предохранитель
+ * настроенным; на деле решения считались по константе, и разъезд был молчаливым —
+ * ни лога, ни ошибки старта. Одно значение обязано жить в одном месте.
+ *
+ * Порогов наблюдений и доли изменённых сущностей это не касается: своих переменных
+ * у них нет, и выдумывать их здесь — значит заводить ещё одну пару, которой предстоит
+ * разъехаться.
+ */
 export const DEFAULT_GUARDRAILS: GuardrailConfig = {
-  maxBidChangePct: 0.3,
-  budgetCeilingRatio: 1.2,
+  maxBidChangePct: env.MAX_BID_CHANGE_PCT,
+  budgetCeilingRatio: env.DAILY_BUDGET_HARD_LIMIT_MULT,
   minImpressions: 100,
   minObservationDays: 3,
   maxChangedEntityShare: 0.3,

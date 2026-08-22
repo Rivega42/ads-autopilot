@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { BidHistoryRow } from './bid-history.js';
 import {
@@ -14,6 +14,7 @@ import {
   type DecisionSource,
   type KeywordRecord,
   type OptimizerDb,
+  type OptimizerRun,
 } from './engine.js';
 import type { Decision, Numeric } from './types.js';
 
@@ -30,9 +31,14 @@ interface Fixture {
 }
 
 /** Запись журнала об изменении ставки: `prevValue` — то, чем ставка была до неё. */
-function bidChange(entityId: string, previous: number, appliedAt: Date): BidHistoryRow {
+function bidChange(
+  entityId: string,
+  previous: number,
+  appliedAt: Date,
+  entityType = 'KEYWORD',
+): BidHistoryRow {
   return {
-    entityType: 'KEYWORD',
+    entityType,
     entityId,
     prevValue: { kind: 'bid', amount: previous },
     appliedAt,
@@ -43,6 +49,7 @@ function campaignRecord(overrides: Partial<CampaignRecord> = {}): CampaignRecord
   return {
     id: 'c-1',
     clientId: 'client-1',
+    provider: 'YANDEX_DIRECT',
     name: 'Поиск — Москва',
     status: 'ACTIVE',
     dailyBudget: '5000.00',
@@ -670,5 +677,127 @@ describe('hasMixedAttribution', () => {
 
   it('пустое окно смесью не считается', () => {
     expect(hasMixedAttribution([])).toBe(false);
+  });
+});
+
+/**
+ * Предохранители, объявленные в окружении, обязаны доезжать до решения.
+ *
+ * Проверяется прогоном, а не сравнением с `DEFAULT_GUARDRAILS`: пока
+ * `MAX_BID_CHANGE_PCT` лежала в `.env.example` рядом с той же цифрой, зашитой в
+ * `DEFAULT_GUARDRAILS`, объект настроек выглядел настроенным, а решение считалось
+ * по константе — и человек, выставивший переменную в проде, узнал бы об этом
+ * только по чужой ставке. Поэтому тест смотрит на сумму в `nextValue`, а не на
+ * поле конфигурации: связь «выглядит связанной» здесь и была дефектом.
+ */
+describe('предохранители из окружения', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  /** Свежая копия движка: `src/env.ts` читает `process.env` один раз при импорте. */
+  async function runWithEnv(vars: Record<string, string>, fixture: Fixture): Promise<OptimizerRun> {
+    for (const [name, value] of Object.entries(vars)) vi.stubEnv(name, value);
+    vi.resetModules();
+    const engine = await import('./engine.js');
+    return engine.runOptimizer(createDb(fixture), { campaignId: 'c-1', now: NOW });
+  }
+
+  /** CPA 1200 при цели 500: снижение ставки на 15%, до порога паузы (3× цели) далеко. */
+  const fixture: Fixture = {
+    keywords: [{ id: 'kw-1', phrase: 'ремонт', bid: '100.00', status: 'ACTIVE' }],
+    stats: statsOver('kw-1', 3, { impressions: 600, clicks: 30, spend: 6000, conversions: 5 }),
+  };
+
+  it('MAX_BID_CHANGE_PCT урезает шаг, который правило просит', async () => {
+    const run = await runWithEnv({ MAX_BID_CHANGE_PCT: '0.05' }, fixture);
+
+    expect(run.allowed[0]?.nextValue).toEqual({ kind: 'bid', amount: 95 });
+    expect(run.clamped[0]?.rail).toBe('MAX_BID_CHANGE');
+  });
+
+  it('без переменной остаётся значение по умолчанию', async () => {
+    const run = await runWithEnv({}, fixture);
+
+    expect(run.allowed[0]?.nextValue).toEqual({ kind: 'bid', amount: 85 });
+    expect(run.clamped).toEqual([]);
+  });
+});
+
+/**
+ * Ставка на уровне группы.
+ *
+ * У VK ключевых фраз нет вовсе: показы покупаются аудиториями, цена задаётся на
+ * группе (`AdGroup.bid` ← `max_price`). Пока правила считали только по `Keyword`,
+ * управлять ставками VK было нечем — колонка была, загрузка её читала, применение
+ * умело её писать, а решения на этот уровень не приходили ни одного.
+ */
+describe('ставка группы объявлений', () => {
+  const groupFixture = (overrides: Partial<Fixture> = {}): Fixture => ({
+    campaign: campaignRecord({ provider: 'VK_ADS' }),
+    adGroups: [{ id: 'ag-1', name: 'Москва — интересы', bid: '120.00', status: 'ACTIVE' }],
+    keywords: [],
+    // CPA 1500 при цели 500 — снижение ставки; паузы группам правила не предлагают.
+    stats: statsOver(
+      'ag-1',
+      3,
+      { impressions: 3000, clicks: 150, spend: 3000, conversions: 2 },
+      'ADGROUP',
+    ),
+    ...overrides,
+  });
+
+  it('канал со ставкой на группе получает решение по группе', async () => {
+    const run = await runOptimizer(createDb(groupFixture()), { campaignId: 'c-1', now: NOW });
+
+    expect(run.allowed).toHaveLength(1);
+    expect(run.allowed[0]).toMatchObject({
+      action: 'BID_DECREASE',
+      entityType: 'ADGROUP',
+      entityId: 'ag-1',
+      label: 'Москва — интересы',
+      prevValue: { kind: 'bid', amount: 120 },
+      nextValue: { kind: 'bid', amount: 102 },
+    });
+  });
+
+  it('каналу со ставкой на фразах та же группа решения не даёт', async () => {
+    const run = await runOptimizer(
+      createDb(groupFixture({ campaign: campaignRecord({ provider: 'YANDEX_DIRECT' }) })),
+      { campaignId: 'c-1', now: NOW },
+    );
+
+    expect(run.proposed).toEqual([]);
+  });
+
+  it('выключенная группа в оптимизацию не попадает', async () => {
+    const run = await runOptimizer(
+      createDb(
+        groupFixture({
+          adGroups: [{ id: 'ag-1', name: 'Москва — интересы', bid: '120.00', status: 'PAUSED' }],
+        }),
+      ),
+      { campaignId: 'c-1', now: NOW },
+    );
+
+    expect(run.proposed).toEqual([]);
+  });
+
+  it('предохранитель за окно находит точку отсчёта и для группы', async () => {
+    // Ставку группы уже опускали внутри окна со 150: коридор окна — не ниже 105,
+    // и шаг правила до 102 обязан упереться в него. Якорь ищется по паре
+    // (тип сущности, id): для группы он лежит под своим типом, а не под KEYWORD.
+    const run = await runOptimizer(
+      createDb(
+        groupFixture({
+          changes: [bidChange('ag-1', 150, new Date('2026-08-05T03:00:00.000Z'), 'ADGROUP')],
+        }),
+      ),
+      { campaignId: 'c-1', now: NOW },
+    );
+
+    expect(run.allowed[0]?.nextValue).toEqual({ kind: 'bid', amount: 105 });
+    expect(run.clamped[0]?.rail).toBe('MAX_BID_CHANGE_WINDOW');
   });
 });
