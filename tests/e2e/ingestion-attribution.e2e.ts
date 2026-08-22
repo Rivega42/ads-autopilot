@@ -207,38 +207,55 @@ describe('загрузка: атрибуция конверсий', () => {
     expect(after.map((r) => r.conversions)).toEqual(before.map((r) => r.conversions));
   });
 
-  it('ДЕФЕКТ: год в названии кампании обнуляет конверсии всего окна', async () => {
-    // `directCampaignId` вытаскивает номер кампании из имени первой же группой
-    // цифр длиной 4+. В имени «Кофемашины 2024 — поиск (№87651001)» первой
-    // оказывается «2024», и строка Метрики становится несопоставимой.
-    //
-    // Дальше срабатывает вторая половина замысла: кампании-дни, которых нет в
-    // ответе Метрики, обнуляются как «ноль по её модели». В сумме переименование
-    // кампании в кабинете стирает конверсии всего окна и обнуляет CPA, а
-    // оптимизатор с этого момента видит «0 конверсий при расходе N» — то есть
-    // основание для паузы по каждой фразе.
-    //
-    // Тест фиксирует то, что есть. Починят разбор — он обязан покраснеть и
-    // обновиться вместе с починкой.
+  it('год в названии кампании больше не отменяет её конверсии', async () => {
+    // Прежний разбор брал из имени первую группу цифр длиной 4+ — в имени
+    // «Кофемашины 2024 — поиск (№87651001)» ею оказывался год. Строка уходила в
+    // `unresolved`, а следом проход обнуления стирал конверсии всего окна как
+    // «молчание Метрики»: CPA обнулялся, и оптимизатор видел расход без единой
+    // конверсии — основание снять кампанию с показов.
     label = (id) => `Кофемашины 2024 — поиск (№${id})`;
     try {
       const result = await syncMetrikaConversions(clientId);
 
-      // Ни одной сопоставленной строки: все ушли в `unresolved`.
-      expect(result).toMatchObject({ configured: true, written: 0 });
-      expect(result.unresolved).toBe(result.fetched);
+      // Номер кампании в имени есть — по нему строка и сопоставляется.
+      expect(result).toMatchObject({ configured: true, written: REPORTED.length, unresolved: 1 });
+      expect(result.zeroingSuspended).toBe(false);
 
       const search = await campaignId(IDS.search);
       const rows = await statsOf(StatEntityType.CAMPAIGN, search);
-      expect(rows.every((r) => r.conversions === 0 && r.cpa === null)).toBe(true);
+      const reported = rows.filter((r) => REPORTED.includes(ymd(r.date)));
+      expect(reported.map((r) => r.conversions)).toEqual([5, 6, 7]);
+    } finally {
+      label = LABEL;
+    }
+  });
+
+  it('имя без номера не обнуляет окно молча, а называет себя в результате', async () => {
+    // Тот же случай, но безнадёжный: сопоставлять не с чем вовсе. Обнулять окно
+    // по такому ответу нельзя — молчание Метрики про кампанию и наша неспособность
+    // разобрать её имя это разные вещи, и стоят они по-разному.
+    const search = await campaignId(IDS.search);
+    const before = await statsOf(StatEntityType.CAMPAIGN, search);
+
+    label = () => 'Кофемашины 2026 — поиск';
+    try {
+      const result = await syncMetrikaConversions(clientId);
+
+      expect(result).toMatchObject({ configured: true, written: 0, zeroed: 0 });
+      expect(result.unresolved).toBe(result.fetched);
+      expect(result.zeroingSuspended).toBe(true);
+      // Не «сколько-то строк не сопоставилось», а какие именно: без этого человек
+      // не отличит переименованную кампанию от кампании, которой у нас нет.
+      expect(result.unresolvedSamples).toContain('Кофемашины 2026 — поиск');
     } finally {
       label = LABEL;
     }
 
-    // Возвращаем окно в исходное состояние: следующий прогон читает то же имя,
-    // что и раньше, и цифры восстанавливаются.
-    const restored = await syncMetrikaConversions(clientId);
-    expect(restored.written).toBe(REPORTED.length);
+    const after = await statsOf(StatEntityType.CAMPAIGN, search);
+    expect(after.map((r) => r.conversions)).toEqual(before.map((r) => r.conversions));
+    expect(after.map((r) => r.cpa?.toString() ?? null)).toEqual(
+      before.map((r) => r.cpa?.toString() ?? null),
+    );
   });
 
   it('клиент без счётчика проходит шаг Метрики штатно, а не с ошибкой', async () => {
