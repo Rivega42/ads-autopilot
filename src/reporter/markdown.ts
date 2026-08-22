@@ -109,45 +109,79 @@ export function mdTruncate(text: Markdown, limit: number): Markdown {
     }
     if (i >= text.length) break;
 
-    const top = open[open.length - 1];
-
-    // Внутри `code`/`pre` разметки нет: закрывает только та же кавычка.
-    if (top === '`' || top === '```') {
-      if (text.startsWith(top, i)) {
-        open.pop();
-        i += top.length;
-        continue;
-      }
-      i += text[i] === '\\' ? 2 : 1;
-      continue;
-    }
-
-    if (text[i] === '\\') {
-      i += 2;
-      continue;
-    }
-
-    if (top !== undefined && text.startsWith(top, i)) {
-      open.pop();
-      i += top.length;
-      continue;
-    }
-
-    const opener = PAIRED_DELIMS.find((delim) => text.startsWith(delim, i));
-    if (opener) {
-      open.push(opener);
-      i += opener.length;
-      continue;
-    }
-
-    if (text[i] === '[') {
-      const end = linkEnd(text, i);
-      i = end === -1 ? i + 1 : end;
-      continue;
-    }
-
-    i += 1;
+    i = stepMarkdown(text, i, open);
   }
 
   return `${text.slice(0, bestAt)}${bestClosers}` as Markdown;
+}
+
+/**
+ * Один шаг разбора разметки: возвращает следующую позицию и правит стек открытых
+ * сущностей.
+ *
+ * Вынесен затем, что правил здесь много и по ним ходят двое — обрезка по лимиту и
+ * закрытие сущностей в тексте, который резали по строкам. Две копии этих правил
+ * разъехались бы: первая же новая пара делимитров попала бы в одну и не попала в
+ * другую, и разъезд увидел бы не тест, а Telegram отказом «can't parse entities».
+ */
+function stepMarkdown(text: string, at: number, open: string[]): number {
+  const top = open[open.length - 1];
+
+  // Внутри `code`/`pre` разметки нет: закрывает только та же кавычка.
+  if (top === '`' || top === '```') {
+    if (text.startsWith(top, at)) {
+      open.pop();
+      return at + top.length;
+    }
+    return at + (text[at] === '\\' ? 2 : 1);
+  }
+
+  if (text[at] === '\\') return at + 2;
+
+  if (top !== undefined && text.startsWith(top, at)) {
+    open.pop();
+    return at + top.length;
+  }
+
+  const opener = PAIRED_DELIMS.find((delim) => text.startsWith(delim, at));
+  if (opener) {
+    open.push(opener);
+    return at + opener.length;
+  }
+
+  if (text[at] === '[') {
+    const end = linkEnd(text, at);
+    return end === -1 ? at + 1 : end;
+  }
+
+  return at + 1;
+}
+
+/**
+ * Дописывает закрывающие делимитры к разметке, которую резали не по токенам.
+ *
+ * Нужен обрезке отчёта по границе строк: строки отчёта самодостаточны только пока
+ * никто не открыл сущность в одной строке и не закрыл в другой. Разбор Telegram
+ * про это ничего не знает — незакрытое `*` на границе даёт отказ «Can't find end
+ * of Bold entity», то есть отчёт не доставляется вовсе вместо усечённого.
+ * Дописать хвост дешевле, чем запрещать многострочные сущности всем писателям
+ * отчёта: запрет держался бы на памяти следующего, кто их напишет.
+ */
+export function mdCloseOpen(text: Markdown): Markdown {
+  const open: string[] = [];
+  let i = 0;
+  let cut = text.length;
+  while (i < text.length) {
+    const top = open[open.length - 1];
+    // Ссылку хвостом не закрыть: `[подпись` без `](адрес)` — уже не разметка.
+    // Такой обрывок отрезаем, потому что дописать к нему нечего.
+    if (top !== '`' && top !== '```' && text[i] === '[' && linkEnd(text, i) === -1) {
+      cut = i;
+      break;
+    }
+    i = stepMarkdown(text, i, open);
+  }
+  const body = cut === text.length ? text : text.slice(0, cut);
+  if (open.length === 0) return body as Markdown;
+  return `${body}${[...open].reverse().join('')}` as Markdown;
 }

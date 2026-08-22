@@ -4,7 +4,7 @@ import { Api } from 'grammy';
 import { env } from '@/env.js';
 import { AppError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
-import { mdTruncate, type Markdown } from '@/reporter/markdown.js';
+import { mdCloseOpen, mdTruncate, type Markdown } from '@/reporter/markdown.js';
 
 /**
  * Транспорт отчётов.
@@ -70,12 +70,18 @@ export function getReportMessenger(): ReportMessenger {
 /**
  * Обрезает текст по лимиту Telegram.
  *
- * Режем по границе строки: MarkdownV2 не переживёт разрыв посреди `*жирного*`,
- * а строки отчёта самодостаточны. Если не влезла даже первая строка — режет
- * `mdTruncate`, по границе токенов и с закрытием оставшихся сущностей. Прямой
- * `slice`, стоявший здесь раньше, в этой ветке отдавал текст, который площадка
- * не принимает вовсе: «can't parse entities», то есть отчёт не доставлен ни в
- * каком виде вместо усечённого.
+ * Режем по границе строки: строки отчёта самодостаточны, и по строкам обрыв
+ * читается человеком лучше, чем по токенам. Самодостаточны они, однако, только
+ * пока никто не открыл сущность в одной строке и не закрыл в другой — разбор
+ * Telegram про наши намерения не знает и отвечает «Can't find end of Bold
+ * entity». Сегодня все сущности отчёта живут внутри строки, но держать это на
+ * памяти следующего, кто напишет многострочное `*жирное*`, нельзя: цена ошибки —
+ * не кривой отчёт, а не доставленный вовсе. Поэтому оставшееся открытым
+ * дописывает `mdCloseOpen`.
+ *
+ * Если не влезла даже первая строка — режет `mdTruncate`, по границе токенов.
+ * Прямой `slice`, стоявший здесь раньше, в этой ветке отдавал текст, который
+ * площадка не принимает вовсе.
  */
 export function clampMarkdown(text: Markdown, limit = TELEGRAM_MESSAGE_LIMIT): Markdown {
   if (text.length <= limit) return text;
@@ -93,5 +99,5 @@ export function clampMarkdown(text: Markdown, limit = TELEGRAM_MESSAGE_LIMIT): M
     log.warn({ length: text.length }, 'report does not fit a single Telegram message');
     return `${mdTruncate(text, limit - tail.length)}${tail}` as Markdown;
   }
-  return `${kept.join('\n')}${tail}` as Markdown;
+  return `${mdCloseOpen(kept.join('\n') as Markdown)}${tail}` as Markdown;
 }

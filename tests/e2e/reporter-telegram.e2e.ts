@@ -224,6 +224,26 @@ describe('транспорт отчётов: MarkdownV2 против насто�
     expect(tg.refusals).toEqual([]);
   });
 
+  it('обрезка по строкам не оставляет сущность, открытую в одной строке', async () => {
+    // Живая ветка `clampMarkdown`: строк много, режем по их границе. Строки отчёта
+    // самодостаточны ровно до тех пор, пока никто не открыл `*жирное*` в одной и
+    // не закрыл в другой — разбор Telegram про наши намерения не знает. Проверяется
+    // не форма результата, а последствие: площадка обязана его принять.
+    for (const [open, close] of [
+      ['*', '*'],
+      ['||', '||'],
+      ['```', '```'],
+    ]) {
+      const filler = `${'строка отчёта'.repeat(20)}\n`;
+      const inside = filler.repeat(Math.ceil(TELEGRAM_TEXT_MAX / filler.length) + 1);
+      const clamped = clampMarkdown(mdRaw(`${open}\n${inside}${close}\nхвост`));
+
+      expect(clamped.length, open).toBeLessThanOrEqual(TELEGRAM_TEXT_MAX);
+      await expect(messenger.sendMarkdown(hostile.chatId, clamped)).resolves.toBeDefined();
+    }
+    expect(tg.refusals).toEqual([]);
+  });
+
   it('мок не подыгрывает: неэкранированный текст он отвергает так же, как Telegram', async () => {
     // Без этой проверки все зелёные выше ничего не стоят: мок, принимающий что
     // угодно, неотличим от мока, который разбирает разметку.
