@@ -29,3 +29,31 @@ export function resolveApply(flags: ApplyFlags): boolean {
   }
   return apply;
 }
+
+/**
+ * Значение `--client`, проверенное один раз за все команды.
+ *
+ * Пустая строка — не «без фильтра», а ошибка ввода. Оболочка отдаёт её команде
+ * молча: `--client "$CLIENT_ID"` с незаданной переменной выглядит как аргумент
+ * без значения, а не как отсутствие флага. Дальше по цепочке пустая строка
+ * ложна, и каждый фильтр вида `clientId ? { clientId } : {}` — а их три подряд
+ * от точки входа до `prisma.findMany` — превращал сужение в «все клиенты».
+ * `optimize --apply` при этом писал ставки в кабинеты всех клиентов сразу.
+ *
+ * Проверка живёт здесь, а не в командах, ровно потому, что копий уже было
+ * четыре, а пятой — у `optimize` — не было: следующая команда с `--client`
+ * получит её даром и открыть дыру заново не сможет.
+ */
+export function resolveClientId(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const clientId = raw.trim();
+  if (clientId === '') {
+    throw new AppError(
+      'Флаг --client без значения. Это не «все клиенты»: чтобы пройти по всем, ' +
+        'флаг не указывают вовсе. Обычная причина — --client "$CLIENT_ID" с незаданной ' +
+        'переменной.',
+      { code: 'CLI_CLIENT_EMPTY' },
+    );
+  }
+  return clientId;
+}

@@ -1,4 +1,5 @@
 import { cliInvocation } from './invocation.js';
+import { optimizeNeedsHumanFix } from './optimize-exit.js';
 
 import { env } from '@/env.js';
 import type {
@@ -30,10 +31,27 @@ export interface OptimizeCommandDeps {
   dryRunEnv?: boolean;
 }
 
+/**
+ * Кампании, о которых показ имеет право рассказывать.
+ *
+ * Отбор — тот же, что у `runScheduledOptimization`: активная кампания активного
+ * клиента. Пока фильтров здесь не было, показ рассказывал про ARCHIVED, DRAFT и
+ * клиентов на паузе, до которых применение не доходит вовсе: `optimize --client X`
+ * печатал разбор кампании, а `optimize --apply --client X` следом отвечал
+ * «Кампаний просмотрено: 0». Показ, обещающий то, чего применение не сделает, —
+ * ровно та же ложь, что и «применено» без записи.
+ *
+ * Сужение по клиенту берётся из `options.clientId`, уже проверенного на входе
+ * (`resolveClientId`): пустая строка сюда не доезжает.
+ */
 async function defaultListCampaigns(clientId: string | undefined): Promise<OptimizeCampaign[]> {
   const { prisma } = await import('@/db/prisma.js');
   return prisma.campaign.findMany({
-    where: clientId ? { clientId } : {},
+    where: {
+      status: 'ACTIVE',
+      client: { status: 'ACTIVE' },
+      ...(clientId === undefined ? {} : { clientId }),
+    },
     select: { id: true, name: true, clientId: true },
     orderBy: { createdAt: 'asc' },
   });
@@ -45,9 +63,9 @@ async function defaultListCampaigns(clientId: string | undefined): Promise<Optim
  * Сюда нельзя позвать `runScheduledOptimization`, хотя решения он считает те же:
  * даже в dry-run он создаёт карточки апрува, то есть шлёт человеку сообщения.
  * Команда «покажи» этого делать не должна. Поэтому здесь `runOptimizer` напрямую —
- * но с тем же сырьём, что у крона: своего агрегирования запросов и своего способа
- * добыть цель по CPA у показа быть не может, иначе он показывает не то, что будет
- * сделано.
+ * но с тем же сырьём, что у крона: своего агрегирования запросов, своего способа
+ * добыть цель по CPA и своего набора кампаний (см. `defaultListCampaigns`) у показа
+ * быть не может, иначе он показывает не то, что будет сделано.
  */
 async function defaultPreview(campaign: OptimizeCampaign): Promise<OptimizerRun> {
   // Импорт внутри команды: движок тянет Prisma и правила, а команде channels
@@ -174,11 +192,23 @@ function renderSummary(summary: ScheduledOptimizationSummary, out: (line: string
   out(`Кампаний просмотрено: ${summary.campaigns}`);
   out(`Изменений записано в кабинеты: ${summary.autoApply}`);
   out(`Карточек апрува выпущено: ${summary.approvals}`);
+  // Повтор в те же сутки печатает одни нули, и «выпущено: 0» читается как «ничего
+  // не вышло» — хотя карточки прошлого прогона живы и ждут нажатия, а решения
+  // отсеклись на ключах идемпотентности. Обе строки называют это словами.
+  if (summary.approvalsDuplicate > 0) {
+    out(`  из них уже выпущено раньше и повторно не отправлено: ${summary.approvalsDuplicate}`);
+  }
   out(`Отклонено предохранителями: ${summary.rejected}, ужато: ${summary.clamped}`);
+  for (const [reason, count] of Object.entries(summary.skipped)) {
+    out(`Пропущено кампаний (${reason}): ${count}`);
+  }
 
   const troubles = [
     summary.applyFailed > 0 ? `не записано в кабинет: ${summary.applyFailed}` : null,
     summary.approvalsFailed > 0 ? `карточек не выпущено: ${summary.approvalsFailed}` : null,
+    summary.approvalsUndelivered > 0
+      ? `карточек не доставлено, нажать их некому: ${summary.approvalsUndelivered}`
+      : null,
     summary.localStateFailed > 0
       ? `изменение доехало, а наши строки не обновились: ${summary.localStateFailed}`
       : null,
@@ -202,11 +232,13 @@ function renderSummary(summary: ScheduledOptimizationSummary, out: (line: string
  * С `--apply` работа уходит в `runScheduledOptimization` — ту же точку, которую
  * дёргает крон. Раньше `--apply` здесь означал только флаг в отчёте движка:
  * решения считались и выбрасывались, а вывод при этом читался как «применено».
+ *
+ * @returns нужно ли вмешательство человека — по нему ставится код возврата.
  */
 export async function runOptimizeCommand(
   options: OptimizeCommandOptions,
   deps: OptimizeCommandDeps = {},
-): Promise<void> {
+): Promise<boolean> {
   const out = deps.out ?? ((line: string) => process.stdout.write(`${line}\n`));
   const dryRunEnv = deps.dryRunEnv ?? env.DRY_RUN;
 
@@ -218,15 +250,21 @@ export async function runOptimizeCommand(
     out('');
   }
 
+  // Область прогона называется вслух: сводка состоит из одних чисел, и по ней
+  // нельзя было отличить прогон по одному клиенту от прогона по всем.
+  out(options.clientId === undefined ? 'Клиенты: все' : `Клиент: ${options.clientId}`);
+
   if (apply) {
-    renderSummary(await (deps.applyAll ?? defaultApplyAll)(options.clientId), out);
-    return;
+    const summary = await (deps.applyAll ?? defaultApplyAll)(options.clientId);
+    renderSummary(summary, out);
+    return optimizeNeedsHumanFix(summary);
   }
 
   const campaigns = await (deps.listCampaigns ?? defaultListCampaigns)(options.clientId);
   if (campaigns.length === 0) {
-    out(`Кампаний нет. Сначала выполните: ${cliInvocation()} ingest`);
-    return;
+    out(`Кампаний нет. Сначала выполните: ${cliInvocation()} ingest --apply`);
+    return false;
   }
   await preview(campaigns, deps, out);
+  return false;
 }

@@ -56,7 +56,11 @@ export async function listIngestionTargets(
   const rows = await deps.db.credential.findMany({
     where: {
       client: { status: 'ACTIVE' },
-      ...(options.clientId ? { clientId: options.clientId } : {}),
+      // Явная проверка на `undefined`, а не на истинность: пустая строка ложна, и
+      // фильтр от неё исчезал — заказ «по одному клиенту» разворачивался в обход
+      // всех кабинетов. Здесь такой аргумент сузит выборку до пустоты; наверху,
+      // на входе CLI, он отвергается словами (`resolveClientId`).
+      ...(options.clientId === undefined ? {} : { clientId: options.clientId }),
     },
     select: { clientId: true, provider: true },
     orderBy: [{ clientId: 'asc' }, { provider: 'asc' }],

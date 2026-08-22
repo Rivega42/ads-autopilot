@@ -182,6 +182,9 @@ describe('optimize --apply доводит решения до кабинета',
     expect(second.code).toBe(0);
     expect(second.stdout).toContain('Изменений записано в кабинеты: 0');
     expect(second.stdout).toContain('Карточек апрува выпущено: 0');
+    // Без этой строки «выпущено: 0» читается как «ничего не вышло», хотя карточки
+    // первого прогона живы и ждут нажатия.
+    expect(second.stdout).toContain('уже выпущено раньше и повторно не отправлено: 2');
 
     // Ни одного обращения к площадке: решения отсеклись на ключах идемпотентности
     // до выхода в сеть. Ключи лежат в нашей БД, поэтому переживают конец процесса —
@@ -259,7 +262,9 @@ describe('optimize --apply, когда кабинет отказал', () => {
   });
 
   it('сводка называет провал, а не прячет его за числом записанного', () => {
-    expect(result.code).toBe(0);
+    // Ненулевой код: скрипт, обходящий клиентов, читает именно его. Со строкой
+    // «не записано в кабинет: 2» при нулевом коде прогон не отличался от успеха.
+    expect(result.code).not.toBe(0);
     expect(result.stdout).toContain('Изменений записано в кабинеты: 3');
     expect(result.stdout).toContain('не записано в кабинет: 2');
     expect(result.mock.yandex.refused).toEqual(['keywordbids.set', 'keywordbids.set']);
@@ -308,9 +313,13 @@ describe('optimize --apply, когда карточку доставить не�
   });
 
   it('запись в кабинет не страдает от того, что Telegram отказал', () => {
-    expect(result.code).toBe(0);
     expect(result.stdout).toContain('Изменений записано в кабинеты: 5');
     expect(result.mock.telegram.sent).toEqual([]);
+  });
+
+  it('нажать карточку некому — это видно и строкой, и кодом возврата', () => {
+    expect(result.stdout).toContain('карточек не доставлено');
+    expect(result.code).not.toBe(0);
   });
 
   it('заявка жива и несёт причину недоставки — по ней её найдёт дашборд', async () => {

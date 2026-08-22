@@ -174,10 +174,14 @@ printf '%s' '{"clientId":"…","clientSecret":"…","agencyClientName":"…"}' \
 
 ```bash
 dc run --rm -T --no-deps -e ROLE=cli api credentials list --client <id>   # какие каналы заведены
-dc run --rm -T --no-deps -e ROLE=cli api ingest --client <id>            # реально ли ходит в кабинет
+dc run --rm -T --no-deps -e ROLE=cli api ingest --client <id> --apply    # реально ли ходит в кабинет
 dc exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
   -c "select actor, action, resource, \"createdAt\" from \"AuditLog\" where action like 'credential%' order by id desc limit 5;"
 ```
+
+`ingest` без `--apply` (и при `DRY_RUN=true` в окружении) в кабинет не ходит
+вовсе: печатает окно дат и список кабинетов, которые опросил бы. Проверка «реально
+ли ходит» — это `--apply` на стенде с `DRY_RUN=false`.
 
 Если клиент не в статусе `ACTIVE`, команда предупредит об этом при записи: крон
 загрузки (`listIngestionTargets`) и продление токенов берут только активных, и

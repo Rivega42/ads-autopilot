@@ -258,3 +258,63 @@ describe('optimize --apply', () => {
     expect(sink.text()).toContain('DRY_RUN');
   });
 });
+
+describe('optimize --apply: код возврата и полнота сводки', () => {
+  it('чистый прогон человека не зовёт', async () => {
+    const sink = collector();
+    const needsHuman = await runOptimizeCommand(
+      { apply: true },
+      depsWith({ out: sink.out, applyAll: () => Promise.resolve(summaryOf({ autoApply: 3 })) }),
+    );
+    expect(needsHuman).toBe(false);
+  });
+
+  it('потери зовут человека кодом возврата, а не только строкой ⚠️', async () => {
+    // Скрипт, обходящий клиентов, читает код возврата: «не записано в кабинет: 5»
+    // при нулевом коде он не отличит от успеха.
+    const sink = collector();
+    const needsHuman = await runOptimizeCommand(
+      { apply: true },
+      depsWith({ out: sink.out, applyAll: () => Promise.resolve(summaryOf({ applyFailed: 5 })) }),
+    );
+    expect(needsHuman).toBe(true);
+    expect(sink.text()).toContain('не записано в кабинет: 5');
+  });
+
+  it('повтор в те же сутки говорит, что карточки уже выпущены, а не «ничего не вышло»', async () => {
+    const sink = collector();
+    await runOptimizeCommand(
+      { apply: true },
+      depsWith({
+        out: sink.out,
+        applyAll: () => Promise.resolve(summaryOf({ approvals: 0, approvalsDuplicate: 2 })),
+      }),
+    );
+    const text = sink.text();
+    expect(text).toContain('Карточек апрува выпущено: 0');
+    expect(text).toContain('уже выпущено раньше');
+    expect(text).toContain(': 2');
+  });
+
+  it('пропущенные кампании названы и в сводке применения — как в показе', async () => {
+    const sink = collector();
+    await runOptimizeCommand(
+      { apply: true },
+      depsWith({
+        out: sink.out,
+        applyAll: () => Promise.resolve(summaryOf({ skipped: { NO_STATISTICS: 3 } })),
+      }),
+    );
+    expect(sink.text()).toContain('Пропущено кампаний (NO_STATISTICS): 3');
+  });
+
+  it('область прогона названа: по сводке из одних чисел её было не видно', async () => {
+    const one = collector();
+    await runOptimizeCommand({ apply: true, clientId: 'cl_7' }, depsWith({ out: one.out }));
+    expect(one.text()).toContain('Клиент: cl_7');
+
+    const all = collector();
+    await runOptimizeCommand({ apply: true }, depsWith({ out: all.out }));
+    expect(all.text()).toContain('Клиенты: все');
+  });
+});

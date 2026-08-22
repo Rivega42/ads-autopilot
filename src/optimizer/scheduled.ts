@@ -188,7 +188,12 @@ export async function runScheduledOptimization(
       status: 'ACTIVE',
       // Клиент на паузе или в архиве платить за оптимизацию не должен.
       client: { status: 'ACTIVE' },
-      ...(options.clientId ? { clientId: options.clientId } : {}),
+      // Сравнение с `undefined`, а не проверка на истинность: пустая строка falsy,
+      // и фильтр по ней исчезал целиком — прогон, адресованный одному клиенту,
+      // уходил писать в кабинеты всех. Вход это уже отбивает, но правило «фильтр
+      // по истинности строки» опасно само по себе: следующий, кто позовёт эту
+      // функцию не из CLI, унаследует дыру.
+      ...(options.clientId === undefined ? {} : { clientId: options.clientId }),
     },
     select: { id: true, name: true, clientId: true, provider: true, externalId: true },
   });

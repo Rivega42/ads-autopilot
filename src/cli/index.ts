@@ -7,7 +7,7 @@
  */
 export { cliInvocation, DEV_INVOCATION, IMAGE_INVOCATION } from '@/cli/invocation.js';
 export { needsHumanFix } from '@/cli/campaign-exit.js';
-export { resolveApply, type ApplyFlags } from '@/cli/flags.js';
+export { resolveApply, resolveClientId, type ApplyFlags } from '@/cli/flags.js';
 export {
   clientsUsageLines,
   runClientsCommand,
@@ -19,6 +19,13 @@ export {
   type ExistingClient,
   type NewClient,
 } from '@/cli/clients.js';
+export {
+  runIngestCommand,
+  type IngestCommandDeps,
+  type IngestCommandOptions,
+  type IngestKind,
+} from '@/cli/ingest.js';
+export { optimizeNeedsHumanFix } from '@/cli/optimize-exit.js';
 export {
   runOptimizeCommand,
   type OptimizeCampaign,

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { runCli, type CliResult } from './support/cli-process.js';
+import { runCli, runCliWithCabinets, type CliResult } from './support/cli-process.js';
 import { resetDatabase } from './support/database.js';
 import { seedAccount, type Fixture } from './support/seed.js';
 
@@ -190,5 +190,59 @@ describe('optimize: флаги про запись', () => {
     expect(result.code).not.toBe(0);
     expect(result.output).toContain('Команды:');
     expect(result.output).toContain('--dry-run');
+  });
+});
+
+describe('показ и применение сходятся по составу кампаний', () => {
+  let fx: Fixture;
+
+  beforeAll(async () => {
+    await resetDatabase();
+    fx = await seedAccount();
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+  });
+
+  /**
+   * Крон берёт только активные кампании активных клиентов, а показ не фильтровал
+   * ничего. Получалось, что `optimize --client X` подробно разбирает кампанию, а
+   * `optimize --apply --client X` следом отвечает «Кампаний просмотрено: 0»:
+   * показ обещал работу, до которой применение не доходит.
+   */
+  it('клиент на паузе: показ молчит ровно там, где применение не дойдёт', async () => {
+    await prisma.client.update({ where: { id: fx.clientId }, data: { status: 'PAUSED' } });
+
+    const shown = await runCli(['optimize', '--client', fx.clientId]);
+    const applied = await runCli(['optimize', '--apply', '--client', fx.clientId], {
+      DRY_RUN: 'false',
+    });
+
+    expect(shown.code).toBe(0);
+    expect(shown.stdout).toContain('Кампаний нет');
+    expect(shown.stdout).not.toContain('Поиск — Слоны');
+    expect(shown.stdout).not.toContain('NO_STATISTICS');
+    expect(applied.stdout).toContain('Кампаний просмотрено: 0');
+
+    await prisma.client.update({ where: { id: fx.clientId }, data: { status: 'ACTIVE' } });
+  });
+
+  it('архивная кампания не показывается: применение до неё тоже не доходит', async () => {
+    await prisma.campaign.update({
+      where: { id: fx.search.campaignId },
+      data: { status: 'ARCHIVED' },
+    });
+
+    const shown = await runCli(['optimize', '--client', fx.clientId]);
+    // Моки площадок подняты внутри процесса: у второй кампании режим OBSERVER,
+    // и применение выпустит по ней карточку — наружу при этом не уйдёт ничего.
+    const applied = await runCliWithCabinets(['optimize', '--apply', '--client', fx.clientId], {
+      DRY_RUN: 'false',
+    });
+
+    expect(shown.stdout).not.toContain('Поиск — Слоны');
+    expect(shown.stdout).toContain('РСЯ — импорт из кабинета');
+    expect(applied.stdout).toContain('Кампаний просмотрено: 1');
   });
 });

@@ -77,6 +77,18 @@ describe('listIngestionTargets', () => {
 
     expect(targets).toEqual([{ clientId: 'cl2', provider: 'YANDEX_DIRECT' }]);
   });
+
+  it('пустой clientId сужает до пустоты, а не разворачивается во «всех»', async () => {
+    // Фильтр по истинности строки (`clientId ? … : {}`) от пустого значения
+    // исчезал: заказ «по одному клиенту» тихо превращался в обход всех кабинетов.
+    const targets = await listIngestionTargets({
+      db: db.asPrisma(),
+      channels: CHANNELS,
+      clientId: '',
+    });
+
+    expect(targets).toEqual([]);
+  });
 });
 
 describe('runIngestion', () => {

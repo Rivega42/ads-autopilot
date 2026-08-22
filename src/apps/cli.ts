@@ -16,13 +16,14 @@ import {
   clientsUsageLines,
   needsHumanFix,
   resolveApply,
+  resolveClientId,
   runClientsCommand,
+  runIngestCommand,
   runOptimizeCommand,
 } from '@/cli/index.js';
 import { generateCreativeSetOnDemand } from '@/creatives/index.js';
 import { credentialsUsageLines, runCredentialsCommand } from '@/credentials/index.js';
 import { prisma } from '@/db/prisma.js';
-import { runIngestion, runSearchQueryIngestion } from '@/ingestion/index.js';
 import { AppError, describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 
@@ -45,8 +46,8 @@ function printUsage(): void {
       '  channels            показать зарегистрированные адаптеры',
       ...clientsUsageLines(),
       ...credentialsUsageLines(),
-      '  ingest              загрузить сущности и статистику из кабинетов',
-      '  search-queries      загрузить поисковые запросы',
+      '  ingest              загрузить сущности и статистику из кабинетов (нужен --apply)',
+      '  search-queries      загрузить поисковые запросы (нужен --apply)',
       '  campaign            проверить готовность к запуску; с --apply — собрать план',
       '                      и отправить его на апрув в Telegram',
       '  optimize            показать решения оптимизатора; с --apply — применить их',
@@ -66,7 +67,13 @@ function printUsage(): void {
       '  --provider <канал>  credentials: yandex_direct | vk_ads',
       '  --help',
       '',
-      'Без --apply ни одна команда ничего не пишет и не тратит деньги.',
+      'Без --apply ни одна команда ничего не пишет, не тратит деньги и не ходит',
+      'в кабинеты площадок.',
+      '',
+      'DRY_RUN=true в окружении — предохранитель на ИЗМЕНЕНИЯ в кабинетах: он',
+      'отменяет --apply у optimize. Чтение кабинетов (ingest, search-queries),',
+      'запись в нашу БД (clients add, credentials set) и платные вызовы модели',
+      '(creatives) он не запрещает — их сдерживает --apply.',
       '',
     ].join('\n'),
   );
@@ -76,16 +83,6 @@ async function cmdChannels(): Promise<void> {
   const channels = registeredChannels();
   process.stdout.write(`Зарегистрировано адаптеров: ${channels.length}\n`);
   for (const c of channels) process.stdout.write(`  • ${c}\n`);
-}
-
-async function cmdIngest(clientId?: string): Promise<void> {
-  const result = await runIngestion(clientId ? { clientId } : undefined);
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-}
-
-async function cmdSearchQueries(clientId?: string): Promise<void> {
-  const result = await runSearchQueryIngestion(clientId ? { clientId } : undefined);
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 /**
@@ -338,13 +335,18 @@ function parseCliArgs() {
 async function main(): Promise<void> {
   const parsed = parseCliArgs();
   if (parsed === null) return;
-  const { values, positionals } = parsed;
+  const { positionals } = parsed;
 
   const command = positionals[0];
-  if (values.help === true || !command) {
+  if (parsed.values.help === true || !command) {
     printUsage();
     return;
   }
+
+  // Дальше по коду читается только `values`, где `--client` уже проверен: пустая
+  // строка отбивается один раз на всех, а не пятой копией рядом с четырьмя (см.
+  // `resolveClientId`). Сырой `parsed.values.client` ниже не встречается нигде.
+  const values = { ...parsed.values, client: resolveClientId(parsed.values.client) };
 
   // Разбирается до диспетчера: противоречие флагов — ошибка ввода, а не
   // особенность команды, и отвечать на неё все обязаны одинаково.
@@ -366,10 +368,16 @@ async function main(): Promise<void> {
       });
       break;
     case 'ingest':
-      await cmdIngest(values.client);
-      break;
     case 'search-queries':
-      await cmdSearchQueries(values.client);
+      if (
+        await runIngestCommand({
+          kind: command === 'ingest' ? 'entities' : 'search-queries',
+          ...(values.client === undefined ? {} : { clientId: values.client }),
+          apply,
+        })
+      ) {
+        process.exitCode = 1;
+      }
       break;
     case 'campaign':
       await cmdCampaign(values.client, {
@@ -387,10 +395,14 @@ async function main(): Promise<void> {
       });
       break;
     case 'optimize':
-      await runOptimizeCommand({
-        ...(values.client === undefined ? {} : { clientId: values.client }),
-        apply,
-      });
+      if (
+        await runOptimizeCommand({
+          ...(values.client === undefined ? {} : { clientId: values.client }),
+          apply,
+        })
+      ) {
+        process.exitCode = 1;
+      }
       break;
     case 'creatives':
       await cmdCreatives(values.client, values.segment, apply);

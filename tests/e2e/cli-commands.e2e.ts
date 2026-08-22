@@ -108,18 +108,58 @@ describe('backfill-metrika', () => {
   });
 });
 
-describe('ingest', () => {
-  it('печатает разбор по клиентам, а не молчит', async () => {
-    // У клиента заведён доступ, но кампаний нет и площадку никто не зовёт:
-    // загрузка отчитывается пустым результатом. Проверяется именно печать —
-    // до этого сценария вывод команды не сверялся ни с чем.
+describe('ingest и search-queries без --apply', () => {
+  /**
+   * Обе команды ходят в кабинет и тратят баллы Директа. Пока `--dry-run` они
+   * игнорировали, `pnpm cli ingest --dry-run` уходил в Директ по-настоящему:
+   * площадка отвечала отказом, отказ ложился строками в `ErrorLog`, а справка в
+   * это время обещала «--dry-run — только показать». Здесь у клиента есть живой
+   * доступ — значит кабинет в обходе есть, и уйти в него было бы куда.
+   */
+  it.each([['ingest'], ['search-queries']])(
+    '%s --dry-run: окно и кабинеты названы, наружу не ушло ничего',
+    async (command) => {
+      const before = await prisma.errorLog.count();
+      const result = await runCli([command, '--dry-run']);
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain('Окно:');
+      expect(result.stdout).toContain('Кабинетов в обходе: 1');
+      expect(result.stdout).toContain(clientId);
+      expect(result.stdout).toContain('Черновой прогон');
+      expect(result.stdout).toContain('--apply');
+      // Единственное доказательство, что запроса не было: отказ площадки пишется
+      // в журнал, и до починки он там появлялся тремя строками.
+      expect(await prisma.errorLog.count()).toBe(before);
+    },
+  );
+
+  it('без флагов вовсе — то же самое: умолчание не «загрузить»', async () => {
+    const result = await runCli(['ingest']);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Черновой прогон');
+    expect(await prisma.errorLog.count()).toBe(0);
+  });
+
+  it('сужение по клиенту работает и в черновом прогоне', async () => {
     const result = await runCli(['ingest', '--client', 'нет-такого-клиента']);
     expect(result.code).toBe(0);
-    expect(result.stdout.trim().startsWith('{')).toBe(true);
-    // Окно загрузки и число кабинетов — то, ради чего команду и запускают руками.
-    expect(result.stdout).toContain('"targets": 0');
-    expect(result.stdout).toContain('"from"');
-    expect(result.stdout).toContain('"failures"');
+    expect(result.stdout).toContain('Кабинетов в обходе: 0');
+    expect(await prisma.errorLog.count()).toBe(0);
+  });
+
+  it('--apply при DRY_RUN=true работает: кабинет он читает, а не меняет', async () => {
+    // Клиент несуществующий, поэтому кабинетов в обходе ноль и наружу всё равно
+    // не уходит ни одного запроса — проверяется проводка пути записи и то, что
+    // предохранитель её не отменяет: крон грузит данные при DRY_RUN=true точно так же.
+    const result = await runCli(['ingest', '--apply', '--client', 'нет-такого-клиента'], {
+      DRY_RUN: 'true',
+    });
+    expect(result.code).toBe(0);
+    expect(result.stdout).not.toContain('--apply проигнорирован');
+    expect(result.stdout).not.toContain('Черновой прогон');
+    expect(result.stdout).toContain('Кабинетов в обходе: 0, без единого отказа: 0');
+    expect(result.stdout).toContain('Строк статистики: 0');
   });
 });
 
@@ -132,7 +172,7 @@ describe('разбор команды', () => {
   });
 
   it('--dry-run понимают все команды, а не одна', async () => {
-    for (const command of ['clients', 'channels', 'backfill-metrika']) {
+    for (const command of ['clients', 'channels', 'backfill-metrika', 'ingest', 'search-queries']) {
       const result = await runCli([command, '--dry-run']);
       expect(result.output).not.toContain('Unknown option');
       expect(result.code).toBe(0);
