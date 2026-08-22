@@ -2,15 +2,15 @@ import { ApprovalDecision, Provider } from '@prisma/client';
 
 import { BRIEF_FIELD_LABELS } from '@/ai/onboarding/index.js';
 import { formatAmount } from '@/approval/card.js';
-import type { CampaignEntryBlock, CampaignEntryReady } from '@/bot/campaign-entry.js';
+import type { CampaignEntryBlock, CampaignEntryReady } from '@/campaigns/entry.js';
 import { regionName } from '@/campaigns/geo.js';
-import type { CampaignPlan, PlannedCampaign } from '@/campaigns/index.js';
+import type { CampaignPlan, PlannedCampaign } from '@/campaigns/plan.schema.js';
 
 /**
  * Как вход говорит с человеком.
  *
  * Отделено от разбора случаев намеренно: решение «можно ли запускать» принимается
- * один раз (`campaign-entry.ts`), а показывается двумя способами — подробно в CLI
+ * один раз (`entry.ts`), а показывается двумя способами — подробно в CLI
  * и коротко в чате. Здесь только формулировки, ни одного условия про деньги.
  *
  * Требование ко всем текстам одно: человек должен понять, что произойдёт после

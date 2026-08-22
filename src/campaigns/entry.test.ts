@@ -2,12 +2,8 @@ import { ApprovalDecision, ApprovalKind, ClientStatus, Provider } from '@prisma/
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ClientBriefData } from '@/ai/onboarding/index.js';
-import { renderEntryBlock, renderPlanSummary, renderReadiness } from '@/bot/campaign-entry-text.js';
-import {
-  checkCampaignEntry,
-  launchCampaign,
-  type CampaignEntryStore,
-} from '@/bot/campaign-entry.js';
+import { renderEntryBlock, renderPlanSummary, renderReadiness } from '@/campaigns/entry-text.js';
+import { checkCampaignEntry, launchCampaign, type CampaignEntryStore } from '@/campaigns/entry.js';
 import { campaignCreateKey, CAMPAIGN_PLAN_PROVIDER } from '@/campaigns/index.js';
 import type { CampaignPlan } from '@/campaigns/plan.schema.js';
 import { EmptyPlanError } from '@/campaigns/planner.js';

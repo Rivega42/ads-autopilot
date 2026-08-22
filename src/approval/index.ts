@@ -25,6 +25,7 @@ export {
   STUCK_APPROVAL_MINUTES,
   type ExpiredApprovalHandler,
   type ExpireResult,
+  type StuckApprovalsResult,
 } from '@/approval/expire.js';
 export {
   matchApprovalRule,

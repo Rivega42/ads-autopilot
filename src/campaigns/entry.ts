@@ -16,21 +16,18 @@ import {
   type ClientBriefData,
 } from '@/ai/onboarding/index.js';
 import { approvalActionSchema } from '@/approval/index.js';
+import { submitCampaignPlan } from '@/campaigns/approval.js';
 import { buildRegionTargeting, resolveRegions } from '@/campaigns/geo.js';
-import { PENDING_EXTERNAL_ID } from '@/campaigns/idempotency.js';
+import { campaignCreateKey, PENDING_EXTERNAL_ID } from '@/campaigns/idempotency.js';
+import { DIRECT_MIN_DAILY_BUDGET_RUB } from '@/campaigns/limits.js';
+import type { CampaignPlan, PlannedCampaign } from '@/campaigns/plan.schema.js';
 import {
-  campaignCreateKey,
-  loadPlan,
   planBudgets,
   planCampaigns,
-  submitCampaignPlan,
-  CAMPAIGN_PLAN_PROVIDER,
-  DIRECT_MIN_DAILY_BUDGET_RUB,
   type CampaignBudget,
-  type CampaignPlan,
   type PlanCampaignsOptions,
-  type PlannedCampaign,
-} from '@/campaigns/index.js';
+} from '@/campaigns/planner.js';
+import { loadPlan, CAMPAIGN_PLAN_PROVIDER } from '@/campaigns/store.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import { AppError, describeError } from '@/lib/errors.js';

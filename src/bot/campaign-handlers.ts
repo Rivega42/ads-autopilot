@@ -1,12 +1,14 @@
 import type { Bot, Context } from 'grammy';
 
-import { renderEntryBlock, renderPlanSummary, renderReadiness } from '@/bot/campaign-entry-text.js';
+import { findActiveClientId } from '@/bot/client-lookup.js';
 import {
   checkCampaignEntry,
   launchCampaign,
+  renderEntryBlock,
+  renderPlanSummary,
+  renderReadiness,
   type CampaignLaunchOptions,
-} from '@/bot/campaign-entry.js';
-import { findActiveClientId } from '@/bot/client-lookup.js';
+} from '@/campaigns/index.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 

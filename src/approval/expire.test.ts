@@ -1,6 +1,7 @@
 import { ApprovalDecision, ApprovalKind } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type * as ApplyModule from '@/approval/apply.js';
 import type { ApprovalAction } from '@/approval/types.js';
 
 interface Row {
@@ -67,6 +68,19 @@ const h = vi.hoisted(() => {
         }),
       },
     },
+    /**
+     * Мок отвечает как настоящий `applyApproval`, а не как удобно: он захватывает
+     * строку тем же условием (APPROVED → APPLYING → APPLIED) и отвечает SKIPPED,
+     * если захват не удался. Иначе тест не заметил бы повторного применения.
+     */
+    applyApproval: vi.fn(async (id: string, _by: string) => {
+      const row = state.rows.find((r) => r.id === id);
+      if (!row || row.decision !== ApprovalDecision.APPROVED) {
+        return { status: 'SKIPPED' as const, reason: 'decision is not APPROVED' };
+      }
+      row.decision = ApprovalDecision.APPLIED;
+      return { status: 'APPLIED' as const, dryRun: false };
+    }),
     sendMessage: vi.fn(async (_chatId: string, _text: string) => ({ messageId: 1 })),
     editMessageText: vi.fn(
       async (_chatId: string, _messageId: number, _text: string): Promise<void> => undefined,
@@ -75,6 +89,12 @@ const h = vi.hoisted(() => {
 });
 
 vi.mock('@/db/prisma.js', () => ({ prisma: h.prisma }));
+// Частичный мок: `editCard` нужен настоящий (тесты читают правку карточки),
+// а `applyApproval` — единственное, что ходит в кабинет.
+vi.mock('@/approval/apply.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof ApplyModule>()),
+  applyApproval: h.applyApproval,
+}));
 
 const {
   expireApprovals,
@@ -83,6 +103,7 @@ const {
   STUCK_APPROVAL_MINUTES,
 } = await import('@/approval/expire.js');
 const { setMessenger } = await import('@/approval/telegram.js');
+const { APPROVAL_TTL_MINUTES } = await import('@/env.js');
 
 const NOW = new Date('2026-08-08T12:00:00Z');
 
@@ -142,7 +163,7 @@ describe('expireApprovals', () => {
 
     const res = await expireApprovals(NOW);
 
-    expect(res).toEqual({ expired: 2, raced: 0, stuck: 0 });
+    expect(res).toEqual({ expired: 2, raced: 0, stuck: 0, resumed: 0 });
     expect(h.state.rows.every((r) => r.decision === ApprovalDecision.EXPIRED)).toBe(true);
     expect(h.editMessageText).toHaveBeenCalledTimes(2);
     expect(h.editMessageText.mock.calls[0]?.[2]).toContain('Срок ответа истёк');
@@ -168,7 +189,7 @@ describe('expireApprovals', () => {
 
     const res = await expireApprovals(NOW);
 
-    expect(res).toEqual({ expired: 0, raced: 1, stuck: 0 });
+    expect(res).toEqual({ expired: 0, raced: 1, stuck: 0, resumed: 0 });
     expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.APPROVED);
     expect(h.sendMessage).not.toHaveBeenCalled();
   });
@@ -230,24 +251,82 @@ describe('reconcileStuckApprovals', () => {
   it('показывает человеку заявку, зависшую в APPLYING, и ничего не применяет', async () => {
     h.state.rows = [stuckRow()];
 
-    const stuck = await reconcileStuckApprovals(NOW);
+    const res = await reconcileStuckApprovals(NOW);
 
-    expect(stuck).toBe(1);
+    expect(res).toEqual({ resumed: 0, notified: 1 });
     // Автоприменения нет: неизвестно, успел ли пройти запрос в кабинет.
     expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.APPLYING);
+    expect(h.applyApproval).not.toHaveBeenCalled();
     expect(h.sendMessage).toHaveBeenCalledTimes(1);
     const text = h.sendMessage.mock.calls[0]?.[1] ?? '';
     expect(text).toContain('результат применения неизвестен');
     expect(text).toContain('@roman');
   });
 
-  it('одобренную, но так и не начатую заявку описывает иначе — деньги на месте', async () => {
+  /**
+   * Главное отличие APPROVED от APPLYING: применение не начиналось, повтор ничего
+   * не удваивает — значит заявку не показывают человеку, а доводят до конца. Пока
+   * её только показывали, строка оставалась APPROVED навсегда, и вход в создание
+   * кампании видел живую заявку до скончания века.
+   */
+  it('одобренную, но не начатую заявку доводит до конца, а не только показывает', async () => {
     h.state.rows = [stuckRow({ decision: ApprovalDecision.APPROVED })];
 
-    expect(await reconcileStuckApprovals(NOW)).toBe(1);
+    const res = await reconcileStuckApprovals(NOW);
+
+    expect(res).toEqual({ resumed: 1, notified: 0 });
+    expect(h.applyApproval).toHaveBeenCalledWith('ap1', '@roman');
+    expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.APPLIED);
     const text = h.sendMessage.mock.calls[0]?.[1] ?? '';
     expect(text).toContain('применение так и не началось');
+    expect(text).toContain('Довёл до конца');
     expect(text).not.toContain('результат применения неизвестен');
+  });
+
+  it('доведённая заявка перестаёт быть зависшей — второй прогон её не трогает', async () => {
+    h.state.rows = [stuckRow({ decision: ApprovalDecision.APPROVED })];
+
+    await reconcileStuckApprovals(NOW);
+    const again = await reconcileStuckApprovals(new Date(NOW.getTime() + 60 * 60_000));
+
+    expect(again).toEqual({ resumed: 0, notified: 0 });
+    expect(h.applyApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('перехваченную другим воркером заявку не считает и в чат не пишет', async () => {
+    h.state.rows = [stuckRow({ decision: ApprovalDecision.APPROVED })];
+    // Пока сверка шла к строке, применение уже началось где-то ещё.
+    h.applyApproval.mockResolvedValueOnce({
+      status: 'SKIPPED',
+      reason: 'apply already in progress',
+    });
+
+    expect(await reconcileStuckApprovals(NOW)).toEqual({ resumed: 0, notified: 0 });
+    expect(h.sendMessage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Payload карточки писался в расчёте на то, что между решением и применением
+   * пройдёт не больше APPROVAL_TTL_MINUTES (`create.ts`). За этим порогом цифры
+   * в нём уже ничем не подтверждены: применять нельзя, но и оставлять заявку
+   * живой нельзя тем более — закрываем отказом.
+   */
+  it('одобренную слишком давно не применяет, но и живой не оставляет', async () => {
+    h.state.rows = [
+      stuckRow({
+        decision: ApprovalDecision.APPROVED,
+        decidedAt: new Date(NOW.getTime() - (APPROVAL_TTL_MINUTES + 1) * 60_000),
+      }),
+    ];
+
+    const res = await reconcileStuckApprovals(NOW);
+
+    expect(res).toEqual({ resumed: 0, notified: 1 });
+    expect(h.applyApproval).not.toHaveBeenCalled();
+    expect(h.state.rows[0]?.decision).toBe(ApprovalDecision.FAILED);
+    const text = h.sendMessage.mock.calls[0]?.[1] ?? '';
+    expect(text).toContain('не применяли');
+    expect(h.state.rows[0]?.error).toContain('применение не начиналось');
   });
 
   it('не шумит повторно на каждом прогоне крона', async () => {
@@ -256,23 +335,35 @@ describe('reconcileStuckApprovals', () => {
     await reconcileStuckApprovals(NOW);
     const again = await reconcileStuckApprovals(new Date(NOW.getTime() + 60 * 60_000));
 
-    expect(again).toBe(0);
+    expect(again).toEqual({ resumed: 0, notified: 0 });
     expect(h.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it('свежий APPLYING не трогает — применение ещё идёт', async () => {
     h.state.rows = [stuckRow({ decidedAt: new Date(NOW.getTime() - 60_000) })];
 
-    expect(await reconcileStuckApprovals(NOW)).toBe(0);
+    expect(await reconcileStuckApprovals(NOW)).toEqual({ resumed: 0, notified: 0 });
     expect(h.sendMessage).not.toHaveBeenCalled();
   });
 
+  it('свежий APPROVED не трогает — применение могло начаться секунду назад', async () => {
+    h.state.rows = [
+      stuckRow({
+        decision: ApprovalDecision.APPROVED,
+        decidedAt: new Date(NOW.getTime() - 60_000),
+      }),
+    ];
+
+    expect(await reconcileStuckApprovals(NOW)).toEqual({ resumed: 0, notified: 0 });
+    expect(h.applyApproval).not.toHaveBeenCalled();
+  });
+
   it('крон экспирации сам зовёт сверку — другого крона у модуля нет', async () => {
-    h.state.rows = [stuckRow()];
+    h.state.rows = [stuckRow(), stuckRow({ id: 'ap2', decision: ApprovalDecision.APPROVED })];
 
     const res = await expireApprovals(NOW);
 
-    expect(res.stuck).toBe(1);
-    expect(h.sendMessage).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ expired: 0, raced: 0, stuck: 1, resumed: 1 });
+    expect(h.sendMessage).toHaveBeenCalledTimes(2);
   });
 });

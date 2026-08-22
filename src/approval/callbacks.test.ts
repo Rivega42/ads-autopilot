@@ -152,6 +152,26 @@ describe('processApprovalCallback', () => {
     expect(h.state.row?.respondedBy).toBe('@roman');
   });
 
+  /**
+   * Воспроизведение зависшей заявки: процесс умер между нажатием и применением.
+   *
+   * Настоящий `applyApproval` не бросает — здесь отказ мока изображает не ошибку
+   * применения, а то, что до применения дело не дошло вовсе (под нами убили под).
+   * Строка остаётся в APPROVED, и вытащить её оттуда некому, кроме сверки:
+   * кнопки отвечают «уже обработана», крон экспирации смотрит только PENDING,
+   * а вход в создание кампании считает такую заявку живой.
+   */
+  it('обрыв между нажатием и применением оставляет строку в APPROVED', async () => {
+    seed();
+    h.applyApproval.mockRejectedValue(new Error('процесс убит'));
+
+    await expect(press()).rejects.toThrow('процесс убит');
+
+    expect(h.state.row?.decision).toBe(ApprovalDecision.APPROVED);
+    expect(h.state.row?.decidedAt).toEqual(NOW);
+    expect(h.state.row?.respondedBy).toBe('@roman');
+  });
+
   // Захват проверяем здесь; что apply не сходит в кабинет дважды — в apply.test.ts,
   // где вызывается настоящий applyApproval со своим входным шлюзом.
   it('двойное нажатие захватывает заявку ровно один раз', async () => {

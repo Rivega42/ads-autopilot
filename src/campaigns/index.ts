@@ -43,6 +43,24 @@ export {
   type SubmitCampaignPlanOptions,
 } from '@/campaigns/approval.js';
 
+// Вход человека («запусти») и его формулировки. Лежат здесь, а не в боте: про
+// Telegram они не знают ничего, а зовут их и бот, и CLI.
+export {
+  checkCampaignEntry,
+  launchCampaign,
+  type CampaignEntryBlock,
+  type CampaignEntryCheck,
+  type CampaignEntryOptions,
+  type CampaignEntryReady,
+  type CampaignEntryStore,
+  type CampaignLaunchOptions,
+  type CampaignLaunchOutcome,
+  type CreatedCampaignRef,
+  type LiveApproval,
+} from '@/campaigns/entry.js';
+
+export { renderEntryBlock, renderPlanSummary, renderReadiness } from '@/campaigns/entry-text.js';
+
 export {
   loadPlan,
   savePlan,

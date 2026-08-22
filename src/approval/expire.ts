@@ -1,10 +1,11 @@
 import { ApprovalDecision, type PendingApproval } from '@prisma/client';
 
-import { editCard } from '@/approval/apply.js';
+import { applyApproval, editCard, type ApplyOutcome } from '@/approval/apply.js';
 import { describeAction } from '@/approval/card.js';
 import { getMessenger } from '@/approval/telegram.js';
 import { approvalActionSchema } from '@/approval/types.js';
 import { prisma } from '@/db/prisma.js';
+import { APPROVAL_TTL_MINUTES } from '@/env.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 
@@ -17,6 +18,8 @@ export interface ExpireResult {
   raced: number;
   /** Сколько зависших после решения человека заявок нашла сверка и показала человеку. */
   stuck: number;
+  /** Сколько одобренных, но так и не начатых заявок сверка довела до конца. */
+  resumed: number;
 }
 
 /**
@@ -32,6 +35,16 @@ export const STUCK_NOTIFIED_PREFIX = 'stuck:notified ';
 
 /** Решения, из которых заявка сама уже не выберется: применение оборвалось. */
 const STUCK_DECISIONS = [ApprovalDecision.APPLYING, ApprovalDecision.APPROVED];
+
+/** От чьего имени доводится применение, если решавшего в строке почему-то нет. */
+const RECONCILE_ACTOR = 'сверка зависших заявок';
+
+export interface StuckApprovalsResult {
+  /** Одобрено человеком, применение не начиналось — довели до конца этим прогоном. */
+  resumed: number;
+  /** Показали человеку, ничего не применяя: APPLYING и просроченные одобренные. */
+  notified: number;
+}
 
 export type ExpiredApprovalHandler = (approval: PendingApproval) => Promise<void>;
 
@@ -111,31 +124,37 @@ export async function expireApprovals(now: Date = new Date()): Promise<ExpireRes
 
   // Сверку зовём отсюда: `expire-approvals` — единственный крон, который есть у
   // approval-модуля, а зависшая заявка так же «не доведена до конца», как просроченная.
-  const stuck = await reconcileStuckApprovals(now);
+  const { notified: stuck, resumed } = await reconcileStuckApprovals(now);
 
-  if (expired > 0 || raced > 0 || stuck > 0) {
-    log.info({ expired, raced, stuck }, 'approvals expired');
+  if (expired > 0 || raced > 0 || stuck > 0 || resumed > 0) {
+    log.info({ expired, raced, stuck, resumed }, 'approvals expired');
   }
-  return { expired, raced, stuck };
+  return { expired, raced, stuck, resumed };
 }
 
 /**
- * Сверка зависших заявок.
+ * Сверка зависших заявок: ни одна не имеет права остаться в этом состоянии навсегда.
  *
- * APPLYING означает «шлюз применения захвачен»: между захватом и итогом проходит до
- * двух минут реальной работы с площадкой, и перезапуск пода в этом окне оставляет
- * строку APPLYING навсегда. Крон экспирации смотрит только PENDING, кнопки в карточке
- * молчат «уже обработана», и никто не знает, ушли деньги или нет.
+ * Состояния два, и разбираются они по-разному, потому что означают разное.
  *
- * Задержавшийся APPROVED — история спокойнее: применение не начиналось, деньги точно
- * на месте. Но и оно само не сдвинется, поэтому показываем обе, разным текстом.
+ * APPLYING — «шлюз применения захвачен»: между захватом и итогом проходит до двух
+ * минут реальной работы с площадкой, и перезапуск пода в этом окне оставляет строку
+ * APPLYING навсегда. Повторять нельзя: неизвестно, успел ли запрос уйти в кабинет, а
+ * от второго списания защищает не сверка, а ключ идемпотентности той операции. Поэтому
+ * такую заявку только показываем человеку — разбирать её руками.
  *
- * Автоматически такие заявки НЕ применяются: для APPLYING неизвестно, успел ли пройти
- * запрос в кабинет, а повторное применение стоит денег клиента.
- *
- * @returns сколько заявок показали в этом прогоне.
+ * APPROVED — «человек сказал да, применение ещё не начиналось»: деньги на месте,
+ * в кабинете ничего не менялось, и повтор здесь не повтор, а первая попытка. Такую
+ * заявку сверка доводит до конца сама. Раньше её так же только показывали, и это
+ * была дыра: строка оставалась APPROVED вечно, а вход в создание кампании считает
+ * живую заявку жёстким стопом — клиент нажимал «да» и получал «план ждёт твоего
+ * решения» до скончания века. Автоприменения тут нет: человек уже решил, доводится
+ * ровно его решение, а захват делает тот же условный UPDATE внутри `applyApproval`,
+ * поэтому два воркера не применят одно дважды.
  */
-export async function reconcileStuckApprovals(now: Date = new Date()): Promise<number> {
+export async function reconcileStuckApprovals(
+  now: Date = new Date(),
+): Promise<StuckApprovalsResult> {
   const threshold = new Date(now.getTime() - STUCK_APPROVAL_MINUTES * 60_000);
   const candidates = await prisma.pendingApproval.findMany({
     where: {
@@ -149,50 +168,178 @@ export async function reconcileStuckApprovals(now: Date = new Date()): Promise<n
     orderBy: { decidedAt: 'asc' },
   });
 
-  let notified = 0;
+  const result: StuckApprovalsResult = { resumed: 0, notified: 0 };
   for (const approval of candidates) {
-    // Тем же условным UPDATE: два воркера не должны написать про одну заявку дважды.
-    const res = await prisma.pendingApproval.updateMany({
-      where: {
-        id: approval.id,
-        decision: approval.decision,
-        OR: [{ error: null }, { error: { not: { startsWith: STUCK_NOTIFIED_PREFIX } } }],
-      },
-      data: {
-        error: `${STUCK_NOTIFIED_PREFIX}${now.toISOString()} | было: ${approval.error ?? '—'}`,
-      },
-    });
-    if (res.count === 0) continue;
-    notified += 1;
-
-    log.error(
-      { approvalId: approval.id, decision: approval.decision, decidedAt: approval.decidedAt },
-      'approval stuck after decision, apply outcome unknown',
-    );
-    await notifyStuck(approval);
+    if (approval.decision === ApprovalDecision.APPROVED) {
+      await finishApproved(approval, now, result);
+      continue;
+    }
+    if (await markNotified(approval, now)) {
+      result.notified += 1;
+      log.error(
+        { approvalId: approval.id, decision: approval.decision, decidedAt: approval.decidedAt },
+        'approval stuck after decision, apply outcome unknown',
+      );
+      await notifyStuck(approval);
+    }
   }
-  return notified;
+  return result;
+}
+
+/**
+ * Помечает заявку как показанную. Тем же условным UPDATE: два воркера не должны
+ * написать про одну заявку дважды.
+ *
+ * @returns true, если пометку поставили именно мы.
+ */
+async function markNotified(approval: PendingApproval, now: Date): Promise<boolean> {
+  const res = await prisma.pendingApproval.updateMany({
+    where: {
+      id: approval.id,
+      decision: approval.decision,
+      OR: [{ error: null }, { error: { not: { startsWith: STUCK_NOTIFIED_PREFIX } } }],
+    },
+    data: {
+      error: `${STUCK_NOTIFIED_PREFIX}${now.toISOString()} | было: ${approval.error ?? '—'}`,
+    },
+  });
+  return res.count > 0;
+}
+
+/**
+ * Сколько времени после решения одобренную заявку ещё можно довести.
+ *
+ * Не отдельное число: `APPROVAL_TTL_MINUTES` — это срок, на который система сама
+ * назначила цифры карточки действительными («между карточкой и применением проходит
+ * до APPROVAL_TTL_MINUTES», create.ts). Раз столько ждать до применения считалось
+ * допустимым, столько же можно и доводить прерванное. Дальше payload уже ничем не
+ * подтверждён: применять его — значит списать деньги по цене вчерашнего дня.
+ */
+function tooLateToResume(decidedAt: Date, now: Date): boolean {
+  return now.getTime() - decidedAt.getTime() > APPROVAL_TTL_MINUTES * 60_000;
+}
+
+/**
+ * Доводит до конца заявку, одобренную человеком, но так и не начатую.
+ *
+ * Не возвращает наружу ни одной ошибки: сверка идёт по списку, и упавшая заявка не
+ * должна уносить с собой остальные. Не удалось — строка остаётся APPROVED и попадёт
+ * в следующий прогон крона: доведение безопасно повторять, в отличие от APPLYING.
+ */
+async function finishApproved(
+  approval: PendingApproval,
+  now: Date,
+  result: StuckApprovalsResult,
+): Promise<void> {
+  const decidedAt = approval.decidedAt ?? approval.createdAt;
+  if (tooLateToResume(decidedAt, now)) {
+    if (await abandonApproved(approval, now)) result.notified += 1;
+    return;
+  }
+
+  let outcome: ApplyOutcome;
+  try {
+    outcome = await applyApproval(approval.id, approval.respondedBy ?? RECONCILE_ACTOR);
+  } catch (err) {
+    log.error(
+      { approvalId: approval.id, err: describeError(err) },
+      'cannot resume approved approval, will retry next run',
+    );
+    return;
+  }
+
+  if (outcome.status === 'SKIPPED') {
+    // Строку забрал кто-то другой между выборкой и захватом — его и итог.
+    log.info({ approvalId: approval.id, reason: outcome.reason }, 'resume skipped');
+    return;
+  }
+
+  result.resumed += 1;
+  log.warn(
+    { approvalId: approval.id, decidedAt, status: outcome.status },
+    'approved approval never started, finished by reconcile',
+  );
+  await notifyResumed(approval, outcome);
+}
+
+/**
+ * Одобрено слишком давно: применять уже нельзя, но и живой заявку оставлять нельзя —
+ * именно этим вход в создание кампании и был заблокирован. FAILED, а не EXPIRED:
+ * решение человека было, не состоялось применение, и строка обязана говорить правду.
+ *
+ * @returns true, если закрыли её мы.
+ */
+async function abandonApproved(approval: PendingApproval, now: Date): Promise<boolean> {
+  const error =
+    `применение не начиналось дольше ${APPROVAL_TTL_MINUTES} мин после решения: ` +
+    `цифры карточки больше не подтверждены, доведение отменено (${now.toISOString()})`;
+  const res = await prisma.pendingApproval.updateMany({
+    where: { id: approval.id, decision: ApprovalDecision.APPROVED },
+    data: { decision: ApprovalDecision.FAILED, error },
+  });
+  if (res.count === 0) return false;
+
+  log.error(
+    { approvalId: approval.id, decidedAt: approval.decidedAt },
+    'approved approval abandoned',
+  );
+  await editCard(approval, {
+    kind: 'failed',
+    by: approval.respondedBy ?? RECONCILE_ACTOR,
+    error,
+  });
+  const who = approval.respondedBy ? ` (${approval.respondedBy})` : '';
+  await send(
+    approval.chatId,
+    `⚠️ Заявка одобрена${who}, но применение так и не началось, а цифры в карточке ` +
+      `действительны только ${APPROVAL_TTL_MINUTES} мин после решения.\n` +
+      `${firstAction(approval.summary)}\n` +
+      'Ничего не применяли — в кабинете всё как было. Нужно то же изменение — запусти заново.',
+  );
+  return true;
+}
+
+/** Исход, который уже что-то говорит о кабинете: SKIPPED сюда не доходит. */
+type FinishedOutcome = Extract<ApplyOutcome, { status: 'APPLIED' | 'FAILED' }>;
+
+/** Итог доведённого применения человеческими словами. */
+function resumedOutcomeText(outcome: FinishedOutcome): string {
+  if (outcome.status === 'FAILED') return `применить не удалось: ${outcome.error}`;
+  if (outcome.dryRun) return 'dry-run, в кабинет ничего не отправлено';
+  if (outcome.noop === true) return 'менять было нечего, в кабинете всё уже так';
+  return 'изменение применено';
+}
+
+async function notifyResumed(approval: PendingApproval, outcome: FinishedOutcome): Promise<void> {
+  const who = approval.respondedBy ? ` (${approval.respondedBy})` : '';
+  const mark = outcome.status === 'FAILED' ? '⚠️' : '✅';
+  await send(
+    approval.chatId,
+    `${mark} Заявка одобрена${who} более ${STUCK_APPROVAL_MINUTES} минут назад, ` +
+      'но применение так и не началось: процесс прервался.\n' +
+      `${firstAction(approval.summary)}\n` +
+      `Довёл до конца сейчас — ${resumedOutcomeText(outcome)}.`,
+  );
 }
 
 async function notifyStuck(approval: PendingApproval): Promise<void> {
-  if (approval.chatId === null) return;
   const who = approval.respondedBy ? ` (${approval.respondedBy})` : '';
-  const what = firstAction(approval.summary);
-  const body =
-    approval.decision === ApprovalDecision.APPLYING
-      ? 'но результат применения неизвестен: процесс прервался.\n' +
-        `${what}\n` +
-        'Автоматически ничего не повторяем — проверьте кабинет вручную.'
-      : 'но применение так и не началось: процесс прервался до записи в кабинет.\n' +
-        `${what}\n` +
-        'В кабинете ничего не менялось — дождитесь новой рекомендации оптимизатора.';
+  await send(
+    approval.chatId,
+    `⚠️ Заявка одобрена${who} более ${STUCK_APPROVAL_MINUTES} минут назад, ` +
+      'но результат применения неизвестен: процесс прервался.\n' +
+      `${firstAction(approval.summary)}\n` +
+      'Автоматически ничего не повторяем — проверьте кабинет вручную.',
+  );
+}
+
+/** Сообщение в чат заявки. Молчит, если чата нет, и не роняет сверку, если Telegram лежит. */
+async function send(chatId: string | null, text: string): Promise<void> {
+  if (chatId === null) return;
   try {
-    await getMessenger().sendMessage(
-      approval.chatId,
-      `⚠️ Заявка одобрена${who} более ${STUCK_APPROVAL_MINUTES} минут назад, ${body}`,
-    );
+    await getMessenger().sendMessage(chatId, text);
   } catch (err) {
-    log.warn({ chatId: approval.chatId, err: describeError(err) }, 'cannot notify about stuck');
+    log.warn({ chatId, err: describeError(err) }, 'cannot notify about stuck approval');
   }
 }
 

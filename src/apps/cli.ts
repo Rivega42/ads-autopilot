@@ -1,12 +1,14 @@
 import { parseArgs } from 'node:util';
 
 import { backfillMetrikaConfig, clientBriefSchema } from '@/ai/onboarding/index.js';
-import { renderEntryBlock, renderPlanSummary, renderReadiness } from '@/bot/campaign-entry-text.js';
 import {
   checkCampaignEntry,
   launchCampaign,
+  renderEntryBlock,
+  renderPlanSummary,
+  renderReadiness,
   type CampaignLaunchOptions,
-} from '@/bot/campaign-entry.js';
+} from '@/campaigns/index.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { registeredChannels } from '@/channels/registry.js';
 import { generateCreativeSetOnDemand } from '@/creatives/index.js';

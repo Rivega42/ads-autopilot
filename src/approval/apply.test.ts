@@ -33,8 +33,12 @@ const h = vi.hoisted(() => {
     row: Row | null;
     changeLogs: Record<string, unknown>[];
     errorLogs: Record<string, unknown>[];
+    /** Наши строки, найденные по внешним id: журнал решений адресует внутренними. */
+    keywordRows: Array<{ id: string; externalId: string; adGroup: { campaignId: string } }>;
+    adGroupRows: Array<{ id: string; externalId: string; campaignId: string }>;
     updateError: string | null;
     changeLogError: string | null;
+    bidJournalError: string | null;
     negatedError: string | null;
     localStateError: string | null;
     localStateCount: number;
@@ -42,8 +46,13 @@ const h = vi.hoisted(() => {
     row: null,
     changeLogs: [],
     errorLogs: [],
+    keywordRows: [
+      { id: 'kw-internal-1', externalId: 'kw-ext-1', adGroup: { campaignId: 'camp-internal-1' } },
+    ],
+    adGroupRows: [{ id: 'ag-internal-1', externalId: 'ag-ext-1', campaignId: 'camp-internal-1' }],
     updateError: null,
     changeLogError: null,
+    bidJournalError: null,
     negatedError: null,
     localStateError: null,
     localStateCount: 1,
@@ -82,6 +91,11 @@ const h = vi.hoisted(() => {
           state.changeLogs.push(data);
           return data;
         }),
+        createMany: vi.fn(async ({ data }: { data: Record<string, unknown>[] }) => {
+          if (state.bidJournalError) throw new Error(state.bidJournalError);
+          state.changeLogs.push(...data);
+          return { count: data.length };
+        }),
       },
       campaign: {
         findUnique: vi.fn(async (): Promise<{ id: string; clientId: string } | null> => ({
@@ -90,9 +104,15 @@ const h = vi.hoisted(() => {
         })),
         updateMany: localUpdate(),
       },
-      adGroup: { updateMany: localUpdate() },
+      adGroup: {
+        updateMany: localUpdate(),
+        findMany: vi.fn(async (_args: unknown) => state.adGroupRows),
+      },
       ad: { updateMany: localUpdate() },
-      keyword: { updateMany: localUpdate() },
+      keyword: {
+        updateMany: localUpdate(),
+        findMany: vi.fn(async (_args: unknown) => state.keywordRows),
+      },
       searchQueryStat: {
         updateMany: vi.fn(async (_args: unknown) => {
           if (state.negatedError) throw new Error(state.negatedError);
@@ -229,6 +249,13 @@ beforeEach(() => {
   h.state.errorLogs = [];
   h.state.updateError = null;
   h.state.changeLogError = null;
+  h.state.bidJournalError = null;
+  h.state.keywordRows = [
+    { id: 'kw-internal-1', externalId: 'kw-ext-1', adGroup: { campaignId: 'camp-internal-1' } },
+  ];
+  h.state.adGroupRows = [
+    { id: 'ag-internal-1', externalId: 'ag-ext-1', campaignId: 'camp-internal-1' },
+  ];
   h.state.negatedError = null;
   h.state.localStateError = null;
   h.state.localStateCount = 1;
@@ -706,5 +733,132 @@ describe('локальное состояние', () => {
 
     expect(h.prisma.keyword.updateMany).not.toHaveBeenCalled();
     expect(h.prisma.campaign.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Изменение ставки оставляет в журнале две разные записи, и обе нужны: строка
+ * апрува отвечает «что решил человек», строка решения — «что стало со ставкой».
+ * Вторую читает оконный предохранитель следующего прогона (`bid-history.ts`), и
+ * пока её не было, суммарный лимит на всём human-in-the-loop пути не работал.
+ */
+describe('журнал решения по ставке', () => {
+  const bidAction: ApprovalAction = {
+    kind: 'bid_change',
+    clientId: 'cl1',
+    channel: 'YANDEX_DIRECT',
+    reason: 'CPA 900 ₽ при цели 500 ₽',
+    changes: [{ keywordExternalId: 'kw-ext-1', bid: 170, bidBefore: 200 }],
+  };
+
+  function decisionRows(): Record<string, unknown>[] {
+    return h.state.changeLogs.filter((row) => String(row['action']).startsWith('BID_'));
+  }
+
+  it('пишет решение в форме, которую читает предохранитель: наш id и {kind:bid}', async () => {
+    seed({ payload: bidAction, kind: ApprovalKind.BID_CHANGE });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toEqual({ status: 'APPLIED', dryRun: false });
+    expect(decisionRows()).toEqual([
+      {
+        campaignId: 'camp-internal-1',
+        entityType: 'KEYWORD',
+        entityId: 'kw-internal-1',
+        action: 'BID_DECREASE',
+        prevValue: { kind: 'bid', amount: 200 },
+        newValue: { kind: 'bid', amount: 170 },
+        reason: bidAction.reason,
+        actor: ChangeActor.USER,
+        approvedBy: '@roman',
+        provider: 'YANDEX_DIRECT',
+      },
+    ]);
+    // Аудиторская строка апрува осталась на месте: одна не заменяет другую.
+    expect(h.state.changeLogs.some((row) => row['action'] === 'bid_change')).toBe(true);
+  });
+
+  it('повышение называется своим действием — иначе окно посчитает движение не в ту сторону', async () => {
+    seed({
+      payload: {
+        ...bidAction,
+        changes: [{ keywordExternalId: 'kw-ext-1', bid: 230, bidBefore: 200 }],
+      },
+      kind: ApprovalKind.BID_CHANGE,
+    });
+
+    await applyApproval('ap1', '@roman');
+
+    expect(decisionRows()[0]).toMatchObject({
+      action: 'BID_INCREASE',
+      prevValue: { kind: 'bid', amount: 200 },
+      newValue: { kind: 'bid', amount: 230 },
+    });
+  });
+
+  it('ставку VK адресует группой объявлений: у канала нет фраз', async () => {
+    seed({
+      payload: {
+        ...bidAction,
+        channel: 'VK_ADS',
+        changes: [{ keywordExternalId: 'ag-ext-1', bid: 170, bidBefore: 200 }],
+      },
+      kind: ApprovalKind.BID_CHANGE,
+    });
+
+    await applyApproval('ap1', '@roman');
+
+    expect(decisionRows()[0]).toMatchObject({
+      entityType: 'ADGROUP',
+      entityId: 'ag-internal-1',
+      campaignId: 'camp-internal-1',
+      provider: 'VK_ADS',
+    });
+  });
+
+  it('в dry-run решения не записывает: движения ставки на площадке не было', async () => {
+    seed({ payload: bidAction, kind: ApprovalKind.BID_CHANGE });
+    h.buildContext.mockResolvedValue({ clientId: 'cl1', credentials: {}, dryRun: true });
+    h.setBids.mockResolvedValue({ applied: false, plan: { would: 'set 1 bid' } });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toEqual({ status: 'APPLIED', dryRun: true });
+    expect(decisionRows()).toEqual([]);
+  });
+
+  it('пустой ответ адаптера — тоже не движение: менять было нечего', async () => {
+    seed({ payload: bidAction, kind: ApprovalKind.BID_CHANGE });
+    h.setBids.mockResolvedValue({ applied: false, plan: { bids: 0 } });
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out).toMatchObject({ status: 'APPLIED', noop: true });
+    expect(decisionRows()).toEqual([]);
+  });
+
+  it('фраза не из нашей базы решения не порождает и применение не ломает', async () => {
+    seed({ payload: bidAction, kind: ApprovalKind.BID_CHANGE });
+    h.state.keywordRows = [];
+
+    const out = await applyApproval('ap1', '@roman');
+
+    expect(out.status).toBe('APPLIED');
+    expect(decisionRows()).toEqual([]);
+  });
+
+  it('упавшая запись решения не превращает применённое в FAILED, но доезжает текстом', async () => {
+    seed({ payload: bidAction, kind: ApprovalKind.BID_CHANGE });
+    h.state.bidJournalError = 'connection pool timeout';
+
+    const out = await applyApproval('ap1', '@roman');
+
+    // Ставка в кабинете уже стоит: «не применено» позвало бы человека на второй заход.
+    expect(out.status).toBe('APPLIED');
+    expect(out).toMatchObject({
+      warning: expect.stringContaining('суммарный лимит за окно её не увидит'),
+    });
+    expect(h.state.row?.decision).toBe(ApprovalDecision.APPLIED);
   });
 });

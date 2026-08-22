@@ -1,5 +1,6 @@
 import { ApprovalDecision, ChangeActor, type PendingApproval } from '@prisma/client';
 
+import { writeBidDecisions } from '@/approval/bid-journal.js';
 import { formatAmount, renderOutcome, type CardOutcome } from '@/approval/card.js';
 import { changeLogAction, changeSnapshot, executeAction } from '@/approval/execute.js';
 import { syncLocalEntities } from '@/approval/local-state.js';
@@ -99,6 +100,15 @@ export async function applyApproval(approvalId: string, approvedBy: string): Pro
     result.plan,
   );
   if (changeLogError) notes.push(`запись в журнал изменений не удалась: ${changeLogError}`);
+
+  // Решение в канонической форме — рядом с аудиторской строкой, а не вместо неё:
+  // предохранитель следующего прогона читает только её (см. bid-journal.ts).
+  const bidJournalNote = await writeBidDecisions(action, {
+    approvedBy,
+    dryRun,
+    applied: result.applied,
+  });
+  if (bidJournalNote) notes.push(bidJournalNote);
 
   const negatedError = await markNegatedIfNeeded(action, dryRun);
   if (negatedError) notes.push(`пометка минус-фраз в статистике не удалась: ${negatedError}`);
