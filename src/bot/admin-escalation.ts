@@ -63,10 +63,25 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
+ * Право позвать человека, взятое этим ходом.
+ *
+ * Не просто «да/нет»: отпускать захват обязан тот, кто его взял, и по строке,
+ * которую он сам и записал. `heldUntil` — метка владельца: срок, проставленный
+ * в `IdempotencyKey` этим захватом. Строки за захватом может не быть вовсе
+ * (`null`) — так выглядит fail-open при сбое хранилища.
+ */
+export interface EscalationClaim {
+  readonly clientId: string;
+  readonly reason: string;
+  /** Срок, записанный этим захватом; `null` — строки за захватом нет. */
+  readonly heldUntil: Date | null;
+}
+
+/**
  * Захват права позвать человека.
  *
- * `true` — письмо надо отправить, `false` — по этому основанию человека уже позвали
- * и окно ещё не вышло.
+ * Захват (`EscalationClaim`) — письмо надо отправить; `null` — по этому основанию
+ * человека уже позвали и окно ещё не вышло.
  *
  * Гонка здесь настоящая: апдейты обрабатываются параллельно, и два сообщения клиента
  * могут прийти в один момент. Поэтому не «прочитать и решить», а условный
@@ -75,13 +90,13 @@ function isUniqueViolation(err: unknown): boolean {
  *
  * @param clientId - клиент, из-за которого зовут человека
  * @param reason - основание; одинаковое основание в течение окна даёт одно письмо
- * @returns true, если письмо по этому основанию сейчас нужно отправить
+ * @returns захват, если письмо по этому основанию сейчас нужно отправить
  */
 export async function claimEscalation(
   clientId: string,
   reason: string,
   deps: EscalationDeps = {},
-): Promise<boolean> {
+): Promise<EscalationClaim | null> {
   const db = deps.db ?? prisma;
   const now = (deps.now ?? ((): Date => new Date()))();
   const key = escalationKey(clientId, reason);
@@ -94,18 +109,18 @@ export async function claimEscalation(
       where: { key, expiresAt: { lte: now } },
       data: { expiresAt },
     });
-    if (renewed.count > 0) return true;
+    if (renewed.count > 0) return { clientId, reason, heldUntil: expiresAt };
 
     await db.idempotencyKey.create({
       data: { key, scope: SCOPE, entityType: 'Client', entityId: clientId, expiresAt },
     });
-    return true;
+    return { clientId, reason, heldUntil: expiresAt };
   } catch (err) {
-    if (isUniqueViolation(err)) return false;
+    if (isUniqueViolation(err)) return null;
     // Сбой хранилища не повод потерять эскалацию: лишнее письмо человек переживёт,
     // а непозванный человек означает клиента, о котором никто не узнает.
     log.error({ clientId, reason, err: describeError(err) }, 'escalation dedup failed');
-    return true;
+    return { clientId, reason, heldUntil: null };
   }
 }
 
@@ -118,20 +133,31 @@ export async function claimEscalation(
  * недоставленного письма она гасит все следующие поводы по этому клиенту. Роман
  * не получает ничего, а клиенту в тот же миг сказано «дальше подключится человек».
  *
+ * Отпускается ровно своя строка, а не всё, что лежит под ключом. Разница видна на
+ * fail-open: у хода, чей захват упал по сбою хранилища, строки нет вовсе, и
+ * удаление по ключу снесло бы живой захват соседнего хода — Роман получил бы второе
+ * письмо о той же ситуации. Своя строка узнаётся по сроку, который этот захват в
+ * неё и записал.
+ *
  * `deleteMany`, а не `delete`: строки может не быть (её унесла чистка, её удалил
  * параллельный ход), и отсутствие — не ошибка. Сбой самого удаления проглатываем
  * по той же причине, что и сбой захвата: ход клиента ронять нельзя, ему уже ответили.
  */
 export async function releaseEscalation(
-  clientId: string,
-  reason: string,
+  claim: EscalationClaim,
   deps: EscalationDeps = {},
 ): Promise<void> {
+  if (claim.heldUntil === null) return;
   const db = deps.db ?? prisma;
   try {
-    await db.idempotencyKey.deleteMany({ where: { key: escalationKey(clientId, reason) } });
+    await db.idempotencyKey.deleteMany({
+      where: { key: escalationKey(claim.clientId, claim.reason), expiresAt: claim.heldUntil },
+    });
   } catch (err) {
-    log.error({ clientId, reason, err: describeError(err) }, 'cannot release escalation claim');
+    log.error(
+      { clientId: claim.clientId, reason: claim.reason, err: describeError(err) },
+      'cannot release escalation claim',
+    );
   }
 }
 

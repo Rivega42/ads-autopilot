@@ -346,3 +346,133 @@ describe('«г.Москва» в ответе про города не дела�
     expect(await haltReasonOf(clientId)).toBe('no-landing');
   });
 });
+
+// ── Важное 3: зона-слово в присланной ссылке ─────────────────────────────────
+
+/**
+ * Клиент прислал ссылку — и остался в паузе.
+ *
+ * Обратная сторона предыдущего сценария и цена того, что «в тексте назван адрес» и
+ * «этот токен можно записать в бриф» считались одним и тем же признаком. Зоны
+ * `москва`, `дети`, `онлайн` перестали доказывать адрес — правильно для записи и
+ * неправильно для разговора: `школа.москва` в ответе на «пришли ссылку сюда»
+ * получала в ответ то же самое «пришли ссылку сюда», пауза не снималась, повода
+ * позвать человека не возникало, а в единственном письме стояло «сайт не назван» —
+ * при том, что сайт назван и лежит в расшифровке.
+ *
+ * Проверяется поэтому судьба клиента, а не выход разбора: снялась ли пауза,
+ * что услышал клиент, что прочитал Роман.
+ */
+describe('ссылка в зоне-слове снимает паузу и меняет письмо', () => {
+  const ADMIN_CHAT = '778005';
+
+  let clientId: string;
+  let tgUserId: bigint;
+  let script: Script;
+  let reasonBefore: string | undefined;
+  let reasonAfter: string | undefined;
+  let paidBefore = 0;
+  let clientReplyAfter: string | undefined;
+  let adminMessages: SentMessage[] = [];
+
+  beforeAll(async () => {
+    ({ clientId, tgUserId } = await seedLegacyClient());
+    script = runner([
+      ...ASKS_FOR_LANDING,
+      // Адрес в такой зоне модель записала по-своему: в бриф это не уедет, но
+      // «сайта нет» про этого клиента говорить уже неправда.
+      {
+        reply: 'Записал, бриф собран.',
+        updates: { landingUrl: 'https://shkola-msk.ru' },
+        done: true,
+      },
+    ]);
+    const bot = await botWith(script, ADMIN_CHAT);
+
+    telegram.reset();
+    await deliver(bot, commandUpdate(tgUserId, '/onboarding'));
+    for (const text of ['сайта нет', 'нет, только группа в ВК', 'нет и не будет']) {
+      await deliver(bot, textUpdate(tgUserId, text));
+    }
+    reasonBefore = await haltReasonOf(clientId);
+    paidBefore = script.calls;
+
+    telegram.reset();
+    await deliver(bot, textUpdate(tgUserId, 'а, вспомнил, есть школа.москва'));
+    reasonAfter = await haltReasonOf(clientId);
+    clientReplyAfter = telegram.sent.filter((m) => m.chatId === String(tgUserId)).at(-1)?.text;
+    adminMessages = telegram.sent.filter((m) => m.chatId === ADMIN_CHAT);
+  });
+
+  it('до ссылки интервью стоит на «сайта нет»', () => {
+    expect(reasonBefore).toBe('no-landing');
+  });
+
+  it('присланная ссылка снимает паузу, а не повторяет «пришли ссылку»', () => {
+    // Пауза снимается ходом модели — значит ответ клиента дошёл до интервью, а не
+    // был погашен константой.
+    expect(script.calls).toBe(paidBefore + 1);
+    expect(clientReplyAfter).not.toContain('Пришли ссылку сюда');
+    expect(reasonAfter).not.toBe('no-landing');
+  });
+
+  it('основание сменилось на «разберётся человек»', () => {
+    expect(reasonAfter).toBe('unconfirmed-landing');
+  });
+
+  it('Роман получает новый повод и верный диагноз', () => {
+    expect(adminMessages).toHaveLength(1);
+    expect(adminMessages[0]?.text).toContain('записать не смогли');
+    expect(adminMessages[0]?.text).not.toContain('сайт не назван');
+  });
+});
+
+// ── Важное 4: имя файла — не сайт ────────────────────────────────────────────
+
+/**
+ * «У меня только каталог.pdf» — это ответ «сайта нет».
+ *
+ * Имя файла проходило по правилу «латинская зона из 2-24 букв», и письмо человеку
+ * уверенно ставило неверный диагноз: «адрес назван, но записать не смогли». Дыра
+ * старая, но подписи к файлам теперь тоже ответ клиента — таких сообщений в потоке
+ * станет больше, а не меньше.
+ */
+describe('имя файла не делает клиента владельцем сайта', () => {
+  const ADMIN_CHAT = '778006';
+
+  let clientId: string;
+  let lastClientReply: string | undefined;
+  let adminMessages: SentMessage[] = [];
+
+  beforeAll(async () => {
+    const seeded = await seedLegacyClient();
+    clientId = seeded.clientId;
+    const script = runner(ASKS_FOR_LANDING);
+    const bot = await botWith(script, ADMIN_CHAT);
+
+    telegram.reset();
+    await deliver(bot, commandUpdate(seeded.tgUserId, '/onboarding'));
+    for (const text of ['сайта нет', 'у меня только каталог.pdf', 'сайт не делали']) {
+      await deliver(bot, textUpdate(seeded.tgUserId, text));
+    }
+
+    lastClientReply = telegram.sent
+      .filter((m) => m.chatId === String(seeded.tgUserId))
+      .at(-1)?.text;
+    adminMessages = telegram.sent.filter((m) => m.chatId === ADMIN_CHAT);
+  });
+
+  it('пауза записана как «сайта нет»', async () => {
+    expect(await haltReasonOf(clientId)).toBe('no-landing');
+  });
+
+  it('клиенту сказана правда про Директ', () => {
+    expect(lastClientReply).toBe(NO_LANDING_REPLY);
+  });
+
+  it('в письме человеку стоит верный диагноз', () => {
+    expect(adminMessages).toHaveLength(1);
+    expect(adminMessages[0]?.text).toContain('сайт не назван');
+    expect(adminMessages[0]?.text).not.toContain('записать не смогли');
+  });
+});

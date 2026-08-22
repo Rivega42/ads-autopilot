@@ -484,7 +484,10 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
 
   // Клиент, назвавший адрес, сайт имеет — даже если записать этот адрес не вышло.
   // Разница не косметическая: одному система говорит «в Директе так нельзя»,
-  // другому — «разберётся человек».
+  // другому — «разберётся человек». Признак поэтому мягче, чем у записи в бриф
+  // (`mentionsWebAddress` против `extractWebAddresses`): цена лишнего «сайта нет»
+  // — потерянный клиент в паузе без выхода, цена лишней записи — чужой сайт в
+  // объявлении, и второе дороже.
   const landingHalt: HaltReason = answers.some(mentionsWebAddress)
     ? 'unconfirmed-landing'
     : 'no-landing';

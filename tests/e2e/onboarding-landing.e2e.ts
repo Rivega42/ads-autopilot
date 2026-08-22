@@ -321,3 +321,64 @@ describe('клиент с группой в ВК вместо сайта', () =>
     expect(parseTranscript(row?.transcript).halted?.reason).toBe('unconfirmed-landing');
   });
 });
+
+/**
+ * Сайт в зоне-слове: `школа.москва`.
+ *
+ * Зоны `москва`, `дети`, `онлайн`, `сайт`, `рус` сами по себе адрес не доказывают —
+ * иначе «г.Москва» из ответа про города становится сайтом. Но клиент, у которого
+ * сайт именно такой, обязан пройти интервью до конца: он присылает ссылку в ответ
+ * на прямую просьбу, и слышать в ответ ту же просьбу — это круг без выхода.
+ *
+ * Проверяется поэтому не разбор строки, а судьба клиента: снялась ли пауза, что
+ * лежит в брифе, открылся ли вход в кампанию.
+ */
+describe('сайт в зоне-слове доводит интервью до конца', () => {
+  const SITE = 'школа.москва';
+  /** Тот же домен, как его возвращает модель: `new URL` приводит его к punycode. */
+  const MODEL_SITE_URL = 'https://xn--80atdl2c.xn--80adxhks/';
+
+  let clientId: string;
+  let stopped: InterviewStep;
+  let lifted: InterviewStep;
+
+  beforeAll(async () => {
+    clientId = await seedLegacyClient();
+    const script = runner([
+      { reply: 'Какой у вас сайт?', asking: 'landingUrl' },
+      { reply: 'Пришлите ссылку, пожалуйста.', asking: 'landingUrl' },
+      { reply: 'Без ссылки Директ не примет объявление.', asking: 'landingUrl' },
+      { reply: 'Последний раз: есть страница?', asking: 'landingUrl' },
+      { reply: 'Записал, бриф собран.', updates: { landingUrl: MODEL_SITE_URL }, done: true },
+    ]);
+
+    await startInterview(clientId, { run: script.run });
+    await handleAnswer(clientId, 'пока не готов сказать', { run: script.run });
+    await handleAnswer(clientId, 'сейчас уточню', { run: script.run });
+    stopped = await handleAnswer(clientId, 'не знаю', { run: script.run });
+    lifted = await handleAnswer(clientId, `а, вспомнил, есть ${SITE}`, { run: script.run });
+  });
+
+  it('до ссылки интервью встаёт на «сайта нет»', () => {
+    expect(stopped.kind).toBe('needs_human');
+    expect(stopped.text).toBe(NO_LANDING_REPLY);
+  });
+
+  it('присланная ссылка снимает паузу, а не повторяет просьбу', () => {
+    expect(lifted.kind).toBe('complete');
+  });
+
+  it('адрес доезжает до строки в Postgres', async () => {
+    const row = await prisma.clientBrief.findUnique({
+      where: { clientId },
+      select: { status: true, data: true, transcript: true },
+    });
+    expect(row?.status).toBe(BriefStatus.COMPLETE);
+    expect(row?.data).toMatchObject({ landingUrl: MODEL_SITE_URL });
+    expect(parseTranscript(row?.transcript).halted).toBeNull();
+  });
+
+  it('вход в кампанию после этого открыт', async () => {
+    expect((await checkCampaignEntry(clientId)).kind).toBe('ready');
+  });
+});

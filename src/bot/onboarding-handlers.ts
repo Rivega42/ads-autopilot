@@ -124,7 +124,8 @@ async function reply(
   // Захват берётся до отправки, а не после: два сообщения клиента могут прийти
   // одновременно, и «сначала отправить, потом захватить» даёт человеку два письма.
   const reason = escalationReason(step);
-  if (!(await claimEscalation(clientId, reason, deps.escalation))) {
+  const claim = await claimEscalation(clientId, reason, deps.escalation);
+  if (claim === null) {
     log.info({ clientId }, 'onboarding escalation suppressed: human already called');
     return;
   }
@@ -139,7 +140,7 @@ async function reply(
     // Но и молчать сутки нельзя: захват живёт день и гасит все следующие поводы,
     // а клиенту только что обещали человека. Отпускаем — следующее сообщение
     // клиента попробует снова; след остаётся там, где его видно без Telegram.
-    await releaseEscalation(clientId, reason, deps.escalation);
+    await releaseEscalation(claim, deps.escalation);
     await recordEscalationFailure(
       {
         clientId,

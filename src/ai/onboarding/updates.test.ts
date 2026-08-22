@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { interviewTurnSchema } from './turn.schema.js';
 import {
   applyTurnUpdates,
+  extractWebAddresses,
   mentionsWebAddress,
   normalizeQuote,
   quoteFound,
@@ -448,5 +449,33 @@ describe('mentionsWebAddress', () => {
     expect(mentionsWebAddress('https://дети.онлайн')).toBe(true);
     expect(mentionsWebAddress('www.дети.онлайн')).toBe(true);
     expect(mentionsWebAddress('дети.онлайн/kursy')).toBe(true);
+  });
+
+  it('видит голый адрес в зоне-слове: клиента в паузе просили именно об этом', () => {
+    // Регрессия прошлой волны: зона-слово перестала считаться адресом целиком, и
+    // клиент, приславший `школа.москва` в ответ на «пришли ссылку», получал в ответ
+    // «пришли ссылку» — навсегда. Записать такой токен в бриф мы по-прежнему не
+    // беремся, но говорить его владельцу «сайта нет» нельзя.
+    expect(mentionsWebAddress('а, вспомнил, есть школа.москва')).toBe(true);
+    expect(mentionsWebAddress('наш сайт клиника.онлайн')).toBe(true);
+    expect(mentionsWebAddress('сайт детсад.дети')).toBe(true);
+    expect(mentionsWebAddress('вот: столовая.рус')).toBe(true);
+  });
+
+  it('не считает адресом имя файла', () => {
+    // «у меня только каталог.pdf» — это ответ «сайта нет». Пока имя файла читалось
+    // как адрес, письмо человеку уверенно ставило неверный диагноз: «адрес назван,
+    // но записать не смогли» вместо «сайт не назван».
+    expect(mentionsWebAddress('у меня только каталог.pdf')).toBe(false);
+    expect(mentionsWebAddress('пришлю прайс.docx')).toBe(false);
+    expect(mentionsWebAddress('есть договор.rtf и фото.jpg')).toBe(false);
+    expect(extractWebAddresses('каталог.pdf')).toEqual([]);
+  });
+
+  it('файл на сайте адресом быть не перестаёт', () => {
+    // Отсечка — по имени файла без всяких признаков адреса; ссылка на файл ссылкой
+    // остаётся, и клиента с такой посадочной обижать нечем.
+    expect(mentionsWebAddress('вот https://okna-spb.ru/price.pdf')).toBe(true);
+    expect(extractWebAddresses('okna-spb.ru/katalog.pdf')).toEqual(['okna-spb.ru/katalog.pdf']);
   });
 });
