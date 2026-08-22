@@ -11,5 +11,16 @@
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  //
+  // Здесь же четыре файла в корне и в `prisma/`: они настоящий TypeScript, но не
+  // попадают ни в `src/**`, ни в `tests/**`. Хуже всех был `prisma/seed.ts` —
+  // он ходит в БД и не проверялся ничем.
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "prisma/seed.ts",
+    "prisma.config.ts",
+    "vitest.config.ts",
+    "vitest.setup.ts"
+  ]
 }
