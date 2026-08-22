@@ -12,6 +12,17 @@ map $http_upgrade $connection_upgrade {
   ''      close;
 }
 
+# Встроенный DNS докера. Без `resolver` nginx резолвит `api` и `web` один раз, при
+# разборе конфига, и держит адрес до перезапуска — а `deploy.sh` пересоздаёт api и
+# web, не трогая nginx (образ nginx между выкатами не меняется). Адрес контейнера
+# при пересоздании меняется не всегда, поэтому отказ выходит через раз: в замере
+# три пересоздания подряд дали 502, 200, 502 при живом api. Наружу это выглядит как
+# лежащий API при зелёном деплое.
+#
+# `valid=10s` — на столько кешируется ответ DNS; `ipv6=off`, потому что сети compose
+# по умолчанию без IPv6, а без этой опции nginx получил бы AAAA-запрос и ждал отказа.
+resolver 127.0.0.11 valid=10s ipv6=off;
+
 # Общий редирект на HTTPS. ACME-челлендж обязан остаться на 80: certbot renew
 # ходит по HTTP, и без этого исключения продление сертификата упадёт.
 server {
@@ -46,7 +57,11 @@ server {
   client_max_body_size 2m;
 
   location / {
-    proxy_pass http://api:3000;
+    # Адрес апстрима через переменную — только так nginx резолвит имя на каждый
+    # запрос, а не единожды при старте (см. resolver выше). URI при этом уходит
+    # неизменным: у proxy_pass с переменной и без пути так и задумано.
+    set $api_upstream http://api:3000;
+    proxy_pass $api_upstream;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -76,7 +91,8 @@ server {
   # (web/middleware.ts), и два пароля на одну дверь только путают. Если понадобится
   # закрыть его на уровне прокси — DASHBOARD_AUTH_MODE=proxy плюс auth_basic тут.
   location / {
-    proxy_pass http://web:3001;
+    set $web_upstream http://web:3001;
+    proxy_pass $web_upstream;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;

@@ -30,8 +30,15 @@ migrate)
 api) exec node dist/server.js ;;
 worker) exec node dist/apps/worker.js ;;
 bot) exec node dist/apps/bot.js ;;
+# Ручной прогон: `docker compose run --rm -e ROLE=cli api campaign --client <id>`.
+# `pnpm cli` из образа не работает и работать не может: прод-образ собран без
+# pnpm и без tsx (обе — dev-зависимости), а `pnpm cli` — это `tsx src/apps/cli.ts`,
+# то есть запуск исходников, которых в образе тоже нет. Запускается только
+# собранный `dist/apps/cli.js`, и роль нужна затем, чтобы это знание жило здесь,
+# а не в памяти дежурного.
+cli) exec node dist/apps/cli.js "$@" ;;
 *)
-  echo "entrypoint: неизвестная роль ROLE=${ROLE}; ожидается migrate|api|worker|bot" >&2
+  echo "entrypoint: неизвестная роль ROLE=${ROLE}; ожидается migrate|api|worker|bot|cli" >&2
   exit 64
   ;;
 esac
