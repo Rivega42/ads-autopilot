@@ -5,8 +5,10 @@ import {
   handleAnswer,
   startInterview,
   BRIEF_FIELD_LABELS,
+  type InterviewDeps,
   type InterviewStep,
 } from '@/ai/onboarding/index.js';
+import { claimEscalation, type EscalationDeps } from '@/bot/admin-escalation.js';
 import { findActiveClientId } from '@/bot/client-lookup.js';
 import { env } from '@/env.js';
 import { AppError, describeError } from '@/lib/errors.js';
@@ -60,17 +62,43 @@ export function adminNotice(clientId: string, step: InterviewStep): string | nul
   ].join('\n');
 }
 
-async function reply(ctx: Context, clientId: string, step: InterviewStep): Promise<void> {
+/**
+ * Основание позвать человека — то, чем ситуация отличается от вчерашней.
+ *
+ * Не текст письма и не число заданных вопросов: текст у первой остановки и у ответа
+ * на «а почему?» разный, а ситуация одна и та же. Разный набор недостающих полей —
+ * это уже другой разговор, и о нём человеку стоит узнать сразу.
+ */
+export function escalationReason(step: InterviewStep): string {
+  if (step.kind !== 'needs_human') return 'none';
+  return step.missing.length > 0 ? [...step.missing].sort().join(',') : 'brief-complete';
+}
+
+async function reply(
+  ctx: Context,
+  clientId: string,
+  step: InterviewStep,
+  deps: OnboardingHandlerDeps,
+): Promise<void> {
   await ctx.reply(renderStep(step));
 
   const notice = adminNotice(clientId, step);
   if (notice === null) return;
 
-  const chatId = env.TELEGRAM_ADMIN_CHAT_ID;
+  const chatId = deps.adminChatId ?? env.TELEGRAM_ADMIN_CHAT_ID;
   if (!chatId) {
     log.error({ clientId }, 'onboarding needs a human, but TELEGRAM_ADMIN_CHAT_ID is not set');
     return;
   }
+
+  // Интервью отвечает `needs_human` на каждое сообщение в остановленный бриф —
+  // и на «ладно», и на «спасибо», и на завтрашний `/onboarding`. Письмо при этом
+  // одно и то же, а поток одинаковых писем топит настоящие эскалации.
+  if (!(await claimEscalation(clientId, escalationReason(step), deps.escalation))) {
+    log.info({ clientId }, 'onboarding escalation suppressed: human already called');
+    return;
+  }
+
   try {
     // Отдельным сообщением и без разметки: в тексте бриф клиента, а он регулярно
     // содержит символы, на которых Markdown ломается.
@@ -94,7 +122,22 @@ async function replyError(ctx: Context, err: unknown): Promise<void> {
   );
 }
 
-export function registerOnboardingHandlers(bot: Bot): void {
+export interface OnboardingHandlerDeps {
+  /**
+   * Подмена машины интервью. В проде пусто; сценарные тесты кладут сюда записанные
+   * ходы модели, чтобы прогнать путь «апдейт → grammY → бриф в Postgres» целиком и
+   * не заплатить за живой диалог.
+   */
+  interview?: InterviewDeps;
+  /** Куда уходит письмо «нужен человек». По умолчанию — `TELEGRAM_ADMIN_CHAT_ID`. */
+  adminChatId?: string;
+  /** Подмена хранилища «человека уже позвали» и часов — для сценариев про повторы. */
+  escalation?: EscalationDeps;
+}
+
+export function registerOnboardingHandlers(bot: Bot, deps: OnboardingHandlerDeps = {}): void {
+  const interview = deps.interview ?? {};
+
   bot.command('onboarding', async (ctx) => {
     const clientId = await findActiveClientId(ctx);
     if (!clientId) {
@@ -103,16 +146,25 @@ export function registerOnboardingHandlers(bot: Bot): void {
     }
 
     try {
-      await reply(ctx, clientId, await startInterview(clientId));
+      await reply(ctx, clientId, await startInterview(clientId, interview), deps);
     } catch (err) {
       log.error({ clientId, err: describeError(err) }, 'failed to start interview');
       await replyError(ctx, err);
     }
   });
 
-  bot.on('message:text', async (ctx, next) => {
+  /**
+   * Подпись к фото и файлу — такой же ответ клиента, как обычный текст.
+   *
+   * Один `message:text` стоил клиентам круга, из которого они не выходили: человек
+   * отвечал на вопрос про сайт скриншотом с адресом в подписи, обработчик такого
+   * сообщения не видел вовсе, интервью спрашивало снова — и на третий раз честно
+   * сообщало, что без ссылки рекламироваться нельзя. Ссылка при этом была прислана.
+   */
+  bot.on(['message:text', 'message:caption'], async (ctx, next) => {
+    const answer = ctx.message.text ?? ctx.message.caption ?? '';
     // Команды и апрувы обрабатываются раньше; сюда попадает свободный текст.
-    if (ctx.message.text.startsWith('/')) return next();
+    if (answer.startsWith('/')) return next();
 
     const clientId = await findActiveClientId(ctx);
     if (!clientId) return next();
@@ -120,11 +172,11 @@ export function registerOnboardingHandlers(bot: Bot): void {
     // Решает интервью, а не статус строки: бриф, помеченный готовым до того, как
     // ссылка стала обязательной, всё ещё ждёт ответа — и раньше этот ответ
     // проходил мимо, потому что статус COMPLETE.
-    const state = await getInterviewState(clientId);
+    const state = await getInterviewState(clientId, interview);
     if (!state || !state.expectsAnswer) return next();
 
     try {
-      await reply(ctx, clientId, await handleAnswer(clientId, ctx.message.text));
+      await reply(ctx, clientId, await handleAnswer(clientId, answer, interview), deps);
     } catch (err) {
       log.error({ clientId, err: describeError(err) }, 'failed to handle answer');
       await replyError(ctx, err);

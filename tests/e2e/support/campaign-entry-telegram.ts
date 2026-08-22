@@ -237,3 +237,178 @@ export function buttonData(keyboard: InlineKeyboardMarkup | undefined, label: st
   }
   return button.callback_data;
 }
+
+// ── Апдейты, которых бот до сих пор не видел ─────────────────────────────────
+
+/**
+ * Апдейты ниже собираются вручную, а не через хелпер «сделай сообщение с полем X»,
+ * потому что смысл сценария — прислать боту ровно то тело, что шлёт Telegram.
+ * Обобщённый конструктор пришлось бы сузить типами до того же набора полей, а
+ * ошибиться в них — значит проверить не тот апдейт, который приходит в проде.
+ */
+interface MessageBase {
+  message_id: number;
+  date: number;
+  chat: { id: number; type: 'private'; first_name: string };
+  from: { id: number; is_bot: false; first_name: string; username: string };
+}
+
+function messageBase(tgUserId: bigint): MessageBase {
+  nextUpdateId += 1;
+  const id = Number(tgUserId);
+  return {
+    message_id: nextUpdateId,
+    date: Math.floor(Date.now() / 1000),
+    chat: { id, type: 'private', first_name: 'Клиент' },
+    from: { id, is_bot: false, first_name: 'Клиент', username: 'client' },
+  };
+}
+
+/** Апдейт «человек написал обычный текст» — без разметки команды. */
+export function textUpdate(tgUserId: bigint, text: string): Update {
+  return { update_id: nextUpdateId, message: { ...messageBase(tgUserId), text } };
+}
+
+/** Фотография; `caption` отсутствует, если человек прислал её молча. */
+export function photoUpdate(tgUserId: bigint, caption?: string): Update {
+  return {
+    update_id: nextUpdateId,
+    message: {
+      ...messageBase(tgUserId),
+      photo: [
+        { file_id: 'photo-small', file_unique_id: 'ps', width: 90, height: 60, file_size: 1_200 },
+        {
+          file_id: 'photo-big',
+          file_unique_id: 'pb',
+          width: 1_280,
+          height: 853,
+          file_size: 90_000,
+        },
+      ],
+      ...(caption === undefined ? {} : { caption }),
+    },
+  };
+}
+
+/** Голосовое сообщение. */
+export function voiceUpdate(tgUserId: bigint): Update {
+  return {
+    update_id: nextUpdateId,
+    message: {
+      ...messageBase(tgUserId),
+      voice: { file_id: 'voice-1', file_unique_id: 'v1', duration: 7, mime_type: 'audio/ogg' },
+    },
+  };
+}
+
+/** Документ — тот же прайс или скриншот, отправленный файлом. */
+export function documentUpdate(tgUserId: bigint, caption?: string): Update {
+  return {
+    update_id: nextUpdateId,
+    message: {
+      ...messageBase(tgUserId),
+      document: {
+        file_id: 'doc-1',
+        file_unique_id: 'd1',
+        file_name: 'сайт.pdf',
+        mime_type: 'application/pdf',
+      },
+      ...(caption === undefined ? {} : { caption }),
+    },
+  };
+}
+
+/** Стикер: текста в нём нет вовсе, хотя человек считает его репликой. */
+export function stickerUpdate(tgUserId: bigint): Update {
+  return {
+    update_id: nextUpdateId,
+    message: {
+      ...messageBase(tgUserId),
+      sticker: {
+        file_id: 'sticker-1',
+        file_unique_id: 's1',
+        type: 'regular',
+        width: 512,
+        height: 512,
+        is_animated: false,
+        is_video: false,
+        emoji: '👍',
+      },
+    },
+  };
+}
+
+/** Пересланное текстовое сообщение: текст на месте, но у него другой автор. */
+export function forwardedTextUpdate(tgUserId: bigint, text: string): Update {
+  const base = messageBase(tgUserId);
+  return {
+    update_id: nextUpdateId,
+    message: {
+      ...base,
+      forward_origin: {
+        type: 'user',
+        date: base.date - 3_600,
+        sender_user: { id: 111_222, is_bot: false, first_name: 'Коллега' },
+      },
+      text,
+    },
+  };
+}
+
+/** Правка ранее отправленного сообщения — отдельный тип апдейта, не `message`. */
+export function editedTextUpdate(tgUserId: bigint, text: string): Update {
+  const base = messageBase(tgUserId);
+  return {
+    update_id: nextUpdateId,
+    edited_message: { ...base, edit_date: base.date + 60, text },
+  };
+}
+
+/** Команда, отправленная в групповой чат, куда бота добавили. */
+export function groupCommandUpdate(tgUserId: bigint, chatId: number, text: string): Update {
+  const base = messageBase(tgUserId);
+  return {
+    update_id: nextUpdateId,
+    message: {
+      ...base,
+      chat: { id: chatId, type: 'group', title: 'Отдел маркетинга' },
+      text,
+      entities: [{ type: 'bot_command', offset: 0, length: text.split(' ')[0]?.length ?? 0 }],
+    },
+  };
+}
+
+/** Обычное сообщение в группе — без команды и без обращения к боту. */
+export function groupTextUpdate(tgUserId: bigint, chatId: number, text: string): Update {
+  const base = messageBase(tgUserId);
+  return {
+    update_id: nextUpdateId,
+    message: { ...base, chat: { id: chatId, type: 'group', title: 'Отдел маркетинга' }, text },
+  };
+}
+
+/**
+ * Нажатие кнопки без `callback_data`: так приходят игровые кнопки и кнопки
+ * сторонних раскладок. Поле `data` у апдейта отсутствует, и обработчик
+ * `callback_query:data` его не видит.
+ */
+export function gameCallbackUpdate(tgUserId: bigint, messageId: number): Update {
+  nextUpdateId += 1;
+  const id = Number(tgUserId);
+  return {
+    update_id: nextUpdateId,
+    callback_query: {
+      id: `cb-${nextUpdateId}`,
+      from: { id, is_bot: false, first_name: 'Клиент', username: 'client' },
+      chat_instance: `ci-${id}`,
+      game_short_name: 'legacy_game',
+      message: {
+        message_id: messageId,
+        date: Math.floor(Date.now() / 1000),
+        chat: { id, type: 'private', first_name: 'Клиент' },
+        from: BOT_USER,
+        text: 'старая карточка',
+      },
+    },
+  };
+}

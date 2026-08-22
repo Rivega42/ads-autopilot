@@ -6,7 +6,15 @@ import { CALLBACK_PREFIX } from '@/approval/callback-data.js';
 import { handleApprovalCallback } from '@/approval/callbacks.js';
 import { createApiMessenger, setMessenger } from '@/approval/telegram.js';
 import { registerCampaignHandlers, type CampaignHandlerDeps } from '@/bot/campaign-handlers.js';
-import { registerOnboardingHandlers } from '@/bot/onboarding-handlers.js';
+import {
+  apologize,
+  registerFallbackHandlers,
+  registerPrivateChatGuard,
+} from '@/bot/fallback-handlers.js';
+import {
+  registerOnboardingHandlers,
+  type OnboardingHandlerDeps,
+} from '@/bot/onboarding-handlers.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
@@ -32,6 +40,8 @@ export interface BotDeps {
    * заплатив за живую модель.
    */
   campaigns?: CampaignHandlerDeps;
+  /** То же для интервью онбординга: записанные ходы модели вместо живого диалога. */
+  onboarding?: OnboardingHandlerDeps;
 }
 
 export function buildBot(token: string, deps: BotDeps = {}): Bot {
@@ -50,6 +60,10 @@ export function buildBot(token: string, deps: BotDeps = {}): Bot {
   // друг за другом, а не одновременно.
   bot.use(sequentialize((ctx) => (ctx.chat?.id === undefined ? undefined : String(ctx.chat.id))));
 
+  // Раньше клиентских обработчиков: в групповом чате их работать не должно, и
+  // молчать там бот тоже должен осознанно, а не по недосмотру.
+  registerPrivateChatGuard(bot);
+
   bot.on('callback_query:data', async (ctx) => {
     if (!ctx.callbackQuery.data.startsWith(`${CALLBACK_PREFIX}:`)) {
       // Чужая кнопка (другой модуль или старая раскладка) — ответить всё равно надо,
@@ -60,10 +74,12 @@ export function buildBot(token: string, deps: BotDeps = {}): Bot {
     await handleApprovalCallback(ctx);
   });
 
-  registerOnboardingHandlers(bot);
+  registerOnboardingHandlers(bot, deps.onboarding ?? {});
   registerCampaignHandlers(bot, deps.campaigns ?? {});
+  // Последними: они отвечают ровно на то, что не разобрал никто выше.
+  registerFallbackHandlers(bot, deps.onboarding ?? {});
 
-  bot.catch((err) => {
+  bot.catch(async (err) => {
     const inner = err.error;
     if (inner instanceof GrammyError) {
       logger.error({ description: inner.description, method: inner.method }, 'telegram api error');
@@ -72,6 +88,9 @@ export function buildBot(token: string, deps: BotDeps = {}): Bot {
     } else {
       logger.error({ err: describeError(inner) }, 'bot handler failed');
     }
+    // Сбой без ответа человек читает так же, как проглоченное сообщение: он не
+    // знает, повторять ему или ждать, и чаще всего просто уходит.
+    await apologize(err.ctx);
   });
 
   return bot;
@@ -100,7 +119,10 @@ async function main(): Promise<void> {
   // применение апрува ходит в кабинет и с ретраями площадки занимает до двух минут.
   // Один такой апрув задержал бы нажатия во всех остальных чатах.
   const runner: RunnerHandle = run(bot, {
-    runner: { fetch: { allowed_updates: ['message', 'callback_query'] } },
+    // `edited_message` в списке не потому, что мы читаем правки, а потому, что без
+    // него правка не приходит вовсе — и человек, поправивший свой ответ, остаётся
+    // без единого слова в ответ (см. `registerFallbackHandlers`).
+    runner: { fetch: { allowed_updates: ['message', 'edited_message', 'callback_query'] } },
   });
 
   onShutdown(async () => {
