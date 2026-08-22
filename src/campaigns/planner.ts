@@ -3,7 +3,7 @@ import { Provider, type PrismaClient } from '@prisma/client';
 import { parseCompleteBrief, type ClientBriefData } from '@/ai/onboarding/brief.schema.js';
 import { loadPrompt } from '@/ai/prompt-loader.js';
 import { splitBudget, totalDailyBudget, type BudgetPart } from '@/campaigns/budget.js';
-import { resolveRegions } from '@/campaigns/geo.js';
+import { buildRegionTargeting, regionName, resolveRegions } from '@/campaigns/geo.js';
 import {
   DIRECT_MAX_ADS_PER_GROUP,
   DIRECT_MAX_KEYWORDS_PER_GROUP,
@@ -134,6 +134,21 @@ export async function planCampaigns(
   const channels = opts.channels ?? [Provider.YANDEX_DIRECT];
 
   const brief = await loadBrief(db, clientId);
+  /**
+   * Проверяем до первого обращения к модели: объявление без цели показа Директ
+   * не примет (нужен хотя бы один из Href, TurboPageId, VCardId, BusinessId —
+   * см. Ads.add), а ничего, кроме Href, система пока не умеет. Узнать об этом
+   * после двух платных прогонов модели — заплатить за план, который не применить.
+   */
+  const landingUrl = brief.landingUrl;
+  if (landingUrl === undefined) {
+    throw new EmptyPlanError(
+      clientId,
+      'в брифе нет ссылки на сайт: Директ не примет объявление без Href, ' +
+        'а визитку и турбо-страницы система не создаёт',
+    );
+  }
+
   const warnings: string[] = [];
   const prompts: string[] = [];
 
@@ -160,13 +175,44 @@ export async function planCampaigns(
     warnings.push(`Не распознаны минус-города: ${geo.excluded.unresolved.join(', ')}.`);
   }
 
+  const targeting = buildRegionTargeting(geo.target.regionIds, geo.excluded.regionIds);
+  if (targeting.suppressedTarget.length > 0) {
+    warnings.push(
+      `Из городов показа убраны те, которые бриф одновременно требует исключить: ` +
+        `${targeting.suppressedTarget.map(regionName).join(', ')}. ` +
+        'Запрет считаем сильнее показа — проверьте бриф.',
+    );
+  }
+  if (targeting.droppedNegative.length > 0) {
+    warnings.push(
+      `Минус-города не попали в таргетинг: ${targeting.droppedNegative.map(regionName).join(', ')}. ` +
+        'Они не входят ни в один город показа, показов там и так не будет, ' +
+        'а Директ отклонил бы такую группу (ошибка 5120).',
+    );
+  }
+  if (targeting.regionIds.length === 0) {
+    throw new EmptyPlanError(
+      clientId,
+      'города показа и минус-города из брифа исключают друг друга — показывать негде',
+    );
+  }
+
   const structure = await generateStructure(clientId, brief, opts, prompts);
-  const groups = buildGroups(structure, geo, warnings);
+  const groups = buildGroups(structure, targeting.regionIds, warnings);
   if (groups.length === 0) {
     throw new EmptyPlanError(clientId, 'после проверки лимитов не осталось ни одной группы');
   }
 
-  const texts = await generateTexts(clientId, brief, structure, groups, opts, prompts, warnings);
+  const texts = await generateTexts(
+    clientId,
+    brief,
+    landingUrl,
+    structure,
+    groups,
+    opts,
+    prompts,
+    warnings,
+  );
   if (texts.size === 0) {
     throw new EmptyPlanError(clientId, 'модель не вернула ни одного текста объявления');
   }
@@ -326,12 +372,9 @@ interface GroupSkeleton {
 /** Фильтрация и дедупликация фраз. Всё, что Директ не примет, отсеивается здесь. */
 function buildGroups(
   structure: StructureDraft,
-  geo: ReturnType<typeof resolveRegions>,
+  regionIds: readonly number[],
   warnings: string[],
 ): GroupSkeleton[] {
-  // Минус-города в Директе задаются отрицательными номерами в том же RegionIds.
-  const regionIds = [...geo.target.regionIds, ...geo.excluded.regionIds.map((id) => -id)];
-
   const seen = new Set<string>();
   const groups: GroupSkeleton[] = [];
   let dropped = 0;
@@ -360,7 +403,7 @@ function buildGroups(
       intent: group.intent,
       keywords,
       negativeKeywords: dedupe(group.negativeKeywords ?? []),
-      regionIds,
+      regionIds: [...regionIds],
     });
   }
 
@@ -404,6 +447,7 @@ interface PendingGroup {
 async function generateTexts(
   clientId: string,
   brief: ClientBriefData,
+  landingUrl: string,
   structure: StructureDraft,
   groups: readonly GroupSkeleton[],
   opts: PlanCampaignsOptions,
@@ -464,9 +508,12 @@ async function generateTexts(
         for (const violation of result_.truncated) {
           overflow.push(`${violation.field}: ${violation.actual} из ${violation.limit}`);
         }
-        const planned: PlannedAd = { title: result_.ad.title, text: result_.ad.text };
+        const planned: PlannedAd = {
+          title: result_.ad.title,
+          text: result_.ad.text,
+          href: landingUrl,
+        };
         if (result_.ad.title2) planned.title2 = result_.ad.title2;
-        if (brief.landingUrl) planned.href = brief.landingUrl;
         fitted.push(planned);
       }
 

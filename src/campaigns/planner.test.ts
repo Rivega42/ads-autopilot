@@ -187,12 +187,42 @@ describe('planCampaigns: обычный план', () => {
     expect(startingBid(1, 'network')).toBe(0.3);
   });
 
-  it('переносит регионы и минус-города в таргетинг группы', async () => {
+  it('минус-город вне регионов показа в таргетинг не уезжает', async () => {
     const { db } = makeDb(BRIEF);
     const plan = await planCampaigns('c1', { db, runStructure, runTexts });
 
-    // Москва 213, Санкт-Петербург 2, минус-Сочи -239.
-    expect(plan.campaigns[0]?.adGroups[0]?.regionIds).toEqual([2, 213, -239]);
+    // Москва 213 и Санкт-Петербург 2. Сочи (239) не входит ни в один из них:
+    // `[2, 213, -239]` Директ отклоняет ошибкой 5120, а показов в Сочи и так нет.
+    expect(plan.campaigns[0]?.adGroups[0]?.regionIds).toEqual([2, 213]);
+    expect(plan.warnings.some((w) => w.includes('Минус-города не попали в таргетинг'))).toBe(true);
+  });
+
+  it('вложенный минус-город сохраняется: «Россия, кроме Москвы» — валидный набор', async () => {
+    const { db } = makeDb({ ...BRIEF, geo: ['Россия'], negativeCities: ['Москва'] });
+    const plan = await planCampaigns('c1', { db, runStructure, runTexts });
+
+    expect(plan.campaigns[0]?.adGroups[0]?.regionIds).toEqual([225, -213]);
+    expect(plan.warnings.some((w) => w.includes('Минус-города не попали'))).toBe(false);
+  });
+
+  it('город и в показах, и в минусах — запрет сильнее, и об этом предупреждают', async () => {
+    const { db } = makeDb({
+      ...BRIEF,
+      geo: ['Москва', 'Санкт-Петербург'],
+      negativeCities: ['Москва'],
+    });
+    const plan = await planCampaigns('c1', { db, runStructure, runTexts });
+
+    expect(plan.campaigns[0]?.adGroups[0]?.regionIds).toEqual([2]);
+    expect(plan.warnings.some((w) => w.includes('Из городов показа убраны'))).toBe(true);
+  });
+
+  it('план не строится, если бриф исключает всё, что просит показывать', async () => {
+    const { db } = makeDb({ ...BRIEF, geo: ['Москва'], negativeCities: ['Москва'] });
+
+    await expect(planCampaigns('c1', { db, runStructure, runTexts })).rejects.toThrow(
+      EmptyPlanError,
+    );
   });
 
   it('подставляет посадочную страницу в объявления', async () => {
@@ -353,5 +383,46 @@ describe('planCampaigns: бюджет', () => {
         runTexts: () => Promise.resolve(agentRun({ groups: [{ name: 'Другая', ads: [] }] })),
       }),
     ).rejects.toThrow(EmptyPlanError);
+  });
+});
+
+/**
+ * Объявление обязано вести хоть куда-то: Директ принимает `TextAd` только с одним из
+ * `Href`, `TurboPageId`, `VCardId`, `BusinessId` (Ads.add), а из них система умеет
+ * заполнить только `Href`. План без ссылки применить нельзя — значит и строить его
+ * нельзя, тем более что до отказа площадки успели бы отработать два платных прогона
+ * модели, а кампания и группы в кабинете уже были бы созданы.
+ */
+describe('planCampaigns: объявлению нужна цель показа', () => {
+  const briefWithoutSite: ClientBriefData = { ...BRIEF };
+  delete briefWithoutSite.landingUrl;
+
+  it('без ссылки на сайт план не строится', async () => {
+    const { db } = makeDb(briefWithoutSite);
+
+    await expect(planCampaigns('c1', { db, runStructure, runTexts })).rejects.toThrow(
+      EmptyPlanError,
+    );
+  });
+
+  it('отказ случается до обращения к модели: платить за неприменимый план не за что', async () => {
+    const { db } = makeDb(briefWithoutSite);
+    const structure = vi.fn(() => Promise.resolve(agentRun(STRUCTURE)));
+    const texts = vi.fn(() => Promise.resolve(agentRun(TEXTS)));
+
+    await expect(
+      planCampaigns('c1', { db, runStructure: structure, runTexts: texts }),
+    ).rejects.toThrow(EmptyPlanError);
+    expect(structure).not.toHaveBeenCalled();
+    expect(texts).not.toHaveBeenCalled();
+  });
+
+  it('со ссылкой каждое объявление плана несёт href', async () => {
+    const { db } = makeDb(BRIEF);
+    const plan = await planCampaigns('c1', { db, runStructure, runTexts });
+
+    const ads = plan.campaigns.flatMap((c) => c.adGroups.flatMap((g) => g.ads));
+    expect(ads.length).toBeGreaterThan(0);
+    expect(ads.every((ad) => ad.href === BRIEF.landingUrl)).toBe(true);
   });
 });

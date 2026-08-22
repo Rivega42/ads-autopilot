@@ -117,14 +117,23 @@ describe('truncateToLimit', () => {
     });
     // Схема — последний рубеж: с пустым Title объявление отклонят на 20 баллов,
     // а группа останется без объявлений вовсе.
-    expect(plannedAdSchema.safeParse(ad).success).toBe(true);
+    expect(plannedAdSchema.safeParse({ ...ad, href: 'https://example.com' }).success).toBe(true);
   });
 });
 
 describe('plannedAdSchema', () => {
   it('не пропускает пустой заголовок и пустой текст', () => {
-    expect(plannedAdSchema.safeParse({ title: '', text: 'Текст' }).success).toBe(false);
-    expect(plannedAdSchema.safeParse({ title: 'Заголовок', text: '   ' }).success).toBe(false);
+    const href = 'https://example.com';
+    expect(plannedAdSchema.safeParse({ title: '', text: 'Текст', href }).success).toBe(false);
+    expect(plannedAdSchema.safeParse({ title: 'Заголовок', text: '   ', href }).success).toBe(
+      false,
+    );
+  });
+
+  it('объявление без ссылки не проходит: Директу нужен Href', () => {
+    expect(
+      plannedAdSchema.safeParse({ title: 'Заголовок', text: 'Текст объявления.' }).success,
+    ).toBe(false);
   });
 });
 

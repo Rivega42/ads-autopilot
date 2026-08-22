@@ -25,6 +25,8 @@ import { ChannelError } from '@/lib/errors.js';
  * Проверяем ровно то, что стоит денег, — dry-run и повторное создание.
  */
 
+const LANDING = 'https://example.com/course';
+
 const PLAN: CampaignPlan = campaignPlanSchema.parse({
   id: 'plan-1',
   clientId: 'c1',
@@ -46,7 +48,7 @@ const PLAN: CampaignPlan = campaignPlanSchema.parse({
           regionIds: [213],
           keywords: [{ phrase: 'курсы английского', bidRub: 100 }],
           negativeKeywords: [],
-          ads: [{ title: 'Английский для IT', text: 'Разговорный курс.' }],
+          ads: [{ title: 'Английский для IT', text: 'Разговорный курс.', href: LANDING }],
         },
       ],
     },
@@ -64,7 +66,7 @@ const PLAN: CampaignPlan = campaignPlanSchema.parse({
           regionIds: [213],
           keywords: [{ phrase: 'курсы английского', bidRub: 50 }],
           negativeKeywords: [],
-          ads: [{ title: 'Английский для IT', text: 'Разговорный курс.' }],
+          ads: [{ title: 'Английский для IT', text: 'Разговорный курс.', href: LANDING }],
         },
       ],
     },

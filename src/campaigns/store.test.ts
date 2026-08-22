@@ -32,7 +32,7 @@ const PLAN: CampaignPlan = campaignPlanSchema.parse({
           regionIds: [213],
           keywords: [{ phrase: 'фраза', bidRub: 100 }],
           negativeKeywords: [],
-          ads: [{ title: 'Заголовок', text: 'Текст объявления.' }],
+          ads: [{ title: 'Заголовок', text: 'Текст объявления.', href: 'https://example.com' }],
         },
       ],
     },

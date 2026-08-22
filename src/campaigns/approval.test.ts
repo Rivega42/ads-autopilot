@@ -36,7 +36,7 @@ function planWith(id: string | null): CampaignPlan {
           regionIds: [213],
           keywords: [{ phrase: 'фраза', bidRub: 100 }],
           negativeKeywords: [],
-          ads: [{ title: 'Заголовок', text: 'Текст объявления.' }],
+          ads: [{ title: 'Заголовок', text: 'Текст объявления.', href: 'https://example.com' }],
         },
       ],
     })),

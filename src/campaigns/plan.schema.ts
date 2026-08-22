@@ -100,7 +100,13 @@ export const plannedAdSchema = z.object({
   title: withinLimit(DIRECT_TITLE_MAX),
   title2: withinLimit(DIRECT_TITLE2_MAX).optional(),
   text: withinLimit(DIRECT_TEXT_MAX),
-  href: z.string().trim().url().max(1_024).optional(),
+  /**
+   * Обязательна: Директ принимает объявление только с целью показа — хотя бы одним
+   * из Href, TurboPageId, VCardId, BusinessId (Ads.add). Ничего, кроме Href, система
+   * не создаёт, поэтому план без ссылки применить нельзя, и узнать об этом лучше
+   * на разборе плана, чем после того, как кампания и группы уже созданы.
+   */
+  href: z.string().trim().url().max(1_024),
 });
 
 export type PlannedAd = z.infer<typeof plannedAdSchema>;

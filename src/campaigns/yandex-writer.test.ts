@@ -335,3 +335,259 @@ describe('инвариант dry-run', () => {
     expect(transport.calls).toEqual([]);
   });
 });
+
+// ── Мок, отвечающий как площадка ─────────────────────────────────────────────
+
+/**
+ * Транспорт, который ведёт себя как Директ, а не как удобно тесту.
+ *
+ * Фикстура из верхней части файла отдаёт заготовленный ответ на что угодно —
+ * ею нельзя доказать ни одного утверждения о теле запроса. Здесь проверяется
+ * ровно то, на чём площадка отказывает (`docs/LESSONS.md` — мок обязан отвечать
+ * по протоколу):
+ *
+ *  • «не более N объектов в одном вызове метода»: 10 кампаний, 1000 групп,
+ *    1000 фраз, 1000 объявлений. Перебор — ошибка запроса 9300, ни один объект
+ *    не создан;
+ *  • `TextAd` без цели показа (ни `Href`, ни `TurboPageId`, ни `VCardId`, ни
+ *    `BusinessId`) — ошибка операции 4003;
+ *  • `RegionIds`: только минус-регионы, минус-регион, совпадающий с регионом
+ *    показа, и минус-регион, не вложенный ни в один из них, — ошибка операции 5120;
+ *  • незапланированное обращение роняет тест, а не возвращает пустой ответ.
+ *
+ * Дерево регионов здесь своё, а не импортированное из `@/campaigns/geo.js`:
+ * мок, спрашивающий вложенность у проверяемого кода, доказывал бы сам себя.
+ */
+const MAX_OBJECTS: Readonly<Record<string, number>> = {
+  campaigns: 10,
+  adgroups: 1_000,
+  keywords: 1_000,
+  ads: 1_000,
+};
+
+const ITEMS_KEY: Readonly<Record<string, string>> = {
+  campaigns: 'Campaigns',
+  adgroups: 'AdGroups',
+  keywords: 'Keywords',
+  ads: 'Ads',
+};
+
+/** Кусок настоящего справочника: Москва в Москве и области, обе — в России. */
+const PARENT: Readonly<Record<number, number>> = { 213: 1, 1: 225, 2: 10174, 10174: 225 };
+
+function within(ancestor: number, id: number): boolean {
+  for (let cur: number | undefined = id; cur !== undefined; cur = PARENT[cur]) {
+    if (cur === ancestor) return true;
+  }
+  return false;
+}
+
+interface OperationError {
+  Code: number;
+  Message: string;
+}
+
+function checkRegions(regionIds: unknown): OperationError | null {
+  const bad = { Code: 5120, Message: 'Геотаргетинг задан неправильно' };
+  if (!Array.isArray(regionIds) || regionIds.length === 0) return bad;
+  const ids = regionIds as number[];
+  const positive = ids.filter((id) => id > 0);
+  const negative = ids.filter((id) => id < 0).map((id) => -id);
+
+  if (positive.length === 0) return bad;
+  if (new Set(ids.map(Math.abs)).size !== ids.length) return bad;
+  for (const id of negative) {
+    if (positive.includes(id)) return bad;
+    if (!positive.some((region) => within(region, id))) return bad;
+  }
+  return null;
+}
+
+function checkAd(item: Record<string, unknown>): OperationError | null {
+  const ad = item['TextAd'] as Record<string, unknown> | undefined;
+  if (!ad || !ad['Title'] || !ad['Text'] || !ad['Mobile']) {
+    return { Code: 5000, Message: 'Поле обязательно для заполнения' };
+  }
+  if (!ad['Href'] && !ad['TurboPageId'] && !ad['VCardId'] && !ad['BusinessId']) {
+    return { Code: 4003, Message: 'Не передано ни одного из необходимых параметров' };
+  }
+  return null;
+}
+
+function checkItem(service: string, item: Record<string, unknown>): OperationError | null {
+  if (service === 'ads') return checkAd(item);
+  if (service === 'adgroups') return checkRegions(item['RegionIds']);
+  if (service === 'keywords' && !item['Keyword']) {
+    return { Code: 5000, Message: 'Поле обязательно для заполнения' };
+  }
+  return null;
+}
+
+function directTransport(): FakeTransport {
+  const calls: HttpRequest[] = [];
+  let nextId = 1_000;
+
+  const fn = (req: HttpRequest): Promise<HttpResponse> => {
+    calls.push(req);
+    const service = new URL(req.url).pathname.split('/').pop() ?? '';
+    const body = req.body as { method?: string; params?: Record<string, unknown> };
+    const method = body.method ?? '';
+    const params = body.params ?? {};
+
+    if (method === 'moderate') {
+      const ids = (params['SelectionCriteria'] as { Ids?: number[] })?.Ids ?? [];
+      return Promise.resolve({
+        status: 200,
+        headers: {},
+        data: { result: { ModerateResults: ids.map((id) => ({ Id: id })) } },
+      });
+    }
+
+    const key = ITEMS_KEY[service];
+    if (method !== 'add' || key === undefined) {
+      throw new Error(`мок Директа не знает вызова ${service}.${method}`);
+    }
+
+    const items = params[key];
+    if (!Array.isArray(items)) throw new Error(`${service}.add без массива ${key}`);
+
+    const limit = MAX_OBJECTS[service] ?? 0;
+    if (items.length > limit) {
+      return Promise.resolve({
+        status: 200,
+        headers: {},
+        data: {
+          error: {
+            error_code: 9300,
+            error_string: 'Превышено ограничение на количество объектов в одном запросе',
+            error_detail: `${service}.add: ${items.length} объектов при пределе ${limit}`,
+          },
+        },
+      });
+    }
+
+    const AddResults = (items as Record<string, unknown>[]).map((item) => {
+      const error = checkItem(service, item);
+      if (error) return { Errors: [error] };
+      nextId += 1;
+      return { Id: nextId };
+    });
+    return Promise.resolve({ status: 200, headers: {}, data: { result: { AddResults } } });
+  };
+  fn.calls = calls;
+  return fn as FakeTransport;
+}
+
+function sentItems(req: HttpRequest | undefined, key: string): Record<string, unknown>[] {
+  return (params(req)[key] ?? []) as Record<string, unknown>[];
+}
+
+describe('протокол: что площадка принимает', () => {
+  it('мок отвергает то же, что и Директ — иначе им ничего не докажешь', async () => {
+    const transport = directTransport();
+    const oversize = await transport({
+      url: 'https://api-sandbox.direct.yandex.com/json/v5/keywords',
+      body: { method: 'add', params: { Keywords: Array.from({ length: 1_001 }, () => ({})) } },
+      headers: {},
+      responseType: 'json',
+    });
+    expect(oversize.data).toMatchObject({ error: { error_code: 9300 } });
+
+    const noTarget = await transport({
+      url: 'https://api-sandbox.direct.yandex.com/json/v5/ads',
+      body: {
+        method: 'add',
+        params: { Ads: [{ AdGroupId: 1, TextAd: { Title: 'Т', Text: 'Т', Mobile: 'NO' } }] },
+      },
+      headers: {},
+      responseType: 'json',
+    });
+    expect(noTarget.data).toMatchObject({
+      result: { AddResults: [{ Errors: [{ Code: 4003 }] }] },
+    });
+
+    const badGeo = await transport({
+      url: 'https://api-sandbox.direct.yandex.com/json/v5/adgroups',
+      body: {
+        method: 'add',
+        params: { AdGroups: [{ Name: 'Г', CampaignId: 1, RegionIds: [2, 213, -239] }] },
+      },
+      headers: {},
+      responseType: 'json',
+    });
+    expect(badGeo.data).toMatchObject({ result: { AddResults: [{ Errors: [{ Code: 5120 }] }] } });
+  });
+
+  it('фразы режутся по лимиту Keywords.add, а не по лимиту KeywordBids.set', async () => {
+    const transport = directTransport();
+    const keywords = Array.from({ length: 1_500 }, (_, i) => ({
+      adGroupExternalId: '10',
+      phrase: `фраза ${i}`,
+      bidRub: 100,
+    }));
+
+    const created = await writerOf(transport).createKeywords(CTX, keywords);
+
+    expect(created).toHaveLength(1_500);
+    expect(transport.calls.map((call) => sentItems(call, 'Keywords').length)).toEqual([1_000, 500]);
+  });
+
+  it('объявление без ссылки не уходит в сеть вовсе', async () => {
+    const transport = directTransport();
+
+    const err = await writerOf(transport)
+      .createAds(CTX, [
+        {
+          adGroupExternalId: '10',
+          title: 'Английский для IT',
+          text: 'Разговорный курс.',
+          href: '',
+        },
+      ])
+      .catch((e: unknown) => e);
+
+    // Площадка ответила бы 4003 и списала 20 баллов квоты за отказ операции.
+    expect(err).toBeInstanceOf(ChannelError);
+    expect(createOutcomeOf(err)).toBe('not-created');
+    expect(transport.calls).toEqual([]);
+  });
+
+  it('одно объявление без ссылки не даёт уехать и остальным', async () => {
+    const transport = directTransport();
+    const ads = Array.from({ length: 1_200 }, (_, i) => ({
+      adGroupExternalId: '10',
+      title: `Заголовок ${i}`,
+      text: 'Разговорный курс.',
+      href: i === 1_100 ? '' : 'https://example.com',
+    }));
+
+    await expect(writerOf(transport).createAds(CTX, ads)).rejects.toThrow(ChannelError);
+    // Первая тысяча не должна оказаться в кабинете при заведомо провальной второй.
+    expect(transport.calls).toEqual([]);
+  });
+
+  it('группа, фразы и объявления доезжают целиком и в правильном виде', async () => {
+    const transport = directTransport();
+    const writer = writerOf(transport);
+
+    const groups = await writer.createAdGroups(CTX, '777', [
+      { name: 'Горячий спрос', regionIds: [225, -213], negativeKeywords: [] },
+    ]);
+    const ads = await writer.createAds(CTX, [
+      {
+        adGroupExternalId: groups[0]?.externalId ?? '0',
+        title: 'Английский для IT',
+        text: 'Разговорный курс.',
+        href: 'https://example.com/course',
+      },
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(ads).toHaveLength(1);
+    expect(sentItems(transport.calls[0], 'AdGroups')[0]).toMatchObject({ RegionIds: [225, -213] });
+    expect(sentItems(transport.calls[1], 'Ads')[0]?.['TextAd']).toMatchObject({
+      Href: 'https://example.com/course',
+      Mobile: 'NO',
+    });
+  });
+});

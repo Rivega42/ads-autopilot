@@ -13,7 +13,7 @@ import {
 } from '@/campaigns/writer.js';
 import type { ChannelContext } from '@/channels/types.js';
 import { parseCredentials } from '@/clients/yandex-direct/auth.js';
-import { chunk, MAX_ADGROUP_IDS } from '@/clients/yandex-direct/entities.js';
+import { chunk } from '@/clients/yandex-direct/entities.js';
 import { classifyWriteOutcome, YANDEX_CHANNEL } from '@/clients/yandex-direct/errors.js';
 import {
   YandexHttpClient,
@@ -26,16 +26,23 @@ import {
   toMicros,
   updateResultsSchema,
 } from '@/clients/yandex-direct/schemas.js';
-import {
-  summariseResults,
-  MAX_ADS_PER_REQUEST,
-  MAX_BIDS_PER_REQUEST,
-  type ActionSummary,
-} from '@/clients/yandex-direct/writes.js';
+import { summariseResults, type ActionSummary } from '@/clients/yandex-direct/writes.js';
 import { AppError, ChannelError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 
 const log = logger.child({ scope: 'campaigns:yandex-writer' });
+
+/**
+ * «Не более N объектов в одном вызове метода» — из справочника методов `add`.
+ *
+ * Лимиты соседних методов сюда не годятся, даже когда числа совпадают: у
+ * `KeywordBids.set` предел 10 000, и с ним `Keywords.add` уезжает пачкой на десять
+ * тысяч фраз, а площадка отвечает 9300 на весь запрос — ни одной фразы не создано,
+ * зато кампания и группы уже есть.
+ */
+const MAX_ADGROUPS_PER_ADD = 1_000;
+const MAX_KEYWORDS_PER_ADD = 1_000;
+const MAX_ADS_PER_ADD = 1_000;
 
 /**
  * Создание кампании в Яндекс Директе.
@@ -99,7 +106,7 @@ export class YandexCampaignWriter implements CampaignWriter {
     const campaignId = toNumericId(campaignExternalId);
     const created: CreatedNamedEntity[] = [];
 
-    for (const batch of chunk(groups, MAX_ADGROUP_IDS)) {
+    for (const batch of chunk(groups, MAX_ADGROUPS_PER_ADD)) {
       const AdGroups = batch.map((group) => {
         const body: Record<string, unknown> = {
           Name: group.name,
@@ -134,7 +141,7 @@ export class YandexCampaignWriter implements CampaignWriter {
     const http = this.client(ctx);
     const created: CreatedEntity[] = [];
 
-    for (const batch of chunk(keywords, MAX_BIDS_PER_REQUEST)) {
+    for (const batch of chunk(keywords, MAX_KEYWORDS_PER_ADD)) {
       const Keywords = batch.map((keyword) => ({
         AdGroupId: toNumericId(keyword.adGroupExternalId),
         Keyword: keyword.phrase,
@@ -155,10 +162,13 @@ export class YandexCampaignWriter implements CampaignWriter {
 
   async createAds(ctx: ChannelContext, ads: readonly AdCreateSpec[]): Promise<CreatedEntity[]> {
     if (ads.length === 0) return [];
+    // Весь список проверяем до первого запроса: иначе первая тысяча объявлений
+    // уже создана, а вторая отброшена — и в кампании висит половина объявлений.
+    for (const ad of ads) requireAdTarget(ad);
     const http = this.client(ctx);
     const created: CreatedEntity[] = [];
 
-    for (const batch of chunk(ads, MAX_ADS_PER_REQUEST)) {
+    for (const batch of chunk(ads, MAX_ADS_PER_ADD)) {
       const Ads = batch.map((ad) => {
         const textAd: Record<string, unknown> = {
           Title: ad.title,
@@ -167,7 +177,7 @@ export class YandexCampaignWriter implements CampaignWriter {
           Mobile: 'NO',
         };
         if (ad.title2) textAd.Title2 = ad.title2;
-        if (ad.href) textAd.Href = ad.href;
+        textAd.Href = ad.href;
         return { AdGroupId: toNumericId(ad.adGroupExternalId), TextAd: textAd };
       });
 
@@ -191,7 +201,7 @@ export class YandexCampaignWriter implements CampaignWriter {
     if (adExternalIds.length === 0) return;
     const http = this.client(ctx);
 
-    for (const batch of chunk(adExternalIds.map(toNumericId), MAX_ADS_PER_REQUEST)) {
+    for (const batch of chunk(adExternalIds.map(toNumericId), MAX_ADS_PER_ADD)) {
       const res = await http.call(
         'ads',
         'moderate',
@@ -264,6 +274,24 @@ function strategySide(side: { type: string; settings?: Record<string, unknown> }
   BiddingStrategyType: string;
 } & Record<string, unknown> {
   return { BiddingStrategyType: side.type, ...(side.settings ?? {}) };
+}
+
+/**
+ * Объявление обязано вести хоть куда-то: Директ требует хотя бы один из
+ * `Href`, `TurboPageId`, `VCardId`, `BusinessId`, иначе отвечает ошибкой операции
+ * 4003 «Не передано ни одного из необходимых параметров». Кроме `Href` система
+ * ничего из этого списка не создаёт, поэтому пустая ссылка — отказ на нашей стороне,
+ * до выхода в сеть: запрос всё равно был бы отклонён, а стоил бы 20 баллов квоты.
+ */
+function requireAdTarget(ad: AdCreateSpec): void {
+  if (ad.href.trim() !== '') return;
+  throw markCreateOutcome(
+    new ChannelError(YANDEX_CHANNEL, `Объявление «${ad.title}» без Href: вести его некуда`, {
+      code: 'YANDEX_AD_WITHOUT_TARGET',
+      context: { adGroupExternalId: ad.adGroupExternalId },
+    }),
+    'not-created',
+  );
 }
 
 function toNumericId(externalId: string): number {

@@ -84,7 +84,12 @@ export interface AdCreateSpec {
   title: string;
   title2?: string;
   text: string;
-  href?: string;
+  /**
+   * Куда ведёт объявление. Не опционально: у Директа объявление обязано иметь цель
+   * показа (Href / TurboPageId / VCardId / BusinessId), и Href — единственная из них,
+   * которую система умеет заполнить.
+   */
+  href: string;
 }
 
 export interface CreatedEntity {
