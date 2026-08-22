@@ -5,7 +5,15 @@ vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
 import { FakeDb } from '@/moderation/__tests__/fake-db.js';
 import { channelContext, fakeAdapter, remoteAd } from '@/moderation/__tests__/fakes.js';
-import { MAX_MISSING_ADS_PER_TARGET, pollAdModeration } from '@/moderation/poll.js';
+import {
+  MAX_MISSING_ADS_PER_TARGET,
+  pollAdModeration,
+  REWRITING_APPLY_BUDGET_MINUTES,
+  REWRITING_STALE_MINUTES,
+  REWRITING_STALE_MS,
+} from '@/moderation/poll.js';
+import { MODERATION_TICK_MINUTES } from '@/moderation/tick.js';
+import { CRON_SCHEDULE, cronIntervalMinutes, QUEUE_NAMES } from '@/scheduler/schedule.js';
 
 const TARGET = { clientId: 'cl1', provider: Provider.YANDEX_DIRECT };
 
@@ -17,6 +25,11 @@ beforeEach(() => {
   db.seedCampaign({ id: 'c1', clientId: 'cl1', provider: Provider.YANDEX_DIRECT, name: 'Поиск' });
   db.seedAdGroup({ id: 'g1', campaignId: 'c1', externalId: 'ext-1' });
 });
+
+/** Захват, чей срок заведомо вышел. Отсчёт от самого срока: числу здесь взяться неоткуда. */
+function staleAt(): Date {
+  return new Date(Date.now() - REWRITING_STALE_MS - 60_000);
+}
 
 function poll(ads: Parameters<typeof fakeAdapter>[0]['ads']) {
   const adapter = fakeAdapter({ channel: Provider.YANDEX_DIRECT, ads });
@@ -134,8 +147,8 @@ describe('pollAdModeration', () => {
       externalId: 'a1',
       moderationStatus: ModerationStatus.REWRITING,
       moderationRetries: 1,
-      // Процесс убит между захватом строки и отправкой текста час назад.
-      updatedAt: new Date(Date.now() - 60 * 60 * 1_000),
+      // Процесс убит между захватом строки и отправкой текста, срок захвата вышел.
+      updatedAt: staleAt(),
     });
 
     const result = await poll([remoteAd({ externalId: 'a1', adGroupExternalId: 'ext-1' })]);
@@ -154,7 +167,7 @@ describe('pollAdModeration', () => {
       externalId: 'a1',
       moderationStatus: ModerationStatus.REWRITING,
       moderationRetries: 1,
-      updatedAt: new Date(Date.now() - 60 * 60 * 1_000),
+      updatedAt: staleAt(),
     });
 
     const result = await poll([
@@ -174,7 +187,7 @@ describe('pollAdModeration', () => {
       externalId: 'снесён-при-замене',
       moderationStatus: ModerationStatus.REWRITING,
       moderationRetries: 1,
-      updatedAt: new Date(Date.now() - 60 * 60 * 1_000),
+      updatedAt: staleAt(),
     });
 
     // Кабинет этот баннер уже не отдаёт: у VK правка текста удаляет старый баннер, и
@@ -327,5 +340,37 @@ describe('pollAdModeration', () => {
       title2: 'Второй',
       text: 'Актуальный текст',
     });
+  });
+});
+
+describe('срок зависшего захвата', () => {
+  it('следует за расписанием крона, а не записан числом рядом', () => {
+    // Захват снимает сам крон `check-moderation`, и другого снимающего нет: срок,
+    // не выведенный из его периода, разъезжается с расписанием молча — либо строки
+    // расчищаются раньше, чем прогон успел их отработать (и два прогона берутся за
+    // одно объявление), либо объявление висит выключенным из модерации дольше нужного.
+    //
+    // Формула повторена здесь намеренно: это спецификация срока, а не пересказ кода.
+    // Сравнение с самой константой из `poll.ts` не поймало бы ровно ту регрессию, ради
+    // которой тест писан, — возврат к числу, совпавшему с текущим расписанием.
+    expect(REWRITING_STALE_MINUTES).toBe(
+      Math.max(
+        cronIntervalMinutes(CRON_SCHEDULE[QUEUE_NAMES.checkModeration]),
+        REWRITING_APPLY_BUDGET_MINUTES,
+      ),
+    );
+    expect(MODERATION_TICK_MINUTES).toBe(
+      cronIntervalMinutes(CRON_SCHEDULE[QUEUE_NAMES.checkModeration]),
+    );
+  });
+
+  it('не короче периода крона: снимать захваты чаще всё равно некому', () => {
+    expect(REWRITING_STALE_MINUTES).toBeGreaterThanOrEqual(MODERATION_TICK_MINUTES);
+  });
+
+  it('не короче самой долгой живой отправки — иначе два прогона возьмутся за одно объявление', () => {
+    // Единственная защита от второго текста поверх первого — захват строки. Срок
+    // короче отправки снимает захват с живого прогона, и защиты не остаётся.
+    expect(REWRITING_STALE_MINUTES).toBeGreaterThanOrEqual(REWRITING_APPLY_BUDGET_MINUTES);
   });
 });

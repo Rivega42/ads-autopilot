@@ -27,6 +27,7 @@ import {
   PREVIEW_SCOPE,
   REPAIR_BACKOFF_MINUTES,
   REWRITE_CALLS,
+  REWRITING_STALE_MINUTES,
   runModerationCheck,
   type RepairContext,
 } from '@/moderation/index.js';
@@ -695,9 +696,11 @@ describe('AI-Модератор: отказ площадки → перепис�
     const stuckId = stale.adIds['stuck'] ?? '';
     const freshId = stale.adIds['fresh'] ?? '';
     // Процесс, умерший между захватом и отправкой, оставил строку в `REWRITING`
-    // получасовой давности. Без снятия захвата объявление выключено из модерации
-    // навсегда: опрос такие строки пропускает безусловно.
-    await ageAd(stuckId, 31);
+    // старше срока захвата. Без снятия захвата объявление выключено из модерации
+    // навсегда: опрос такие строки пропускает безусловно. Возраст — от самого срока:
+    // число здесь разъехалось бы с расписанием при первой же его правке, и сценарий
+    // либо перестал бы проверять снятие, либо покраснел бы на ровном месте.
+    await ageAd(stuckId, REWRITING_STALE_MINUTES + 1);
 
     const summary = await runModerationCheck({
       clientId: stale.clientId,

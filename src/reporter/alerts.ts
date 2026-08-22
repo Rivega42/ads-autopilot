@@ -18,7 +18,7 @@ import { collectPeriodMetrics } from '@/reporter/metrics.js';
 import { trailingPeriod } from '@/reporter/period.js';
 import { alertLimiter, type CooldownLimiter } from '@/reporter/rate-limit.js';
 import { listReportRecipients } from '@/reporter/recipients.js';
-import { CRON_SCHEDULE, QUEUE_NAMES } from '@/scheduler/schedule.js';
+import { CRON_SCHEDULE, cronIntervalMinutes, QUEUE_NAMES } from '@/scheduler/schedule.js';
 
 /**
  * Алерты Роману (ТЗ §3.6, CLAUDE.md §9).
@@ -32,6 +32,11 @@ import { CRON_SCHEDULE, QUEUE_NAMES } from '@/scheduler/schedule.js';
  */
 
 const log = logger.child({ scope: 'reporter:alerts' });
+
+// Реэкспорт: `cronIntervalMinutes` переехала к расписанию (`scheduler/schedule.ts`) —
+// там же, где `CRON_SCHEDULE`, из которого она и считает. Тот же приём, что в
+// `scheduler/queues.ts`: место импорта у тех, кто брал её отсюда, не меняется.
+export { cronIntervalMinutes };
 
 export type AlertKind =
   | 'error_burst'
@@ -682,58 +687,4 @@ export async function runAlertScan(options: AlertOptions = {}): Promise<AlertRun
     'alert scan finished',
   );
   return summary;
-}
-
-/**
- * Период крона в минутах: наибольший разрыв между соседними запусками.
- *
- * Разобраны расписания, которые ходят каждый час, — крон тревог именно такой.
- * Всё остальное считаем часовым: занизить период нельзя (это вернёт слепую
- * зону), а завысить безопасно — повтор гасит ограничитель.
- */
-export function cronIntervalMinutes(expression: string | null): number {
-  const HOUR_MINUTES = 60;
-  if (expression === null) return HOUR_MINUTES;
-
-  const fields = expression.trim().split(/\s+/);
-  const [minuteField, ...rest] = fields;
-  if (minuteField === undefined || rest.length !== 4 || rest.some((field) => field !== '*')) {
-    return HOUR_MINUTES;
-  }
-
-  const minutes = expandCronMinutes(minuteField);
-  if (minutes.length === 0) return HOUR_MINUTES;
-
-  const firstMinute = minutes[0] as number;
-  const lastMinute = minutes[minutes.length - 1] as number;
-  let gap = firstMinute + HOUR_MINUTES - lastMinute;
-  for (let i = 1; i < minutes.length; i += 1) {
-    gap = Math.max(gap, (minutes[i] as number) - (minutes[i - 1] as number));
-  }
-  return Math.min(gap, HOUR_MINUTES);
-}
-
-/** Минутное поле крона в список минут часа. Непонятное поле — пустой список. */
-function expandCronMinutes(field: string): number[] {
-  const minutes = new Set<number>();
-
-  for (const part of field.split(',')) {
-    const [range, stepText] = part.split('/');
-    if (range === undefined) return [];
-    const step = stepText === undefined ? 1 : Number(stepText);
-    if (!Number.isInteger(step) || step < 1) return [];
-
-    let from = 0;
-    let to = 59;
-    if (range !== '*') {
-      const [fromText, toText] = range.split('-');
-      from = Number(fromText);
-      to = toText === undefined ? from : Number(toText);
-      if (!Number.isInteger(from) || !Number.isInteger(to)) return [];
-      if (from < 0 || to > 59 || from > to) return [];
-    }
-    for (let minute = from; minute <= to; minute += step) minutes.add(minute);
-  }
-
-  return [...minutes].sort((a, b) => a - b);
 }

@@ -17,7 +17,7 @@ import { RULES_COUNT } from '@/moderation/rules.js';
 const log = logger.child({ scope: 'moderation:run' });
 
 /**
- * Крон `check-moderation` (каждые 30 минут) целиком: TZ §13.4.
+ * Крон `check-moderation` целиком: TZ §13.4. Период — в `scheduler/schedule.ts`.
  *
  * Кабинеты обходятся последовательно и независимо — протухший токен одного клиента
  * не должен лишить проверки всех остальных, поэтому отказ пишется в `ErrorLog`,

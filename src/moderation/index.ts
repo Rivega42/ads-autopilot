@@ -2,7 +2,7 @@
  * AI-Модератор (TZ §13.4).
  *
  * Наружу торчит один сценарий для планировщика:
- *  • `runModerationCheck` — крон `check-moderation`, каждые 30 минут.
+ *  • `runModerationCheck` — крон `check-moderation` (расписание — `scheduler/schedule.ts`).
  *
  * Остальное экспортируется ради тестов, CLI и дашборда.
  */
@@ -25,6 +25,9 @@ export { describeFailure, recordFailure, type ModerationFailure } from '@/modera
 export {
   pollAdModeration,
   MAX_MISSING_ADS_PER_TARGET,
+  REWRITING_APPLY_BUDGET_MINUTES,
+  REWRITING_STALE_MINUTES,
+  REWRITING_STALE_MS,
   type MissingAd,
   type ModerationTarget,
   type PollResult,
@@ -79,6 +82,7 @@ export {
   type ModerationRunSummary,
   type RunModerationOptions,
 } from '@/moderation/run.js';
+export { MODERATION_TICK_MINUTES, MODERATION_TICK_MS } from '@/moderation/tick.js';
 export {
   CATEGORY_TITLE,
   REJECTION_CATEGORIES,

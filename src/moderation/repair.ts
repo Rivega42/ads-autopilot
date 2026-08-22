@@ -12,9 +12,8 @@ import { describeFailure, recordFailure } from '@/moderation/errors.js';
 import type { EscalationCause, ModerationEscalation } from '@/moderation/escalate.js';
 import type { MissingAd, ModerationTarget, RejectedAd } from '@/moderation/poll.js';
 import { rewriteRejectedAd } from '@/moderation/rewrite.js';
+import { MODERATION_TICK_MINUTES } from '@/moderation/tick.js';
 import type { AdText, ClassifiedRejection } from '@/moderation/types.js';
-import { cronIntervalMinutes } from '@/reporter/alerts.js';
-import { CRON_SCHEDULE, QUEUE_NAMES } from '@/scheduler/schedule.js';
 
 const log = logger.child({ scope: 'moderation:repair' });
 
@@ -41,18 +40,6 @@ export const ESCALATION_ACTION = 'moderation_escalated';
 
 /** Отметка о том, что починка этого объявления только что упала. */
 export const BACKOFF_SCOPE = 'moderation.backoff';
-
-/**
- * Период крона `check-moderation` в минутах.
- *
- * Считается из самого расписания, а не записан числом рядом: отдельная константа
- * разъезжается с кроном при первой же его правке (`reporter/alerts.ts` наступил на
- * это первым, оттуда и функция — она общая, а перенос её в `scheduler` был бы
- * правкой чужого модуля).
- */
-export const MODERATION_TICK_MINUTES = cronIntervalMinutes(
-  CRON_SCHEDULE[QUEUE_NAMES.checkModeration],
-);
 
 /**
  * Сколько тиков объявление ждёт после упавшей починки.
