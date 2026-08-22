@@ -181,6 +181,11 @@ export function mdCloseOpen(text: Markdown): Markdown {
     }
     i = stepMarkdown(text, i, open);
   }
+  // Шаг за конец строки означает, что последним был экранирующий `\`, которому не
+  // досталось пары. Одиночный хвостовой `\` Telegram не принимает так же, как
+  // незакрытую сущность, а дописать к нему нечего — отрезаем.
+  if (i > text.length) cut = Math.min(cut, text.length - 1);
+
   const body = cut === text.length ? text : text.slice(0, cut);
   if (open.length === 0) return body as Markdown;
   return `${body}${[...open].reverse().join('')}` as Markdown;

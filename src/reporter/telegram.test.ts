@@ -13,6 +13,22 @@ import { clampMarkdown, TELEGRAM_MESSAGE_LIMIT } from '@/reporter/telegram.js';
  * `tests/e2e/reporter-telegram.e2e.ts` настоящим транспортом.
  */
 describe('clampMarkdown', () => {
+  it('закрывашки укладываются в лимит, а не поверх него', () => {
+    // Закрытие оставшихся сущностей дописывалось после того, как бюджет строк уже
+    // посчитан, и `\`\`\`` на границе давало 4098 при лимите 4096. Телеграм на это
+    // отвечает «message is too long» — то есть отчёт снова не доставлен, ровно тот
+    // исход, ради которого закрытие и появилось. Перебор идёт по длине строки,
+    // потому что попадание в границу зависит именно от неё.
+    for (const opener of ['*', '||', '```']) {
+      for (let pad = 1; pad <= 60; pad += 1) {
+        const body = mdRaw(`${opener}x\n${`${'а'.repeat(pad)}\n`.repeat(600)}`);
+        expect(clampMarkdown(body).length, `${opener} при длине строки ${pad}`).toBeLessThanOrEqual(
+          TELEGRAM_MESSAGE_LIMIT,
+        );
+      }
+    }
+  });
+
   it('короткий отчёт не трогает', () => {
     const text = mdJoin([mdBold('Отчёт'), mdEscape('Расход: 100 ₽')]);
     expect(clampMarkdown(text)).toBe(text);

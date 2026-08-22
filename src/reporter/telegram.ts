@@ -95,9 +95,18 @@ export function clampMarkdown(text: Markdown, limit = TELEGRAM_MESSAGE_LIMIT): M
     kept.push(line);
     size = next;
   }
-  if (kept.length === 0) {
-    log.warn({ length: text.length }, 'report does not fit a single Telegram message');
-    return `${mdTruncate(text, limit - tail.length)}${tail}` as Markdown;
+  // Закрывашки — это тоже символы, и бюджет строк про них не знал: `mdCloseOpen`
+  // дописывался уже поверх посчитанного, и `\`\`\`` на границе давал 4098 при лимите
+  // 4096. Телеграм на это отвечает «message is too long», то есть отчёт снова не
+  // доставлен — ровно тот исход, ради которого закрывашки и появились. Поэтому
+  // отбрасываем строки с конца, пока закрытый текст не влезет: сколько именно
+  // добавит закрытие, заранее не сказать — это зависит от того, что осталось.
+  while (kept.length > 0) {
+    const closed = mdCloseOpen(kept.join('\n') as Markdown);
+    if (closed.length + tail.length <= limit) return `${closed}${tail}` as Markdown;
+    kept.pop();
   }
-  return `${mdCloseOpen(kept.join('\n') as Markdown)}${tail}` as Markdown;
+
+  log.warn({ length: text.length }, 'report does not fit a single Telegram message');
+  return `${mdTruncate(text, limit - tail.length)}${tail}` as Markdown;
 }
