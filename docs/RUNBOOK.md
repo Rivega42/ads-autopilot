@@ -82,6 +82,119 @@ dc exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
 статистики или слишком много кампаний на один кабинет. Лечится расписанием
 (`CRON_SCHEDULE` в `src/scheduler/queues.ts`), а не ретраями.
 
+## Завести или заменить доступы клиента
+
+Токен кабинета не хранится в `.env` и не передаётся аргументом команды: `argv`
+виден в `ps` любому пользователю машины и оседает в истории shell. Секрет
+читается из трубы, шифруется AES-256-GCM и ложится в `Credential`; сама запись
+попадает в `AuditLog` с actor `cli:credentials` (CLAUDE.md §6).
+
+Клиент должен уже существовать — секрет привязан к нему внешним ключом.
+Найти id: `dc run --rm -T --no-deps -e ROLE=cli api clients`. Дальше `cli` — это
+сокращение для `dc run --rm -T --no-deps -e ROLE=cli api` (в дев-окружении то же
+самое зовётся `pnpm cli`).
+
+**Клиента ещё нет.** Команды для заведения клиента в системе нет — это соседнее
+белое пятно: строку `Client` создаёт только сид (`pnpm db:seed`, в прод-образе
+его нет) и `ClientRepository.create`, который ниоткуда не вызывается; бот
+клиентов только ищет по `tgUserId`. Пока команды нет, строка заводится руками, и
+`tgUserId` обязан совпадать с Telegram-аккаунтом клиента — иначе бот его не
+опознает и `/launch` ответит «не нашёл тебя в базе»:
+
+```bash
+dc exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+  "insert into \"Client\" (id, \"tgUserId\", name, status, timezone, \"createdAt\", \"updatedAt\")
+   values (gen_random_uuid()::text, <tg_user_id>, '<Имя клиента>', 'ACTIVE', 'Europe/Moscow', now(), now())
+   returning id;"
+```
+
+`id` и `updatedAt` перечислены явно не для красоты: их значения по умолчанию
+живут в Prisma, а не в схеме БД, и без них `insert` откажет.
+
+**`-T` обязателен.** Без него `compose run` выделяет псевдотерминал, и команда
+откажется читать секрет: набранное в терминале остаётся в скролле и в буфере
+эмулятора, поэтому этот путь закрыт намеренно.
+
+**Готовый токен Директа** (песочница или выданный клиентом):
+
+```bash
+read -rs TOKEN                                    # без эха и без записи в историю
+printf '%s' "$TOKEN" | dc run --rm -T --no-deps -e ROLE=cli api \
+  credentials set --client <id> --provider yandex_direct --apply
+unset TOKEN
+```
+
+Та же команда без `--apply` ничего не пишет, а показывает разобранные поля с
+замаскированными значениями — так проверяют, что вставилось именно то, что
+скопировали, а не вместе с кавычками и переводом строки.
+
+**Агентский доступ** — тем же способом, JSON-ом:
+
+```bash
+printf '%s' '{"accessToken":"…","refreshToken":"…","clientLogin":"логин-клиента","useOperatorUnits":true}' \
+  | dc run --rm -T --no-deps -e ROLE=cli api \
+    credentials set --client <id> --provider yandex_direct --apply
+```
+
+`clientLogin` заполняется ТОЛЬКО когда мы агентство: заголовок `Client-Login` на
+прямом токене возвращает ошибку 54.
+
+**Токена нет, есть только согласие клиента** — тогда через OAuth:
+
+```bash
+dc run --rm -T --no-deps -e ROLE=cli api credentials link --provider yandex_direct
+read -rs CODE                                     # клиент вернёт код подтверждения
+printf '%s' "$CODE" | dc run --rm -T --no-deps -e ROLE=cli api \
+  credentials exchange --client <id> --provider yandex_direct --apply
+unset CODE
+```
+
+Код одноразовый и живёт минуты, поэтому без `--apply` команда его не тратит:
+черновой прогон показывает маску кода и на этом останавливается. Публичного
+OAuth-callback'а у системы нет — код переносится руками.
+
+Две предпосылки этого пути, без которых он не работает. Первая: в окружении
+должны быть `YANDEX_OAUTH_CLIENT_ID` и `YANDEX_OAUTH_CLIENT_SECRET` — это наше
+приложение в Яндекс OAuth, а не секрет клиента; без них команда откажет с
+`YANDEX_OAUTH_NOT_CONFIGURED`. Вторая: приложение должно быть зарегистрировано
+так, чтобы Яндекс **показывал код подтверждения на странице**. Если у приложения
+задан redirect на наш домен, код уедет туда, а принять его там некому.
+
+**VK Реклама** — не токен, а пара приложения (плюс `agencyClientName`, если
+кабинет агентский):
+
+```bash
+printf '%s' '{"clientId":"…","clientSecret":"…","agencyClientName":"…"}' \
+  | dc run --rm -T --no-deps -e ROLE=cli api \
+    credentials set --client <id> --provider vk_ads --apply
+```
+
+**Проверка — тремя шагами, а не одним:**
+
+```bash
+dc run --rm -T --no-deps -e ROLE=cli api credentials list --client <id>   # какие каналы заведены
+dc run --rm -T --no-deps -e ROLE=cli api ingest --client <id>            # реально ли ходит в кабинет
+dc exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "select actor, action, resource, \"createdAt\" from \"AuditLog\" where action like 'credential%' order by id desc limit 5;"
+```
+
+Если клиент не в статусе `ACTIVE`, команда предупредит об этом при записи: крон
+загрузки (`listIngestionTargets`) и продление токенов берут только активных, и
+секрет будет лежать вполне рабочим, не делая ничего.
+
+**Отзыв** (токен утёк, клиент ушёл):
+
+```bash
+dc run --rm -T --no-deps -e ROLE=cli api \
+  credentials revoke --client <id> --provider yandex_direct --apply
+```
+
+Там, где трубы нет (systemd, CI), секрет можно передать переменной
+`ADS_CREDENTIAL_PAYLOAD` — она старше stdin. На сервере руками так делать не
+надо: `-e ADS_CREDENTIAL_PAYLOAD="$TOKEN"` кладёт токен в `argv` самого
+`docker compose`, то есть ровно туда, откуда его и убирали. И в `.env` этой
+переменной не место: там она пережила бы задачу, ради которой заведена.
+
 ## Токен клиента протух
 
 **Симптом:** `refresh-tokens` в логах с ошибкой, у клиента перестала идти статистика.
@@ -93,8 +206,9 @@ dc exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
 ```
 
 Refresh-токен Яндекса не вечен: если он тоже истёк, автоматика не поможет —
-клиент проходит OAuth заново. Никогда не логировать сам токен: в логи идут
-последние 4 символа (CLAUDE.md §6).
+доступ заводится заново по процедуре выше («Завести или заменить доступы
+клиента»), обычно связкой `credentials link` → `credentials exchange`. Никогда не
+логировать сам токен: в логи идут последние 4 символа (CLAUDE.md §6).
 
 ## Бот молчит
 

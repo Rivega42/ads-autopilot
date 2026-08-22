@@ -52,6 +52,12 @@
 `tests/**/*.test.ts`; сценарные прогоны названы `*.e2e.ts` именно поэтому — иначе
 они уехали бы в `pnpm test:unit` и потребовали бы там живых Postgres и Redis.
 
+**Своя база сценариям не помогает, пока Redis общий.** `E2E_REDIS_URL` по
+умолчанию — один `redis://localhost:6379` на всех, и параллельные прогоны толкаются
+в очередях BullMQ: `approval-stuck.e2e.ts` упал в общем прогоне и прошёл в одиночку
+и на повторе. Своей зоне нужен и свой номер БД Redis (`redis://localhost:6379/3`),
+а не только своя база Postgres.
+
 **`bot.handleUpdate()` не зовёт `bot.catch`.** Он бросает `BotError`, а обработчик
 ошибок вызывает тот, кто его позвал (`@grammyjs/runner` делает
 `await bot.errorHandler(error)`). Сценарий, дёргающий `handleUpdate` голым,
