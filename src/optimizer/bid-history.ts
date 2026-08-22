@@ -57,7 +57,14 @@ export function bidHistoryKey(entityType: string, entityId: string): string {
   return `${entityType}:${entityId}`;
 }
 
-/** История, в которой изменений ставки не было. Якорем везде будет текущая ставка. */
+/**
+ * История, в которой изменений ставки не было. Якорем везде будет текущая ставка.
+ *
+ * Зовётся и из `loadBidHistory` — прогон без единого решения по ставке строит ровно
+ * это значение. Пока экспорт существовал только ради тестов, а прод собирал ту же
+ * тройку полей руками, «пустая история» была описана в двух местах сразу: разъехаться
+ * им было нечем сегодня, но добавление поля в `BidHistory` разъехало бы их молча.
+ */
 export function noBidHistory(windowDays: number): BidHistory {
   return { windowDays, anchors: new Map(), unavailable: new Set() };
 }
@@ -107,7 +114,7 @@ export async function loadBidHistory(
 
   const anchors = new Map<string, number>();
   const unavailable = new Set<string>();
-  if (idsByType.size === 0) return { windowDays: window.days, anchors, unavailable };
+  if (idsByType.size === 0) return noBidHistory(window.days);
 
   const cap = rowsPerEntityCap(window.days);
   for (const [entityType, ids] of idsByType) {

@@ -67,6 +67,43 @@ function assertEncryptionKey(value: string, ctx: z.RefinementCtx): void {
   }
 }
 
+/**
+ * Доля предохранителя: 0.2 — это 20%, а не 0.2%.
+ *
+ * Конвенция одна на весь класс величин (`MAX_BID_CHANGE_PCT`,
+ * `BUDGET_CHANGE_THRESHOLD_PCT`), и держится она проверкой, а не договорённостью.
+ * Причина: в `.env.example` порог апрува стоял в процентах («20»), а код рядом —
+ * долей (0.2), и прямое чтение переменной дало бы порог 2000%, то есть сняло бы
+ * апрув со всех изменений ставки и бюджета разом. Предохранитель, снятый разницей
+ * в единицах измерения, выглядит настроенным — и это худший вид отказа.
+ *
+ * Поэтому значение, которое можно прочитать двумя способами (всё, что больше
+ * единицы: «20», «30», «100»), роняет старт с указанием, как записать его долей.
+ * Молча делить на сто нельзя: тогда в проекте живут две конвенции для одного вида
+ * величин, и следующая переменная снова выберет неправильную.
+ */
+const fraction = (def: number) =>
+  z.coerce
+    .number()
+    .default(def)
+    .superRefine((value, ctx) => {
+      if (value <= 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `ожидается доля больше нуля (0.2 = 20%), получено «${value}»`,
+        });
+        return;
+      }
+      if (value > 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            `доля, а не проценты: 20% — это 0.2, 30% — это 0.3. ` +
+            `«${value}» означало бы ${value * 100}% и сняло бы предохранитель`,
+        });
+      }
+    });
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -87,10 +124,12 @@ const envSchema = z.object({
   // ── Предохранители. DRY_RUN по умолчанию true: выключать защиту нужно
   // осознанно, а не забыть включить.
   DRY_RUN: boolish(true),
-  MAX_BID_CHANGE_PCT: z.coerce.number().positive().max(1).default(0.3),
+  MAX_BID_CHANGE_PCT: fraction(0.3),
   DAILY_BUDGET_HARD_LIMIT_MULT: z.coerce.number().min(1).default(1.2),
   APPROVAL_TIMEOUT_HOURS: z.coerce.number().positive().default(2),
-  BUDGET_CHANGE_THRESHOLD_PCT: z.coerce.number().positive().max(100).default(20),
+  // Порог апрува (TZ §3.5). Имя переменной говорит про бюджет, но порог общий для
+  // бюджета и ставки: `src/optimizer/policy.ts` меряет им оба вида изменений.
+  BUDGET_CHANGE_THRESHOLD_PCT: fraction(0.2),
 
   TELEGRAM_BOT_TOKEN: optionalStr,
   TELEGRAM_ADMIN_IDS: z.string().default(''),

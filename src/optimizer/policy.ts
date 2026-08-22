@@ -1,8 +1,21 @@
 import { formatMoney, formatPercent } from './money.js';
 import type { ApprovalKindName, Decision, HandoverModeName } from './types.js';
 
-/** TZ §3.5 / E11 T11.06: изменение бюджета или ставки > 20% уходит на апрув. */
-export const APPROVAL_CHANGE_THRESHOLD_PCT = 0.2;
+import { env } from '@/env.js';
+
+/**
+ * TZ §3.5 / E11 T11.06: изменение бюджета или ставки > 20% уходит на апрув.
+ *
+ * Значение приезжает из окружения, а не стоит здесь литералом: пока рядом жили
+ * переменная `BUDGET_CHANGE_THRESHOLD_PCT` и константа 0.2, человек, выставивший
+ * переменную в проде, считал порог настроенным — а решения считались по константе,
+ * и разъезд был молчаливым. Тот же случай уже был с `MAX_BID_CHANGE_PCT`.
+ *
+ * Переменная — доля (0.2 = 20%): в процентах её прочитать нельзя, `src/env.ts`
+ * роняет старт на любом значении больше единицы. Имя переменной говорит только про
+ * бюджет по историческим причинам, но порог здесь общий для бюджета и ставки.
+ */
+export const APPROVAL_CHANGE_THRESHOLD_PCT = env.BUDGET_CHANGE_THRESHOLD_PCT;
 
 /** TZ §3.5 / E11 T11.07: массовое отключение (> 10 сущностей) — всегда на апрув. */
 export const MASS_PAUSE_THRESHOLD = 10;

@@ -250,6 +250,45 @@ describe('max bid change per window', () => {
     expect(bidAmount(down.allowed[0]?.nextValue ?? { kind: 'absent' })).toBe(150);
   });
 
+  it('нота отказа называет ту границу, которая держит коридор', () => {
+    // Ставку подняли руками до 200 при якоре 100: коридор — 140…200, и потолок держит
+    // сама текущая ставка, а не «30% за 7 сут. от 100» (это дало бы 130). Пока нота
+    // называла оконный лимит, человек, разбирающий аудит, видел в одной строке два
+    // несовместимых числа — и не мог понять, какое из них сработало.
+    const outcome = applyGuardrails(
+      [
+        decision({
+          action: 'BID_INCREASE',
+          prevValue: { kind: 'bid', amount: 200 },
+          nextValue: { kind: 'bid', amount: 220 },
+        }),
+      ],
+      context({ bidHistory: history(100) }),
+    );
+
+    const note = outcome.rejected[0]?.note ?? '';
+    expect(note).toContain('коридор 140.00…200.00');
+    expect(note).toContain('текущая ставка 200.00');
+    // Оконный коридор остаётся в ноте как причина, но уже не выдаёт себя за границу.
+    expect(note).not.toMatch(/исчерпан \(30\.00% за 7 сут\. от 100\.00\)/);
+  });
+
+  it('нота отказа называет оконный лимит, когда держит именно он', () => {
+    const outcome = applyGuardrails(
+      [
+        decision({
+          prevValue: { kind: 'bid', amount: 70 },
+          nextValue: { kind: 'bid', amount: 60 },
+        }),
+      ],
+      context({ bidHistory: history(100) }),
+    );
+
+    const note = outcome.rejected[0]?.note ?? '';
+    expect(note).toContain('30.00% за 7 сут. от 100.00');
+    expect(note).toContain('коридор 70.00…91.00');
+  });
+
   it('недостоверная история отклоняет изменение ставки, а не пропускает его', () => {
     const outcome = applyGuardrails(
       [decision()],
@@ -476,6 +515,30 @@ describe('share of entities changed per run', () => {
     );
     expect(outcome.allowed).toHaveLength(6);
     expect(outcome.rejected[0]?.decision.entityId).toBe('kw-1');
+  });
+
+  it('решение по кампании не тратит квоту, отмеренную её же сущностям', () => {
+    // Кампания в собственное население не входит: за прогон она одна, и «не более
+    // 30% сущностей» про неё ничего не говорит. Пока она занимала слот наравне с
+    // фразой, на маленьком кабинете (3 фразы → квота 1) бюджетное решение навсегда
+    // проигрывало первой же фразе — и выглядело это как сработавший предохранитель.
+    const budget = decision({
+      action: 'BUDGET_CHANGE',
+      entityType: 'CAMPAIGN',
+      entityId: 'c-1',
+      prevValue: { kind: 'budget', amount: 5000 },
+      nextValue: { kind: 'budget', amount: 5500 },
+    });
+    const outcome = applyGuardrails(
+      [...many(1), budget],
+      context({ eligibleEntityCount: 3 }, [
+        ...observationsFor(1),
+        ['CAMPAIGN:c-1', { impressions: 10000, days: 7 }],
+      ]),
+    );
+
+    expect(outcome.rejected).toEqual([]);
+    expect(outcome.allowed).toHaveLength(2);
   });
 
   it('is disabled when the population is unknown', () => {

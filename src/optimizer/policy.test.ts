@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   approvalKindFor,
@@ -97,6 +97,23 @@ describe('approval threshold for money changes', () => {
 
   it('keeps the documented threshold at 20%', () => {
     expect(APPROVAL_CHANGE_THRESHOLD_PCT).toBe(0.2);
+  });
+
+  it('порог приезжает из окружения, а не из литерала рядом с ним', async () => {
+    // Литерал 0.2 в коде проходит проверку выше при любой настройке окружения:
+    // разъезд виден только тогда, когда окружение говорит другое число.
+    vi.resetModules();
+    vi.stubEnv('BUDGET_CHANGE_THRESHOLD_PCT', '0.4');
+    try {
+      const policy = await import('./policy.js');
+      expect(policy.APPROVAL_CHANGE_THRESHOLD_PCT).toBe(0.4);
+      // Изменение на 30% при пороге 40% применяется само.
+      const thirtyPercent = decision({ nextValue: { kind: 'bid', amount: 130 } });
+      expect(policy.approvalKindFor(thirtyPercent, context(), false)).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
   });
 });
 

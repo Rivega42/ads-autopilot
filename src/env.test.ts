@@ -72,3 +72,42 @@ describe('CREDENTIALS_ENCRYPTION_KEY', () => {
     expect(parsed.success ? '' : parsed.error.issues[0]?.message).toContain('32 байта');
   });
 });
+
+describe('доли предохранителей', () => {
+  it('порог апрува по умолчанию — 0.2, то есть 20%', () => {
+    const parsed = parse({});
+    expect(parsed.success && parsed.data.BUDGET_CHANGE_THRESHOLD_PCT).toBe(0.2);
+  });
+
+  it('доля читается как доля', () => {
+    const parsed = parse({ BUDGET_CHANGE_THRESHOLD_PCT: '0.35' });
+    expect(parsed.success && parsed.data.BUDGET_CHANGE_THRESHOLD_PCT).toBe(0.35);
+  });
+
+  it('проценты в поле доли роняют старт, а не снимают предохранитель', () => {
+    // «20» по-старому означало 20%. Прочитанное как доля, оно даёт порог 2000%: апрув
+    // не потребовался бы ни одному изменению ставки или бюджета, а выглядело бы это
+    // как настроенный порог. Значение, читаемое двумя способами, обязано ронять старт.
+    const parsed = parse({ BUDGET_CHANGE_THRESHOLD_PCT: '20' });
+    expect(parsed.success).toBe(false);
+    const message = parsed.success ? '' : (parsed.error.issues[0]?.message ?? '');
+    expect(message).toContain('доля, а не проценты');
+    expect(message).toContain('0.2');
+  });
+
+  it.each(['30', '1.5', '100'])('%s в доле — это проценты, а не доля', (value) => {
+    expect(parse({ MAX_BID_CHANGE_PCT: value }).success).toBe(false);
+    expect(parse({ BUDGET_CHANGE_THRESHOLD_PCT: value }).success).toBe(false);
+  });
+
+  it('ноль и отрицательное порогом не считаются', () => {
+    // Порог 0 отправлял бы на апрув вообще всё, включая нулевое изменение.
+    expect(parse({ BUDGET_CHANGE_THRESHOLD_PCT: '0' }).success).toBe(false);
+    expect(parse({ BUDGET_CHANGE_THRESHOLD_PCT: '-0.2' }).success).toBe(false);
+  });
+
+  it('обе доли одного вида проверяются одинаково', () => {
+    expect(parse({ MAX_BID_CHANGE_PCT: '0.3' }).success).toBe(true);
+    expect(parse({ BUDGET_CHANGE_THRESHOLD_PCT: '0.3' }).success).toBe(true);
+  });
+});

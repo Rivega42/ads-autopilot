@@ -106,6 +106,22 @@ export function observationKey(decision: Decision): string {
 }
 
 /**
+ * Тратит ли решение квоту «не более N% сущностей за прогон».
+ *
+ * Минус-слова — нет: они добавляются к кампании, обратимы и являются самым безопасным
+ * действием из наших (TZ §15.7, первая неделя), и занимать квоту, существующую
+ * против массового движения ставок и статусов, они не должны.
+ *
+ * Решение уровня кампании — тоже нет: население, которым меряется доля, состоит из её
+ * же сущностей, а сама кампания в него не входит. За прогон кампания одна, то есть доля
+ * от неё не считается ни при каком пороге; занимая слот, она лишь отнимала его у фраз, а
+ * на кабинете из трёх фраз (квота — одна сущность) навсегда проигрывала первой из них.
+ */
+function spendsEntityQuota(decision: Decision): boolean {
+  return decision.nextValue.kind !== 'negativeKeyword' && decision.entityType !== 'CAMPAIGN';
+}
+
+/**
  * Hard limits applied to every decision regardless of which layer produced it. A rule bug, an ML
  * outlier or a hallucinated LLM number all pass through here before anything is written.
  */
@@ -148,7 +164,7 @@ export function applyGuardrails(
       continue;
     }
 
-    const countsTowardShare = decision.nextValue.kind !== 'negativeKeyword';
+    const countsTowardShare = spendsEntityQuota(decision);
     if (entityCap !== null && countsTowardShare && !touchedEntities.has(decision.entityId)) {
       // Overflow is dropped rather than clamped: the limit is on how much of the account may move
       // in one run, and the decisions arrive worst-first, so the tail is the least valuable.
@@ -170,9 +186,6 @@ export function applyGuardrails(
       continue;
     }
 
-    // Negative keywords are excluded from the share rail: they are additive, ad-group scoped and
-    // the safest action we have (TZ §15.7 week one), so they must not consume the quota that
-    // exists to stop mass bid/status movement across the keyword population.
     if (countsTowardShare) touchedEntities.add(decision.entityId);
 
     if (limited.outcome === 'clamped') {
@@ -287,12 +300,18 @@ function clampBid(
   const lower = Math.max(stepLower, Math.min(windowLower, previous));
   if (next <= upper && next >= lower) return { outcome: 'allowed' };
 
-  const amount = next > upper ? upper : lower;
-  const byWindow = next > upper ? upper < stepUpper : lower > stepLower;
-  const rail: GuardrailRail = byWindow ? 'MAX_BID_CHANGE_WINDOW' : 'MAX_BID_CHANGE';
-  const limit = byWindow
-    ? `${formatPercent(maxChangePct)}% за ${windowDays} сут. от ${formatMoney(anchor)}`
-    : `${formatPercent(maxChangePct)}%/сут`;
+  const goingUp = next > upper;
+  const amount = goingUp ? upper : lower;
+  const { rail, limit, cap } = describeBound({
+    goingUp,
+    bound: amount,
+    stepBound: goingUp ? stepUpper : stepLower,
+    windowBound: goingUp ? windowUpper : windowLower,
+    previous,
+    anchor,
+    maxChangePct,
+    windowDays,
+  });
 
   if (amount === previous) {
     // Урезать до нуля нельзя: решение «поменять на ничего» доехало бы до площадки за
@@ -311,8 +330,7 @@ function clampBid(
   // which is precisely the intent of a rate limit.
   const clampedDecision = annotate(
     withNextValue(decision, { kind: 'bid', amount }),
-    `ограничено guardrail: изменение ставки ≤ ${limit} ` +
-      `(${formatMoney(next)} → ${formatMoney(amount)})`,
+    `ограничено guardrail: ${cap} (${formatMoney(next)} → ${formatMoney(amount)})`,
   );
   return {
     outcome: 'clamped',
@@ -322,6 +340,55 @@ function clampBid(
       `запрошено ${formatMoney(next)} от ${formatMoney(previous)}, ` +
       `допустимый коридор ${formatMoney(lower)}…${formatMoney(upper)}`,
   };
+}
+
+interface BoundInput {
+  goingUp: boolean;
+  /** Граница коридора в эту сторону — та, до которой урезают. */
+  bound: number;
+  stepBound: number;
+  windowBound: number;
+  previous: number;
+  anchor: number;
+  maxChangePct: number;
+  windowDays: number;
+}
+
+interface BoundDescription {
+  rail: GuardrailRail;
+  /** Что держит границу — фраза для ноты в скобках. */
+  limit: string;
+  /** Та же граница в форме, пригодной после «ограничено guardrail:». */
+  cap: string;
+}
+
+/**
+ * Кто именно держит границу коридора — шаг, окно или сама текущая ставка.
+ *
+ * Третий случай появляется, когда ставку вынесло за коридор окна (её поправил человек
+ * или сместился якорь): оконная граница тогда расширяется до текущей ставки, чтобы
+ * обратный ход оставался возможным. Нота при этом называла оконный лимит — «30% за 7
+ * сут. от 100» при коридоре 140…200, то есть два несовместимых числа в одной строке:
+ * человек, разбирающий аудит, видел лимит 130 и коридор до 200 и не мог понять, что
+ * сработало. Границу обязана называть та величина, которая её и держит.
+ */
+function describeBound(input: BoundInput): BoundDescription {
+  const { goingUp, bound, stepBound, windowBound, previous, anchor } = input;
+  const step = `${formatPercent(input.maxChangePct)}%/сут`;
+  const window =
+    `${formatPercent(input.maxChangePct)}% за ${input.windowDays} сут. ` +
+    `от ${formatMoney(anchor)}`;
+
+  if (bound === stepBound) {
+    return { rail: 'MAX_BID_CHANGE', limit: step, cap: `изменение ставки ≤ ${step}` };
+  }
+  if (bound === previous && windowBound !== previous) {
+    const phrase =
+      `${goingUp ? 'рост запрещён' : 'снижение запрещено'}: текущая ставка ` +
+      `${formatMoney(previous)} уже ${goingUp ? 'выше' : 'ниже'} коридора окна (${window})`;
+    return { rail: 'MAX_BID_CHANGE_WINDOW', limit: phrase, cap: phrase };
+  }
+  return { rail: 'MAX_BID_CHANGE_WINDOW', limit: window, cap: `изменение ставки ≤ ${window}` };
 }
 
 function withNextValue(decision: Decision, nextValue: Decision['nextValue']): Decision {

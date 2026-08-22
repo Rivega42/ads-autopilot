@@ -626,6 +626,86 @@ describe('runOptimizer', () => {
     expect(run.autoApply).toEqual([]);
     expect(run.approvals[0]?.kind).toBe('BID_CHANGE');
   });
+
+  /**
+   * Решение уровня кампании и предохранители.
+   *
+   * Наблюдения собирались только по сущностям, а строка кампании из них исключалась
+   * ещё до сборки контекста, — поэтому любое решение по кампании получало отказ «нет
+   * статистики по сущности» при любом пороге. Бюджетных правил сегодня нет, и дефект
+   * не стреляет; первое же такое правило оказалось бы мёртвым, а выглядело бы это как
+   * сработавший предохранитель.
+   */
+  const budgetSource = (amount: number): DecisionSource => ({
+    id: 'budget-like',
+    layer: 'rule',
+    propose: () => [
+      {
+        action: 'BUDGET_CHANGE',
+        entityType: 'CAMPAIGN',
+        entityId: 'c-1',
+        prevValue: { kind: 'budget', amount: 5000 },
+        nextValue: { kind: 'budget', amount },
+        reason: 'бюджет выбирается целиком',
+        requiresApproval: false,
+        layer: 'rule',
+        ruleId: null,
+        approvalKind: null,
+      },
+    ],
+  });
+
+  const campaignStats = (): CampaignStatRecord[] =>
+    statsOver(
+      'c-1',
+      3,
+      { impressions: 10000, clicks: 500, spend: 4000, conversions: 8 },
+      'CAMPAIGN',
+    );
+
+  it('решение уровня кампании доходит до предохранителей, а не отклоняется как беспризорное', async () => {
+    const db = createDb({ stats: campaignStats() });
+
+    const run = await runOptimizer(db, {
+      campaignId: 'c-1',
+      now: NOW,
+      sources: [budgetSource(5500)],
+    });
+
+    expect(run.rejected).toEqual([]);
+    expect(run.allowed.map((d) => d.action)).toEqual(['BUDGET_CHANGE']);
+    expect(run.autoApply.map((d) => d.action)).toEqual(['BUDGET_CHANGE']);
+  });
+
+  it('потолок бюджета кампании при этом продолжает работать', async () => {
+    // Доказательство, что предыдущий тест открыл дорогу решению, а не снял предохранитель.
+    const db = createDb({ stats: campaignStats() });
+
+    const run = await runOptimizer(db, {
+      campaignId: 'c-1',
+      now: NOW,
+      sources: [budgetSource(9000)],
+    });
+
+    expect(run.clamped[0]?.rail).toBe('BUDGET_CEILING');
+    expect(run.allowed[0]?.nextValue).toEqual({ kind: 'budget', amount: 6000 });
+  });
+
+  it('кампания без собственной статистики решение всё так же не получает', async () => {
+    // Отказ по-прежнему законный: судить не по чему.
+    const db = createDb({
+      stats: statsOver('kw-1', 3, { impressions: 600, clicks: 30, spend: 600, conversions: 2 }),
+    });
+
+    const run = await runOptimizer(db, {
+      campaignId: 'c-1',
+      now: NOW,
+      sources: [budgetSource(5500)],
+    });
+
+    expect(run.allowed).toEqual([]);
+    expect(run.rejected[0]?.rail).toBe('MIN_OBSERVATIONS');
+  });
 });
 
 describe('hasMixedAttribution', () => {

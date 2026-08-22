@@ -303,7 +303,7 @@ export async function runOptimizer(
 
   const deduped = resolveConflicts(proposed);
   const bidHistory = await loadBidHistory(db, deduped, { start: windowStart, days: windowDays });
-  const context = buildGuardrailContext(campaign, entities, searchQueries, bidHistory);
+  const context = buildGuardrailContext(campaign, aggregates, searchQueries, bidHistory);
   const guarded = applyGuardrails(deduped, context, config);
   const policyContext: PolicyContext = { handoverMode: campaign.handoverMode };
   const { autoApply, approvals } = classifyDecisions(guarded.allowed, policyContext);
@@ -407,14 +407,27 @@ export function bidLevelOf(provider: Provider): BidLevel {
   return keepsBidOnAdGroup(provider) ? 'ADGROUP' : 'KEYWORD';
 }
 
+/**
+ * Контекст предохранителей.
+ *
+ * Наблюдения собираются по всем строкам статистики, включая строку самой кампании.
+ * Раньше сюда приезжали только сущности, а кампания из них исключалась строкой выше, —
+ * и решение уровня кампании (бюджет, стратегия, пауза кампании) получало отказ «нет
+ * статистики по сущности» при любых цифрах и любом пороге. Бюджетных правил в MVP нет,
+ * поэтому не стреляло; первое же такое правило оказалось бы мёртвым, и выглядело бы это
+ * как сработавший предохранитель — то есть дефект был бы не виден в отчётах.
+ *
+ * `eligibleEntityCount` при этом остаётся числом сущностей: доля изменённых считается
+ * по населению кампании, а сама кампания в своё же население не входит.
+ */
 function buildGuardrailContext(
   campaign: CampaignRecord,
-  entities: readonly EntityMetrics[],
+  aggregates: readonly EntityMetrics[],
   searchQueries: readonly SearchQueryMetrics[],
   bidHistory: BidHistory,
 ): GuardrailContext {
   const observations = new Map<string, ObservationCounts>();
-  for (const entity of entities) {
+  for (const entity of aggregates) {
     observations.set(`${entity.entityType}:${entity.entityId}`, {
       impressions: entity.impressions,
       days: entity.days,
@@ -430,7 +443,7 @@ function buildGuardrailContext(
   return {
     dailyBudget: toNumber(campaign.dailyBudget) ?? 0,
     observations,
-    eligibleEntityCount: entities.length,
+    eligibleEntityCount: aggregates.filter((entity) => entity.entityId !== campaign.id).length,
     bidHistory,
   };
 }
