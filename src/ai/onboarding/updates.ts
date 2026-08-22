@@ -1,3 +1,5 @@
+import { domainToASCII, domainToUnicode } from 'node:url';
+
 import {
   evidenceNumbers,
   requiresEvidence,
@@ -25,9 +27,23 @@ export interface RejectedUpdate {
   quote?: string;
 }
 
+/**
+ * Значение принято, но не то, которое вернула модель: записано то, что написал
+ * клиент. Не отказ — поэтому отдельно от `rejected`, иначе в логе «отклонено»
+ * оказалось бы то, что на самом деле уехало в бриф.
+ */
+export interface CorrectedUpdate {
+  field: BriefField;
+  /** Что вернула модель. */
+  value: unknown;
+  /** Что записано вместо этого. */
+  used: unknown;
+}
+
 export interface AppliedUpdates {
   draft: ClientBriefDraft;
   rejected: RejectedUpdate[];
+  corrected: CorrectedUpdate[];
   accepted: BriefField[];
 }
 
@@ -134,22 +150,180 @@ export function quoteMentionsNumber(quote: string, value: number): boolean {
  *
  * Схема требует полный URL, а клиент пишет «наш сайт okna-spb.ru», поэтому сравнивать
  * строки целиком нельзя: схему и `www.` отбрасываем, остальное сводим к буквам и
- * цифрам тем же нормализатором, что и цитаты. Совпадать обязан весь адрес вместе с
- * путём: `okna-spb.ru` и `okna-spb.ru/akcii` ведут в разные места, и второе клиент
- * не называл.
+ * цифрам тем же нормализатором, что и цитаты. Домен сверяется во всех трёх видах —
+ * как написан, в unicode и в punycode: клиент пишет «окна-спб.рф», а модель возвращает
+ * `xn----7sbe7apelp.xn--p1ai`, и это один и тот же сайт.
  *
  * Проверка нужна ровно потому, что ссылка стала обязательной: поле, без которого
  * интервью не закончить, модель заполнить хочет, а выдуманный адрес — это чужой
  * сайт, на который клиент купит трафик.
  */
 export function urlMentioned(value: string, messages: readonly string[]): boolean {
-  const needle = normalizeQuote(stripUrlPrefix(value));
-  if (needle.length < 2) return false;
-  return messages.some((message) => normalizeQuote(stripUrlPrefix(message)).includes(needle));
+  const needles = urlNeedles(value);
+  if (needles.length === 0) return false;
+  const haystacks = messages.map((message) => normalizeQuote(stripUrlPrefix(message)));
+  return needles.some((needle) => haystacks.some((hay) => hay.includes(needle)));
+}
+
+function urlNeedles(value: string): string[] {
+  const needles: string[] = [];
+  const push = (candidate: string): void => {
+    if (candidate.length >= 2 && !needles.includes(candidate)) needles.push(candidate);
+  };
+
+  push(normalizeQuote(stripUrlPrefix(value)));
+
+  const url = toUrl(value);
+  if (url === null) return needles;
+
+  // Путь обязан совпадать вместе с доменом: `okna-spb.ru` и `okna-spb.ru/akcii`
+  // ведут в разные места. Хвостовой слэш — не путь, его дописывает `new URL`.
+  const tail = `${url.pathname}${url.search}`.replace(/\/$/u, '');
+  for (const host of hostForms(url.hostname)) push(normalizeQuote(`${host}${tail}`));
+
+  return needles;
 }
 
 function stripUrlPrefix(text: string): string {
   return text.replace(/https?:\/\//giu, '').replace(/(^|[^\p{L}\p{N}])www\./giu, '$1');
+}
+
+/**
+ * Зоны, по которым слово с точкой считается адресом само по себе.
+ *
+ * Список нужен из-за обратной стороны: «ул.Ленина» и «и т.д.» тоже выглядят как
+ * домен, а принятый за адрес обрывок текста — это купленный трафик в никуда.
+ * Адрес в незнакомой зоне всё равно опознаётся — по схеме, `www.` или пути.
+ */
+const COMMON_TLDS: ReadonlySet<string> = new Set([
+  'ru',
+  'рф',
+  'su',
+  'com',
+  'net',
+  'org',
+  'by',
+  'kz',
+  'ua',
+  'am',
+  'ge',
+  'io',
+  'me',
+  'biz',
+  'info',
+  'online',
+  'site',
+  'store',
+  'shop',
+  'pro',
+  'tech',
+  'app',
+  'dev',
+  'ai',
+  'tv',
+  'cc',
+  'moscow',
+  'xyz',
+  'club',
+  'life',
+  'digital',
+  'agency',
+  'studio',
+]);
+
+const WEB_ADDRESS_RE =
+  /(?:https?:\/\/)?(?:www\.)?(?:[\p{L}\p{N}][\p{L}\p{N}-]*\.)+[\p{L}]{2,24}(?:\/[^\s"'<>,;]*)?/giu;
+
+function looksLikeWebAddress(token: string): boolean {
+  if (/^https?:\/\//iu.test(token)) return true;
+  const bare = token.replace(/^https?:\/\//iu, '');
+  if (/^www\./iu.test(bare)) return true;
+  const host = bare.split('/')[0] ?? '';
+  if (bare.includes('/')) return true;
+  return COMMON_TLDS.has((host.split('.').at(-1) ?? '').toLowerCase());
+}
+
+/** Адреса, названные в тексте: то, что клиент действительно написал. */
+export function extractWebAddresses(text: string): string[] {
+  return [...text.matchAll(WEB_ADDRESS_RE)].map((m) => m[0]).filter(looksLikeWebAddress);
+}
+
+/**
+ * Есть ли в тексте адрес сайта.
+ *
+ * Отдельно от разбора обновлений: по этому же признаку интервью решает, можно ли
+ * говорить клиенту «сайта у тебя нет». Клиенту, который прислал адрес, — нельзя,
+ * даже если записать этот адрес мы не смогли.
+ */
+export function mentionsWebAddress(text: string): boolean {
+  return extractWebAddresses(text).length > 0;
+}
+
+function toUrl(token: string): URL | null {
+  try {
+    return new URL(/^https?:\/\//iu.test(token) ? token : `https://${token}`);
+  } catch {
+    return null;
+  }
+}
+
+function hostForms(host: string): string[] {
+  const bare = host.toLowerCase().replace(/^www\./u, '');
+  return [bare, domainToUnicode(bare), domainToASCII(bare)].filter((form) => form !== '');
+}
+
+function sameHost(left: URL, right: URL): boolean {
+  const forms = new Set(hostForms(left.hostname));
+  return hostForms(right.hostname).some((form) => forms.has(form));
+}
+
+export type LandingVerdict =
+  { ok: true; url: string; corrected: boolean } | { ok: false; reason: RejectedUpdate['reason'] };
+
+/**
+ * Что записать в `landingUrl` по ответу модели.
+ *
+ * Ложный отказ здесь стоит дороже лишнего вопроса: три отказа подряд — и интервью
+ * скажет клиенту с работающим сайтом, что кампанию в Директе завести не получится.
+ * Поэтому проверяется не совпадение строк, а названный клиентом адрес:
+ *
+ *  1. модель вернула ровно то, что он написал (с поправкой на punycode) — берём её;
+ *  2. домен тот же, но написан иначе или к нему дописан путь, которого клиент не
+ *     называл, — берём адрес из ответа клиента: он-то точно его;
+ *  3. модель прочитала последний ответ как ссылку, а записала по-своему (транслит
+ *     кириллического домена, «исправленная» опечатка) — берём адрес оттуда, и
+ *     только если он там ровно один: угадывать из двух дороже, чем переспросить.
+ */
+export function proveLandingUrl(value: string, messages: readonly string[]): LandingVerdict {
+  if (urlMentioned(value, messages)) return { ok: true, url: value, corrected: false };
+
+  const proposed = toUrl(value);
+  if (proposed === null) return { ok: false, reason: 'url-not-mentioned' };
+
+  const named = messages.flatMap(extractWebAddresses).map(toUrl).filter(isUrl);
+  const sameDomain = named.find((url) => sameHost(url, proposed));
+  if (sameDomain !== undefined) return { ok: true, url: sameDomain.href, corrected: true };
+
+  const inLast = unique(
+    extractWebAddresses(messages.at(-1) ?? '')
+      .map(toUrl)
+      .filter(isUrl)
+      .map((url) => url.href),
+  );
+  const single = inLast[0];
+  if (inLast.length === 1 && single !== undefined) {
+    return { ok: true, url: single, corrected: true };
+  }
+
+  return { ok: false, reason: 'url-not-mentioned' };
+}
+
+function isUrl(value: URL | null): value is URL {
+  return value !== null;
+}
+
+function unique(values: readonly string[]): string[] {
+  return [...new Set(values)];
 }
 
 type QuoteVerdict = { ok: true } | { ok: false; reason: RejectedUpdate['reason'] };
@@ -208,6 +382,7 @@ export function applyTurnUpdates(
 ): AppliedUpdates {
   const next: ClientBriefDraft = { ...draft };
   const rejected: RejectedUpdate[] = [];
+  const corrected: CorrectedUpdate[] = [];
   const accepted: BriefField[] = [];
 
   const evidence = turn.evidence ?? {};
@@ -216,11 +391,13 @@ export function applyTurnUpdates(
     if (value === undefined) continue;
 
     if (field === 'landingUrl' && typeof value === 'string') {
-      if (!urlMentioned(value, clientMessages)) {
-        rejected.push({ field, reason: 'url-not-mentioned', value });
+      const verdict = proveLandingUrl(value, clientMessages);
+      if (!verdict.ok) {
+        rejected.push({ field, reason: verdict.reason, value });
         continue;
       }
-      next.landingUrl = value;
+      if (verdict.corrected) corrected.push({ field, value, used: verdict.url });
+      next.landingUrl = verdict.url;
       accepted.push(field);
       continue;
     }
@@ -261,5 +438,5 @@ export function applyTurnUpdates(
     accepted.push(field);
   }
 
-  return { draft: next, rejected, accepted };
+  return { draft: next, rejected, corrected, accepted };
 }

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { interviewTurnSchema } from './turn.schema.js';
-import { applyTurnUpdates, normalizeQuote, quoteFound, quoteMentionsNumber } from './updates.js';
+import {
+  applyTurnUpdates,
+  mentionsWebAddress,
+  normalizeQuote,
+  quoteFound,
+  quoteMentionsNumber,
+} from './updates.js';
 
 const CLIENT_SAID = ['Курсы английского для айтишников', 'Готов платить 2000 ₽ за заявку'];
 
@@ -249,14 +255,76 @@ describe('applyTurnUpdates', () => {
     expect(result.rejected[0]).toMatchObject({ field: 'landingUrl', reason: 'url-not-mentioned' });
   });
 
-  it('не считает названной ссылку, у которой клиент назвал только домен', () => {
+  /**
+   * Ложные отказы стоят дороже лишней строки в логе: третий отказ подряд говорит
+   * клиенту с работающим сайтом, что кампанию в Директе завести не получится.
+   * Поэтому там, где адрес назван, но записан не теми буквами, берётся тот, что
+   * написал клиент, — а не отбрасывается всё.
+   */
+  it('принимает кириллический домен, записанный моделью в punycode', () => {
+    const result = applyTurnUpdates(
+      {},
+      turn({ updates: { landingUrl: 'https://xn----7sbe7apelp.xn--p1ai/' } }),
+      [...CLIENT_SAID, 'наш сайт окна-спб.рф'],
+    );
+    expect(result.draft.landingUrl).toBe('https://xn----7sbe7apelp.xn--p1ai/');
+    expect(result.accepted).toContain('landingUrl');
+  });
+
+  it('оставляет от дописанного моделью пути только то, что назвал клиент', () => {
     // «okna-spb.ru» и «okna-spb.ru/akcii» ведут в разные места, и второе клиент
-    // не называл: страница акции могла быть закрыта ещё в прошлом сезоне.
+    // не называл: страница акции могла быть закрыта ещё в прошлом сезоне. Но и
+    // отказывать нельзя — домен-то он назвал.
+    const result = applyTurnUpdates(
+      {},
+      turn({ updates: { landingUrl: 'https://okna-spb.ru/akcii?utm_source=tg' } }),
+      [...CLIENT_SAID, 'наш сайт okna-spb.ru'],
+    );
+    expect(result.draft.landingUrl).toBe('https://okna-spb.ru/');
+    expect(result.accepted).toContain('landingUrl');
+    expect(result.corrected).toEqual([
+      {
+        field: 'landingUrl',
+        value: 'https://okna-spb.ru/akcii?utm_source=tg',
+        used: 'https://okna-spb.ru/',
+      },
+    ]);
+  });
+
+  it('берёт страницу клиента, а не корень сайта, когда модель дописала свой путь', () => {
     const result = applyTurnUpdates(
       {},
       turn({ updates: { landingUrl: 'https://okna-spb.ru/akcii' } }),
-      [...CLIENT_SAID, 'наш сайт okna-spb.ru'],
+      [...CLIENT_SAID, 'вот страница: okna-spb.ru/lp'],
     );
+    expect(result.draft.landingUrl).toBe('https://okna-spb.ru/lp');
+  });
+
+  it('берёт адрес из ответа клиента, если модель переписала его латиницей', () => {
+    const result = applyTurnUpdates({}, turn({ updates: { landingUrl: 'https://okna-spb.ru' } }), [
+      ...CLIENT_SAID,
+      'сайт окна-спб.рф',
+    ]);
+    expect(result.draft.landingUrl).toBe('https://xn----7sbe7apelp.xn--p1ai/');
+    expect(result.corrected[0]).toMatchObject({ field: 'landingUrl' });
+  });
+
+  it('не принимает выдуманный адрес за адрес клиента, если тот назвал два сайта', () => {
+    // В последнем ответе два адреса, ни один не совпал с тем, что записала модель:
+    // угадывать, который из них посадочная, дороже, чем спросить ещё раз.
+    const result = applyTurnUpdates({}, turn({ updates: { landingUrl: 'https://okna-spb.ru' } }), [
+      ...CLIENT_SAID,
+      'мы как okna-piter.ru, только дешевле, ещё есть vk.com/okna',
+    ]);
+    expect(result.draft.landingUrl).toBeUndefined();
+  });
+
+  it('не принимает за адрес сокращение с точкой', () => {
+    // «ул.Ленина» — не сайт: иначе клиент купил бы трафик на несуществующий домен.
+    const result = applyTurnUpdates({}, turn({ updates: { landingUrl: 'https://okna-spb.ru' } }), [
+      ...CLIENT_SAID,
+      'офис на ул.Ленина, сайта пока нет',
+    ]);
     expect(result.draft.landingUrl).toBeUndefined();
   });
 
@@ -264,5 +332,21 @@ describe('applyTurnUpdates', () => {
     const draft = { product: 'Пылесосы' };
     applyTurnUpdates(draft, turn({ updates: { product: 'Не пылесосы' } }), []);
     expect(draft.product).toBe('Пылесосы');
+  });
+});
+
+describe('mentionsWebAddress', () => {
+  it('видит адрес, как его пишут клиенты', () => {
+    expect(mentionsWebAddress('наш сайт okna-spb.ru')).toBe(true);
+    expect(mentionsWebAddress('окна-спб.рф')).toBe(true);
+    expect(mentionsWebAddress('https://okna-spb.ru/lp?utm=tg')).toBe(true);
+    expect(mentionsWebAddress('только группа vk.com/okna')).toBe(true);
+  });
+
+  it('не принимает за адрес обычный текст с точками', () => {
+    expect(mentionsWebAddress('сайта нет, только страница в ВК')).toBe(false);
+    expect(mentionsWebAddress('офис на ул.Ленина')).toBe(false);
+    expect(mentionsWebAddress('бюджет 12.500 в сутки')).toBe(false);
+    expect(mentionsWebAddress('импланты, виниры и т.д.')).toBe(false);
   });
 });

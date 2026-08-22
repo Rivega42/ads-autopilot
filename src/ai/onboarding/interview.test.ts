@@ -12,7 +12,10 @@ import {
   startInterview,
   InterviewConflictError,
   InterviewNotStartedError,
+  LANDING_URL_ATTEMPTS,
   MAX_QUESTIONS,
+  NO_LANDING_REPLY,
+  UNCONFIRMED_LANDING_REPLY,
   type RunInterviewTurn,
 } from './interview.js';
 import type { ClientConfigStore } from './metrika-config.js';
@@ -22,6 +25,7 @@ import { interviewTurnSchema, type InterviewTurn } from './turn.schema.js';
 import {
   createMemoryBriefStore,
   createMemoryClientStore,
+  type MemoryBriefRow,
   type MemoryBriefStore,
 } from '@/ai/evals/memory-store.js';
 import type { AgentRun, RunAgentOptions } from '@/clients/llm/index.js';
@@ -434,7 +438,9 @@ describe('handleAnswer', () => {
       expect(store.get(CLIENT)?.status).toBe(BriefStatus.IN_PROGRESS);
     });
 
-    it('после трёх вопросов про ссылку говорит правду и перестаёт спрашивать', async () => {
+    it('даёт ответить на все три вопроса про ссылку, а не на два', async () => {
+      // Счётчик считает заданные вопросы, а не заданные плюс текущий: при
+      // LANDING_URL_ATTEMPTS = 3 клиент должен успеть ответить трижды.
       const { run, calls } = runner([
         { reply: 'Что продаём?' },
         {
@@ -445,25 +451,83 @@ describe('handleAnswer', () => {
         },
         { reply: 'Пришли ссылку, пожалуйста.', asking: 'landingUrl' },
         { reply: 'Всё-таки нужна ссылка.', asking: 'landingUrl' },
+        { reply: 'И ещё раз про ссылку.', asking: 'landingUrl' },
+        { reply: 'Этого хода быть не должно.' },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+
+      const answers = ['сайта нет', 'нет, только группа в ВК', 'нет и не будет'];
+      let step = await handleAnswer(CLIENT, answers[0] ?? '', { db: store.db, run });
+      expect(step.kind).toBe('question');
+      step = await handleAnswer(CLIENT, answers[1] ?? '', { db: store.db, run });
+      expect(step.kind).toBe('question');
+      step = await handleAnswer(CLIENT, answers[2] ?? '', { db: store.db, run });
+
+      expect(answers).toHaveLength(LANDING_URL_ATTEMPTS);
+      expect(step.kind).toBe('needs_human');
+      if (step.kind === 'needs_human') {
+        expect(step.missing).toEqual(['landingUrl']);
+        expect(step.text).toBe(NO_LANDING_REPLY);
+        // Не молчаливое «бриф завершён» и не 25 вопросов до потолка.
+        expect(step.askedCount).toBeLessThan(MAX_QUESTIONS);
+      }
+      // Пять ходов: приветствие и три вопроса про ссылку, на которые клиент ответил.
+      // Шестой уже не оплачен.
+      expect(calls).toHaveLength(5);
+      expect(store.get(CLIENT)?.status).toBe(BriefStatus.IN_PROGRESS);
+    });
+
+    it('считает вопросы про ссылку, даже если модель не заполнила asking', async () => {
+      // Поле `asking` промпт заполнять не обязан, а на нём держалась вся ветка:
+      // без него интервью спрашивало бы про ссылку до потолка в 25 ходов.
+      const { run, calls } = runner([
+        { reply: 'Что продаём?' },
+        { reply: 'А сайт какой?', updates: BRIEF_WITHOUT_SITE, evidence: QUOTED_EVIDENCE },
+        { reply: 'Пришли ссылку, пожалуйста.' },
+        { reply: 'Всё-таки нужна ссылка.' },
+        { reply: 'И ещё раз про ссылку.' },
         { reply: 'Этого хода быть не должно.' },
       ]);
 
       await startInterview(CLIENT, { db: store.db, run });
       await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
       await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
-      const step = await handleAnswer(CLIENT, 'нет, только группа в ВК', { db: store.db, run });
+      await handleAnswer(CLIENT, 'нет', { db: store.db, run });
+      const step = await handleAnswer(CLIENT, 'нет и не будет', { db: store.db, run });
+
+      expect(step.kind).toBe('needs_human');
+      expect(calls).toHaveLength(5);
+    });
+
+    it('клиенту, который прислал ссылку, не говорит, что сайта нет', async () => {
+      // Отказ нашей проверки — не отсутствие сайта. Сказать «Директ не примет
+      // объявление» человеку с работающим сайтом значит потерять клиента.
+      const { run } = runner([
+        { reply: 'Что продаём?' },
+        {
+          reply: 'А сайт какой?',
+          updates: BRIEF_WITHOUT_SITE,
+          evidence: QUOTED_EVIDENCE,
+          asking: 'landingUrl',
+        },
+        { reply: 'Не понял, повтори ссылку.', asking: 'landingUrl' },
+        { reply: 'Ещё раз, пожалуйста.', asking: 'landingUrl' },
+        { reply: 'Последний раз: какой сайт?', asking: 'landingUrl' },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+      await handleAnswer(CLIENT, 'сайт okna-spb.ru', { db: store.db, run });
+      await handleAnswer(CLIENT, 'ну okna-spb.ru же', { db: store.db, run });
+      const step = await handleAnswer(CLIENT, 'okna-spb.ru', { db: store.db, run });
 
       expect(step.kind).toBe('needs_human');
       if (step.kind === 'needs_human') {
-        expect(step.missing).toEqual(['landingUrl']);
-        expect(step.text).toContain('Директ');
-        expect(step.text.toLowerCase()).toContain('ссылк');
-        // Не молчаливое «бриф завершён» и не 25 вопросов до потолка.
-        expect(step.askedCount).toBeLessThan(MAX_QUESTIONS);
+        expect(step.text).toBe(UNCONFIRMED_LANDING_REPLY);
+        expect(step.text).not.toBe(NO_LANDING_REPLY);
       }
-      // Четыре хода: приветствие и три вопроса про ссылку. Пятый уже не оплачен.
-      expect(calls).toHaveLength(4);
-      expect(store.get(CLIENT)?.status).toBe(BriefStatus.IN_PROGRESS);
     });
 
     it('после перезапуска повторяет тот же ответ, а не последний вопрос модели', async () => {
@@ -482,12 +546,14 @@ describe('handleAnswer', () => {
       await startInterview(CLIENT, { db: store.db, run });
       await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
       await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
+      await handleAnswer(CLIENT, 'нет', { db: store.db, run });
       const stopped = await handleAnswer(CLIENT, 'нет и не будет', { db: store.db, run });
 
       const resumed = runner([{ reply: 'Этого хода быть не должно.' }]);
       const step = await startInterview(CLIENT, { db: store.db, run: resumed.run });
 
       expect(resumed.calls).toHaveLength(0);
+      expect(step.kind).toBe('needs_human');
       expect(step.text).toBe(stopped.text);
     });
 
@@ -502,6 +568,7 @@ describe('handleAnswer', () => {
         },
         { reply: 'Пришли ссылку.', asking: 'landingUrl' },
         { reply: 'Без ссылки никак.', asking: 'landingUrl' },
+        { reply: 'Совсем никак без ссылки.', asking: 'landingUrl' },
         {
           reply: 'Записал, бриф собран.',
           updates: { landingUrl: 'https://it-english.ru/trial' },
@@ -513,6 +580,7 @@ describe('handleAnswer', () => {
       await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
       await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
       await handleAnswer(CLIENT, 'нет', { db: store.db, run });
+      await handleAnswer(CLIENT, 'нет и не будет', { db: store.db, run });
       const step = await handleAnswer(CLIENT, 'нашёл: it-english.ru/trial', { db: store.db, run });
 
       expect(step.kind).toBe('complete');
@@ -596,5 +664,163 @@ describe('getInterviewState', () => {
       brief: null,
     });
     expect(snapshot?.draft.product).toBe('Курсы');
+  });
+});
+
+/**
+ * Брифы, собранные до того, как ссылка стала обязательной (`REQUIRED_BRIEF_FIELDS`).
+ *
+ * Такая строка помечена COMPLETE и схему проходит — `landingUrl` в ней необязателен.
+ * До сих пор это был тупик: `/launch` отвечал `landing_missing` и советовал прислать
+ * ссылку в интервью, `/onboarding` отвечал «Бриф уже собран», а свободный текст
+ * посредник в боте не пропускал, потому что статус COMPLETE. Инструкция, которую
+ * система сама выдала, не работала, и клиент становился ручной задачей.
+ */
+describe('бриф, собранный до обязательной ссылки', () => {
+  function legacyStore(data: unknown = BRIEF_WITHOUT_SITE): MemoryBriefStore {
+    const row: MemoryBriefRow = {
+      id: 'brief_legacy',
+      clientId: CLIENT,
+      status: BriefStatus.COMPLETE,
+      data: JSON.parse(JSON.stringify(data)) as MemoryBriefRow['data'],
+      transcript: null,
+      completedAt: new Date('2026-07-01T10:00:00.000Z'),
+      updatedAt: new Date('2026-07-01T10:00:00.000Z'),
+    };
+    return createMemoryBriefStore([row]);
+  }
+
+  it('/onboarding спрашивает недостающую ссылку, а не отвечает «Бриф уже собран»', async () => {
+    const legacy = legacyStore();
+    const { run, calls } = runner([{ reply: 'Пришли ссылку на сайт.', asking: 'landingUrl' }]);
+
+    const step = await startInterview(CLIENT, { db: legacy.db, run });
+
+    expect(step.kind).toBe('question');
+    expect(step.text).toBe('Пришли ссылку на сайт.');
+    expect(calls).toHaveLength(1);
+    // Строка снова открыта — иначе следующий ответ клиента снова пройдёт мимо.
+    expect(legacy.get(CLIENT)?.status).toBe(BriefStatus.IN_PROGRESS);
+  });
+
+  it('ответ клиента со ссылкой достраивает бриф до конца', async () => {
+    const legacy = legacyStore();
+    const { run } = runner([
+      { reply: 'Пришли ссылку на сайт.', asking: 'landingUrl' },
+      {
+        reply: 'Записал, бриф собран.',
+        updates: { landingUrl: 'https://it-english.ru/trial' },
+        done: true,
+      },
+    ]);
+
+    await startInterview(CLIENT, { db: legacy.db, run });
+    const step = await handleAnswer(CLIENT, 'it-english.ru/trial', { db: legacy.db, run });
+
+    expect(step.kind).toBe('complete');
+    expect(legacy.get(CLIENT)?.status).toBe(BriefStatus.COMPLETE);
+    expect(legacy.get(CLIENT)?.data).toMatchObject({ landingUrl: 'https://it-english.ru/trial' });
+  });
+
+  it('свободный текст доходит до интервью: слой Telegram видит, что ответа ждут', async () => {
+    const legacy = legacyStore();
+
+    const snapshot = await getInterviewState(CLIENT, { db: legacy.db });
+
+    expect(snapshot?.status).toBe(BriefStatus.COMPLETE);
+    expect(snapshot?.missing).toEqual(['landingUrl']);
+    expect(snapshot?.expectsAnswer).toBe(true);
+  });
+
+  it('собранный целиком бриф остаётся собранным', async () => {
+    const legacy = legacyStore(FULL_BRIEF);
+    const { run, calls } = runner([{ reply: 'Этого хода быть не должно.' }]);
+
+    const step = await startInterview(CLIENT, { db: legacy.db, run });
+
+    expect(step.kind).toBe('complete');
+    expect(calls).toHaveLength(0);
+    const snapshot = await getInterviewState(CLIENT, { db: legacy.db });
+    expect(snapshot?.expectsAnswer).toBe(false);
+  });
+
+  it('строку, не проходящую схему, по-прежнему отдаёт человеку', async () => {
+    // Дневной бюджет 50 ₽ — это не пробел в брифе, а сломанное значение:
+    // спрашивать по кругу тут нечего, чинить должен человек.
+    const legacy = legacyStore({ ...FULL_BRIEF, dailyBudgetRub: 50 });
+    const { run, calls } = runner([{ reply: 'Этого хода быть не должно.' }]);
+
+    const step = await startInterview(CLIENT, { db: legacy.db, run });
+
+    expect(step.kind).toBe('needs_human');
+    expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * Остановка после честного отказа (задача 2).
+ *
+ * `needs_human` не менял статус строки, поэтому каждое следующее сообщение клиента —
+ * «ладно», «а без сайта никак?», «спасибо» — снова уезжало в модель, а её ответ тут
+ * же заменялся константой. Ходов при этом не двадцать, а сколько угодно.
+ */
+describe('после остановки интервью не платит за модель', () => {
+  async function stopped(): Promise<{ run: RunInterviewTurn; calls: unknown[] }> {
+    const { run, calls } = runner([
+      { reply: 'Что продаём?' },
+      {
+        reply: 'А сайт какой?',
+        updates: BRIEF_WITHOUT_SITE,
+        evidence: QUOTED_EVIDENCE,
+        asking: 'landingUrl',
+      },
+      { reply: 'Пришли ссылку.', asking: 'landingUrl' },
+      { reply: 'Без ссылки никак.', asking: 'landingUrl' },
+      { reply: 'Совсем никак.', asking: 'landingUrl' },
+      {
+        reply: 'Записал, бриф собран.',
+        updates: { landingUrl: 'https://it-english.ru/trial' },
+        done: true,
+      },
+    ]);
+
+    await startInterview(CLIENT, { db: store.db, run });
+    await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+    await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
+    await handleAnswer(CLIENT, 'нет', { db: store.db, run });
+    const step = await handleAnswer(CLIENT, 'нет и не будет', { db: store.db, run });
+    expect(step.kind).toBe('needs_human');
+    return { run, calls };
+  }
+
+  it('следующие сообщения клиента не идут в модель', async () => {
+    const { run, calls } = await stopped();
+    const paidTurns = calls.length;
+
+    for (const text of ['ладно', 'а без сайта никак?', 'спасибо']) {
+      const step = await handleAnswer(CLIENT, text, { db: store.db, run });
+      expect(step.kind).toBe('needs_human');
+    }
+
+    expect(calls).toHaveLength(paidTurns);
+  });
+
+  it('записывает эти сообщения — человеку разбирать по расшифровке, а не по логу', async () => {
+    const { run } = await stopped();
+    await handleAnswer(CLIENT, 'а без сайта никак?', { db: store.db, run });
+
+    const texts = parseTranscript(store.get(CLIENT)?.transcript).turns.map((t) => t.text);
+    expect(texts).toContain('а без сайта никак?');
+  });
+
+  it('присланная позже ссылка снимает паузу и доводит бриф', async () => {
+    const { run, calls } = await stopped();
+    const paidTurns = calls.length;
+
+    const step = await handleAnswer(CLIENT, 'нашёл: it-english.ru/trial', { db: store.db, run });
+
+    expect(step.kind).toBe('complete');
+    expect(calls).toHaveLength(paidTurns + 1);
+    expect(store.get(CLIENT)?.status).toBe(BriefStatus.COMPLETE);
   });
 });

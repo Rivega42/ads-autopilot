@@ -30,10 +30,35 @@ export const transcriptTurnSchema = z.object({
 
 export type TranscriptTurn = z.infer<typeof transcriptTurnSchema>;
 
+/**
+ * Почему интервью остановлено до вмешательства человека.
+ *
+ * `no-landing` — сайта у клиента нет, и это его ответ, а не наша неудача.
+ * `unconfirmed-landing` — адрес он назвал, но записать его мы не смогли.
+ */
+export const HALT_REASONS = ['no-landing', 'unconfirmed-landing'] as const;
+
+export type HaltReason = (typeof HALT_REASONS)[number];
+
+export const haltSchema = z.object({
+  reason: z.enum(HALT_REASONS),
+  at: z.string(),
+});
+
+export type InterviewHalt = z.infer<typeof haltSchema>;
+
+/**
+ * Остановка живёт в расшифровке, а не в `ClientBrief.status`: в `BriefStatus` всего
+ * два значения (IN_PROGRESS и COMPLETE), а третье потребовало бы миграции схемы —
+ * менять её в обход владельца нельзя. Для читателей брифа ничего не меняется:
+ * незаконченный бриф остаётся незаконченным.
+ */
 export const transcriptSchema = z.object({
   version: z.literal(TRANSCRIPT_VERSION),
   askedCount: z.number().int().min(0),
   turns: z.array(transcriptTurnSchema),
+  /** Отсутствует у расшифровок, записанных до появления остановки. */
+  halted: haltSchema.nullish(),
 });
 
 export type InterviewTranscript = z.infer<typeof transcriptSchema>;
