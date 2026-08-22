@@ -6,9 +6,9 @@ import { FilterBar } from '../../components/filter-bar';
 import { formatMskDateTime, formatYmd } from '../../lib/dates';
 import type { SearchParams } from '../../lib/filters';
 import { parseFilters, rangeLength, withFilters } from '../../lib/filters';
-import { formatRelativeMinutes } from '../../lib/format';
+import { formatInteger, formatRelativeMinutes } from '../../lib/format';
 import { approvalDecisionLabel, approvalDecisionTone, approvalKindLabel } from '../../lib/labels';
-import { listApprovals } from '../../lib/queries';
+import { listApprovalsView } from '../../lib/queries';
 import { formatJsonInline } from '../../lib/serialize';
 
 export const dynamic = 'force-dynamic';
@@ -19,7 +19,8 @@ export default async function ApprovalsPage({
   readonly searchParams?: SearchParams;
 }) {
   const filters = parseFilters(searchParams);
-  const approvals = await listApprovals(filters);
+  const view = await listApprovalsView(filters);
+  const approvals = view.rows;
   const now = new Date();
 
   return (
@@ -28,17 +29,35 @@ export default async function ApprovalsPage({
         <div>
           <h1>Очередь апрувов</h1>
           <p className="page-sub">
-            Решения принимаются в Telegram-боте — здесь только просмотр. {rangeLength(filters)} дн.:{' '}
-            {formatYmd(filters.from)} — {formatYmd(filters.to)} (МСК)
+            Решения принимаются в Telegram-боте — здесь только просмотр.{' '}
+            {view.periodApplies
+              ? `${rangeLength(filters)} дн.: ${formatYmd(filters.from)} — ${formatYmd(filters.to)} (МСК)`
+              : `Ждут решения: ${formatInteger(view.total)} — очередь показана целиком, период (${formatYmd(filters.from)} — ${formatYmd(filters.to)}) фильтрует только принятые решения.`}
           </p>
         </div>
       </div>
 
       <FilterBar action="/approvals" filters={filters} fields={['decision', 'clientStatus']} />
 
+      {view.truncated ? (
+        <section className="notice notice-info" role="note">
+          <strong>
+            Показаны первые {formatInteger(approvals.length)} из {formatInteger(view.total)}
+          </strong>
+          <p className="notice-text">
+            Список обрезан потолком витрины — остальные строки не пропали, их просто здесь нет.
+            Счётчик в шапке считает очередь целиком.
+          </p>
+        </section>
+      ) : null}
+
       <section className="card">
         {approvals.length === 0 ? (
-          <EmptyState>Ничего не ждёт решения за выбранный период.</EmptyState>
+          <EmptyState>
+            {view.periodApplies
+              ? 'Решений с таким статусом за выбранный период нет.'
+              : 'Ничего не ждёт решения.'}
+          </EmptyState>
         ) : (
           <div className="table-wrap">
             <table>

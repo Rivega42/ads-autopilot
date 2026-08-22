@@ -7,6 +7,7 @@ import type {
   ClientStatus,
   ConversionSource,
   HandoverMode,
+  Prisma,
   Provider,
 } from '@prisma/client';
 
@@ -19,8 +20,39 @@ import { getPrisma } from './prisma';
 import { bigIntToString, decimalToNumber, decimalToNumberOr, toJsonSafe } from './serialize';
 import type { JsonSafe } from './serialize';
 
-/** Потолок выборки: дашборд — витрина, а не выгрузка. */
+/** Потолок выборки строк: дашборд — витрина, а не выгрузка. */
 const ROW_LIMIT = 200;
+
+/**
+ * Список для страницы: строки и честный размер набора за ними.
+ *
+ * `total` считается по тому же фильтру, что и строки, поэтому обрезка перестаёт
+ * быть невидимой — страница обязана сказать «показаны первые N из M». Кабинет
+ * агентства на три сотни кампаний — рабочий режим, а не край.
+ */
+export interface ListWindow<Row> {
+  readonly rows: readonly Row[];
+  /** Сколько строк под фильтром всего — до потолка выборки. */
+  readonly total: number;
+  readonly limit: number;
+  readonly truncated: boolean;
+}
+
+export interface CampaignsView extends ListWindow<CampaignRow> {
+  /**
+   * Итог за период по всему набору под фильтром, а не по показанным строкам:
+   * свёртка обрезка занижала бы плитку «Расход за период» ровно на хвост и
+   * расходилась бы с теми же деньгами на `/clients`.
+   */
+  readonly totals: PeriodTotals;
+}
+
+export type ClientsView = ListWindow<ClientRow>;
+
+export interface ApprovalsView extends ListWindow<ApprovalRow> {
+  /** false — это очередь ждущих решения, и она периодом не режется. */
+  readonly periodApplies: boolean;
+}
 
 export interface PeriodTotals {
   readonly impressions: number;
@@ -197,12 +229,69 @@ async function campaignTotals(
   return result;
 }
 
+/**
+ * Итог за период по набору кампаний целиком.
+ *
+ * Суммирует Postgres: одна строка на источник конверсий на весь набор. Список
+ * id передаётся явно, потому что `CampaignStat` полиморфна и внешнего ключа на
+ * `Campaign` у неё нет — join'а, который сделал бы фильтр кампаний частью
+ * агрегата, в схеме просто нет.
+ */
+async function periodTotals(
+  campaignIds: readonly string[],
+  from: string,
+  to: string,
+): Promise<PeriodTotals> {
+  if (campaignIds.length === 0) return totalsOf(ZERO);
+
+  const grouped = await getPrisma().campaignStat.groupBy({
+    by: ['conversionSource'],
+    where: {
+      entityType: StatEntityType.CAMPAIGN,
+      entityId: { in: [...campaignIds] },
+      date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
+    },
+    _sum: { impressions: true, clicks: true, spend: true, conversions: true },
+    _count: { _all: true },
+  });
+
+  let raw = ZERO;
+  let counts: ConversionSourceCounts = emptyCounts();
+  for (const row of grouped) {
+    raw = addRaw(raw, {
+      impressions: row._sum.impressions ?? 0,
+      clicks: row._sum.clicks ?? 0,
+      spend: decimalToNumberOr(row._sum.spend, 0),
+      conversions: row._sum.conversions ?? 0,
+    });
+    const one = emptyCounts();
+    one[row.conversionSource] = row._count._all;
+    counts = addCounts(counts, one);
+  }
+
+  return totalsOf(raw, counts);
+}
+
+function clientWhere(filters: DashboardFilters): Prisma.ClientWhereInput {
+  return {
+    status: filters.clientStatus ?? undefined,
+    ...(filters.provider ? { campaigns: { some: { provider: filters.provider } } } : {}),
+  };
+}
+
+function campaignWhere(filters: DashboardFilters): Prisma.CampaignWhereInput {
+  return {
+    provider: filters.provider ?? undefined,
+    status: filters.status ?? undefined,
+    clientId: filters.clientId ?? undefined,
+    ...(filters.clientStatus ? { client: { status: filters.clientStatus } } : {}),
+  };
+}
+
+/** Строки таблицы клиентов — до `ROW_LIMIT`. Размер набора — в `listClientsView`. */
 export async function listClients(filters: DashboardFilters): Promise<ClientRow[]> {
   const clients = await getPrisma().client.findMany({
-    where: {
-      status: filters.clientStatus ?? undefined,
-      ...(filters.provider ? { campaigns: { some: { provider: filters.provider } } } : {}),
-    },
+    where: clientWhere(filters),
     select: {
       id: true,
       name: true,
@@ -263,14 +352,15 @@ export async function listClients(filters: DashboardFilters): Promise<ClientRow[
   });
 }
 
+/**
+ * Строки таблицы кампаний — до `ROW_LIMIT`.
+ *
+ * Суммировать их нельзя: за потолком остаётся хвост, и сумма получилась бы
+ * итогом по обрезку. Для итогов за период есть `listCampaignsView`.
+ */
 export async function listCampaigns(filters: DashboardFilters): Promise<CampaignRow[]> {
   const campaigns = await getPrisma().campaign.findMany({
-    where: {
-      provider: filters.provider ?? undefined,
-      status: filters.status ?? undefined,
-      clientId: filters.clientId ?? undefined,
-      ...(filters.clientStatus ? { client: { status: filters.clientStatus } } : {}),
-    },
+    where: campaignWhere(filters),
     select: {
       id: true,
       name: true,
@@ -302,6 +392,43 @@ export async function listCampaigns(filters: DashboardFilters): Promise<Campaign
     targetCpa: decimalToNumber(campaign.targetCpa),
     totals: totals.get(campaign.id) ?? totalsOf(ZERO),
   }));
+}
+
+export async function listClientsView(filters: DashboardFilters): Promise<ClientsView> {
+  const [rows, total] = await Promise.all([
+    listClients(filters),
+    getPrisma().client.count({ where: clientWhere(filters) }),
+  ]);
+
+  return { rows, total, limit: ROW_LIMIT, truncated: rows.length < total };
+}
+
+/**
+ * Страница кампаний целиком: обрезанный список и итог за период по всему набору.
+ *
+ * Плитки считаются не по `rows`: на 205 кампаниях свёртка обрезка показывала бы
+ * 2000 ₽ там, где `/clients` за тот же период показывает 2050 ₽. Две страницы за
+ * один период не имеют права показывать разные деньги.
+ */
+export async function listCampaignsView(filters: DashboardFilters): Promise<CampaignsView> {
+  const [rows, matching] = await Promise.all([
+    listCampaigns(filters),
+    getPrisma().campaign.findMany({ where: campaignWhere(filters), select: { id: true } }),
+  ]);
+
+  const totals = await periodTotals(
+    matching.map((campaign) => campaign.id),
+    filters.from,
+    filters.to,
+  );
+
+  return {
+    rows,
+    total: matching.length,
+    limit: ROW_LIMIT,
+    truncated: rows.length < matching.length,
+    totals,
+  };
 }
 
 export async function getCampaign(id: string): Promise<CampaignDetail | null> {
@@ -440,15 +567,36 @@ export async function listChanges(
   }));
 }
 
+/**
+ * Режется ли выборка апрувов периодом.
+ *
+ * Очередь ждущих решения — состояние «сейчас», а не событие внутри окна: апрув,
+ * прождавший дольше периода, — ровно тот, о котором забыли, и прятать его
+ * нельзя. Принятые решения — наоборот, история, и период к ним применим.
+ */
+export function approvalsArePeriodBound(filters: DashboardFilters): boolean {
+  return (filters.decision ?? 'PENDING') !== 'PENDING';
+}
+
+function approvalWhere(filters: DashboardFilters): Prisma.PendingApprovalWhereInput {
+  return {
+    decision: filters.decision ?? 'PENDING',
+    clientId: filters.clientId ?? undefined,
+    ...(approvalsArePeriodBound(filters)
+      ? {
+          createdAt: {
+            gte: mskDateToUtc(filters.from),
+            lt: mskDateToUtc(shiftYmd(filters.to, 1)),
+          },
+        }
+      : {}),
+    ...(filters.clientStatus ? { client: { status: filters.clientStatus } } : {}),
+  };
+}
+
 export async function listApprovals(filters: DashboardFilters): Promise<ApprovalRow[]> {
   const approvals = await getPrisma().pendingApproval.findMany({
-    where: {
-      // Очередь — это то, что ждёт человека; остальное показывается по фильтру.
-      decision: filters.decision ?? 'PENDING',
-      clientId: filters.clientId ?? undefined,
-      createdAt: { gte: mskDateToUtc(filters.from), lt: mskDateToUtc(shiftYmd(filters.to, 1)) },
-      ...(filters.clientStatus ? { client: { status: filters.clientStatus } } : {}),
-    },
+    where: approvalWhere(filters),
     select: {
       id: true,
       clientId: true,
@@ -485,6 +633,28 @@ export async function listApprovals(filters: DashboardFilters): Promise<Approval
   }));
 }
 
+export async function listApprovalsView(filters: DashboardFilters): Promise<ApprovalsView> {
+  const [rows, total] = await Promise.all([
+    listApprovals(filters),
+    getPrisma().pendingApproval.count({ where: approvalWhere(filters) }),
+  ]);
+
+  return {
+    rows,
+    total,
+    limit: ROW_LIMIT,
+    truncated: rows.length < total,
+    periodApplies: approvalsArePeriodBound(filters),
+  };
+}
+
+/**
+ * Счётчик у ссылки «Апрувы» в шапке.
+ *
+ * Периода не знает намеренно: layout Next.js не получает `searchParams`, а
+ * очередь ждущих решения периодом и не режется (`approvalsArePeriodBound`).
+ * Поэтому бейдж и таблица на `/approvals` считают одно и то же множество.
+ */
 export async function countPendingApprovals(): Promise<number> {
   return getPrisma().pendingApproval.count({ where: { decision: 'PENDING' } });
 }

@@ -9,8 +9,7 @@ import { Badge } from '../../components/badge';
 import { EmptyState } from '../../components/empty-state';
 import { FilterBar } from '../../components/filter-bar';
 import { StatTile } from '../../components/stat-tile';
-import type { ConversionSourceCounts } from '../../lib/attribution';
-import { addCounts, comparableCpa, emptyCounts, summarizeAttribution } from '../../lib/attribution';
+import { comparableCpa } from '../../lib/attribution';
 import { formatYmd } from '../../lib/dates';
 import type { SearchParams } from '../../lib/filters';
 import { parseFilters, rangeLength, withFilters } from '../../lib/filters';
@@ -21,8 +20,8 @@ import {
   formatSignedPercent,
 } from '../../lib/format';
 import { campaignStatusLabel, campaignStatusTone, providerLabel } from '../../lib/labels';
-import { cpa, cpaDeviation } from '../../lib/metrics';
-import { listCampaigns } from '../../lib/queries';
+import { cpaDeviation } from '../../lib/metrics';
+import { listCampaignsView } from '../../lib/queries';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,24 +31,14 @@ export default async function CampaignsPage({
   readonly searchParams?: SearchParams;
 }) {
   const filters = parseFilters(searchParams);
-  const campaigns = await listCampaigns(filters);
+  const view = await listCampaignsView(filters);
+  const campaigns = view.rows;
 
-  const totals = campaigns.reduce<{
-    spend: number;
-    clicks: number;
-    conversions: number;
-    counts: ConversionSourceCounts;
-  }>(
-    (accumulator, campaign) => ({
-      spend: accumulator.spend + campaign.totals.spend,
-      clicks: accumulator.clicks + campaign.totals.clicks,
-      conversions: accumulator.conversions + campaign.totals.conversions,
-      counts: addCounts(accumulator.counts, campaign.totals.attribution.counts),
-    }),
-    { spend: 0, clicks: 0, conversions: 0, counts: emptyCounts() },
-  );
-
-  const attribution = summarizeAttribution(totals.counts);
+  // Плитки — итог по всему набору под фильтром: `view.rows` обрезаны потолком
+  // выборки, и их свёртка была бы подписана как итог за период, будучи суммой
+  // первых двухсот строк.
+  const totals = view.totals;
+  const attribution = totals.attribution;
   const clientName = campaigns[0]?.clientName ?? null;
 
   return (
@@ -78,6 +67,20 @@ export default async function CampaignsPage({
         fields={['provider', 'status', 'clientStatus']}
       />
 
+      {view.truncated ? (
+        <section className="notice notice-info" role="note">
+          <strong>
+            Показаны первые {formatInteger(campaigns.length)} кампаний из{' '}
+            {formatInteger(view.total)}
+          </strong>
+          <p className="notice-text">
+            Список обрезан потолком витрины — остальные строки не пропали, их просто здесь нет.
+            Итоги в плитках ниже посчитаны по всем {formatInteger(view.total)} кампаниям, а не по
+            показанным. Сузьте фильтр или период, чтобы увидеть строки целиком.
+          </p>
+        </section>
+      ) : null}
+
       {attribution.mixed ? (
         <MixedAttributionNotice scope="В выборку попали кампании с разными источниками конверсий." />
       ) : null}
@@ -92,9 +95,7 @@ export default async function CampaignsPage({
         />
         <StatTile
           label="CPA по всем кампаниям"
-          value={formatMoneyPrecise(
-            comparableCpa(cpa(totals.spend, totals.conversions), attribution),
-          )}
+          value={formatMoneyPrecise(comparableCpa(totals.cpa, attribution))}
           hint={attribution.mixed ? <MixedCpaNote /> : 'расход ÷ конверсии за период'}
         />
       </div>

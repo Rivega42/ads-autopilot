@@ -302,13 +302,27 @@ export const CHANGE_ACTIONS = {
   midPeriod: 'mid-period-budget',
 } as const;
 
+/**
+ * Пять апрувов ждут решения, четыре уже решены.
+ *
+ * Очередь (`PENDING`) периодом не режется: апрув, прождавший дольше окна, —
+ * ровно тот, о котором забыли. Периодом режется история решений, поэтому
+ * границы окна проверяются на `decided*`.
+ */
 export const APPROVAL_SUMMARIES = {
   atPeriodStart: 'edge-approval-at-period-start',
   atPeriodEnd: 'edge-approval-at-period-end',
   justBefore: 'edge-approval-just-before',
   justAfter: 'edge-approval-just-after',
   huge: 'approval-with-huge-message-id',
+  decidedAtPeriodStart: 'decided-approval-at-period-start',
+  decidedAtPeriodEnd: 'decided-approval-at-period-end',
+  decidedJustBefore: 'decided-approval-just-before',
+  decidedJustAfter: 'decided-approval-just-after',
 } as const;
+
+/** Сколько апрувов в сиде ждёт решения — столько же обязан показать счётчик в шапке. */
+export const PENDING_APPROVAL_COUNT = 5;
 
 function kopecks(total: number): string {
   const rubles = Math.trunc(total / 100);
@@ -617,6 +631,41 @@ async function seedApprovals(clientId: string): Promise<void> {
         summary: APPROVAL_SUMMARIES.huge,
         tgMessageId: HUGE_TG_MESSAGE_ID,
         createdAt: mskInstant('2026-07-15', '10:00:00.000'),
+      },
+    ],
+  });
+
+  const decided = {
+    ...base,
+    decision: 'APPROVED' as const,
+    respondedBy: 'roman',
+  };
+
+  await prisma.pendingApproval.createMany({
+    data: [
+      {
+        ...decided,
+        summary: APPROVAL_SUMMARIES.decidedAtPeriodStart,
+        createdAt: mskInstant(PERIOD_FROM, '00:00:00.000'),
+        decidedAt: mskInstant(PERIOD_FROM, '09:00:00.000'),
+      },
+      {
+        ...decided,
+        summary: APPROVAL_SUMMARIES.decidedAtPeriodEnd,
+        createdAt: mskInstant(PERIOD_TO, '23:59:59.999'),
+        decidedAt: mskInstant(DAY_AFTER_TO, '09:00:00.000'),
+      },
+      {
+        ...decided,
+        summary: APPROVAL_SUMMARIES.decidedJustBefore,
+        createdAt: mskInstant(DAY_BEFORE_FROM, '23:59:59.999'),
+        decidedAt: mskInstant(PERIOD_FROM, '09:00:00.000'),
+      },
+      {
+        ...decided,
+        summary: APPROVAL_SUMMARIES.decidedJustAfter,
+        createdAt: mskInstant(DAY_AFTER_TO, '00:00:00.000'),
+        decidedAt: mskInstant(DAY_AFTER_TO, '09:00:00.000'),
       },
     ],
   });

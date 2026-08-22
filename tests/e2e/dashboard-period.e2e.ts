@@ -6,6 +6,7 @@ import {
   countPendingApprovals,
   getCampaignDaily,
   listApprovals,
+  listApprovalsView,
   listCampaigns,
   listChanges,
 } from '../../web/lib/queries.js';
@@ -17,6 +18,7 @@ import {
   DAY_AFTER_TO,
   DAY_BEFORE_FROM,
   HUGE_TG_MESSAGE_ID,
+  PENDING_APPROVAL_COUNT,
   PERIOD_DAYS,
   PERIOD_FROM,
   PERIOD_TO,
@@ -208,32 +210,59 @@ describe('дашборд: границы периода в журналах', ()
     }
   });
 
-  it('очередь апрувов режется по тем же границам', async () => {
-    const approvals = await listApprovals(dashboardFilters());
-    const summaries = approvals.map((approval) => approval.summary);
+  it('история решений режется по тем же границам', async () => {
+    const decided = await listApprovals(dashboardFilters({ decision: 'APPROVED' }));
+    const summaries = decided.map((approval) => approval.summary);
+
+    expect(summaries).toContain(APPROVAL_SUMMARIES.decidedAtPeriodStart);
+    expect(summaries).toContain(APPROVAL_SUMMARIES.decidedAtPeriodEnd);
+    expect(summaries).not.toContain(APPROVAL_SUMMARIES.decidedJustBefore);
+    expect(summaries).not.toContain(APPROVAL_SUMMARIES.decidedJustAfter);
+
+    const view = await listApprovalsView(dashboardFilters({ decision: 'APPROVED' }));
+    expect(view.periodApplies).toBe(true);
+    expect(view.total).toBe(2);
+  });
+
+  /**
+   * Было сломано: счётчик у ссылки «Апрувы» (`countPendingApprovals`) считал все
+   * `PENDING`, а `/approvals` резала очередь по окну фильтра — бейдж показывал
+   * пять, таблица три. Апрув, прождавший человека дольше окна (а окно по
+   * умолчанию — тридцать дней), исчезал с витрины целиком: именно тот апрув, о
+   * котором забыли, увидеть было нельзя.
+   */
+  it('очередь ждущих решения периодом не режется — она состояние, а не событие', async () => {
+    const shown = await listApprovals(dashboardFilters());
+    const summaries = shown.map((approval) => approval.summary);
 
     expect(summaries).toContain(APPROVAL_SUMMARIES.atPeriodStart);
     expect(summaries).toContain(APPROVAL_SUMMARIES.atPeriodEnd);
     expect(summaries).toContain(APPROVAL_SUMMARIES.huge);
-    expect(summaries).not.toContain(APPROVAL_SUMMARIES.justBefore);
-    expect(summaries).not.toContain(APPROVAL_SUMMARIES.justAfter);
+    // Ровно те два, что раньше пропадали за краями окна.
+    expect(summaries).toContain(APPROVAL_SUMMARIES.justBefore);
+    expect(summaries).toContain(APPROVAL_SUMMARIES.justAfter);
+    expect(shown).toHaveLength(PENDING_APPROVAL_COUNT);
+
+    // Окно, в котором не создавали ничего: очередь от этого не пустеет.
+    const laterWindow = parseFilters({ from: '2026-08-01', to: '2026-08-10' });
+    expect(await listApprovals(laterWindow)).toHaveLength(PENDING_APPROVAL_COUNT);
   });
 
-  it('ДЕФЕКТ: счётчик в шапке считает все апрувы, а страница — только за период', async () => {
-    // Счётчик у ссылки «Апрувы» (`countPendingApprovals`) периода не знает,
-    // а страница режет очередь по окну фильтра. Пять ждущих решения апрувов
-    // против трёх показанных — и ни слова о том, куда делись остальные.
+  it('счётчик в шапке и таблица на странице считают одно и то же множество', async () => {
     const badge = await countPendingApprovals();
-    const shown = await listApprovals(dashboardFilters());
+    const view = await listApprovalsView(dashboardFilters());
 
-    expect(badge).toBe(5);
-    expect(shown).toHaveLength(3);
+    expect(badge).toBe(PENDING_APPROVAL_COUNT);
+    expect(view.total).toBe(badge);
+    expect(view.rows).toHaveLength(badge);
+    expect(view.truncated).toBe(false);
+    expect(view.periodApplies).toBe(false);
 
-    // Хуже того: окно по умолчанию — последние тридцать дней. Апрув, который
-    // ждёт человека дольше, исчезает с витрины целиком, а счётчик его считает.
+    // И при любом другом окне — тоже: у бейджа периода нет, у очереди тоже.
     const laterWindow = parseFilters({ from: '2026-08-01', to: '2026-08-10' });
-    expect(await listApprovals(laterWindow)).toHaveLength(0);
-    expect(badge).toBeGreaterThan(0);
+    const later = await listApprovalsView(laterWindow);
+    expect(later.total).toBe(badge);
+    expect(later.rows).toHaveLength(badge);
   });
 
   it('tgMessageId выше 2^53 доезжает строкой без потери последней цифры', async () => {

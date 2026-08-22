@@ -631,6 +631,11 @@ details.table-view[open] > summary {
   border-left-color: var(--serious);
 }
 
+/* Оговорка о полноте выборки: данные верны, показаны не все — тоном ниже тревоги. */
+.notice-info {
+  border-left-color: var(--axis);
+}
+
 .notice-text {
   margin: 6px 0 0;
   font-size: 13px;

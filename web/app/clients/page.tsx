@@ -10,7 +10,7 @@ import type { SearchParams } from '../../lib/filters';
 import { parseFilters, rangeLength, withFilters } from '../../lib/filters';
 import { formatInteger, formatMoney, formatMoneyPrecise } from '../../lib/format';
 import { clientStatusLabel, clientStatusTone, providerLabel } from '../../lib/labels';
-import { listClients } from '../../lib/queries';
+import { listClientsView } from '../../lib/queries';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,7 +20,8 @@ export default async function ClientsPage({
   readonly searchParams?: SearchParams;
 }) {
   const filters = parseFilters(searchParams);
-  const clients = await listClients(filters);
+  const view = await listClientsView(filters);
+  const clients = view.rows;
 
   return (
     <>
@@ -35,6 +36,19 @@ export default async function ClientsPage({
       </div>
 
       <FilterBar action="/clients" filters={filters} fields={['provider', 'clientStatus']} />
+
+      {view.truncated ? (
+        <section className="notice notice-info" role="note">
+          <strong>
+            Показаны первые {formatInteger(clients.length)} клиентов из {formatInteger(view.total)}
+          </strong>
+          <p className="notice-text">
+            Список обрезан потолком витрины — остальные строки не пропали, их просто здесь нет.
+            Суммы в каждой строке считаются по всем кампаниям клиента. Сузьте фильтр, чтобы увидеть
+            строки целиком.
+          </p>
+        </section>
+      ) : null}
 
       <section className="card">
         {clients.length === 0 ? (
