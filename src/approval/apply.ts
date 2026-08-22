@@ -62,7 +62,7 @@ export async function applyApproval(approvalId: string, approvedBy: string): Pro
   let dryRun: boolean;
   const notes: string[] = [];
   try {
-    ctx = await buildContext(action.clientId, action.channel);
+    ctx = await buildContext(action.clientId, action.channel, { access: { actor: 'approval' } });
 
     // Режим, обещанный карточкой, против режима, который сейчас реально enforce-ится.
     const promised = readApprovalMeta(row.payload).dryRun;

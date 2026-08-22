@@ -94,7 +94,9 @@ export function createPlatformWriter(): (
     }
 
     const adapter = getAdapter(target.provider);
-    const ctx = await buildContext(target.clientId, target.provider);
+    const ctx = await buildContext(target.clientId, target.provider, {
+      access: { actor: 'optimizer' },
+    });
     const level = LEVEL_BY_ENTITY[req.entityType];
 
     try {

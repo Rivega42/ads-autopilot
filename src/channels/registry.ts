@@ -5,6 +5,7 @@ import type { ChannelAdapter, ChannelContext } from './types.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import { AppError, AuthError } from '@/lib/errors.js';
+import type { CredentialAccess } from '@/repos/CredentialRepository.js';
 import { CredentialRepository } from '@/repos/CredentialRepository.js';
 
 const adapters = new Map<Provider, ChannelAdapter>();
@@ -31,6 +32,12 @@ export function registeredChannels(): Provider[] {
 export interface BuildContextDeps {
   credentials?: Pick<CredentialRepository, 'getPayload'>;
   clientExists?: (clientId: string) => Promise<boolean>;
+  /**
+   * Кто просит секрет. Уходит в журнал доступа: без этого в `AuditLog` все
+   * строки выглядят одинаково и по ним не отличить плановый прогон от ручной
+   * команды. Умолчание `system` формально верно, но бесполезно.
+   */
+  access?: CredentialAccess;
 }
 
 /**
@@ -56,7 +63,7 @@ export async function buildContext(
     });
   }
 
-  const payload = await repo.getPayload(clientId, channel);
+  const payload = await repo.getPayload(clientId, channel, deps.access ?? {});
   if (!payload) {
     throw new AuthError(channel, `No credentials for client ${clientId}`, { clientId });
   }

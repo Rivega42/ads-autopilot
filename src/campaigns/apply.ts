@@ -162,7 +162,7 @@ export async function applyLoadedPlan(
       });
     }
 
-    const ctx = await buildContext(plan.clientId, item.channel);
+    const ctx = await buildContext(plan.clientId, item.channel, { access: { actor: 'campaigns' } });
     const effective: ChannelContext = { ...ctx, dryRun: ctx.dryRun || opts.dryRun === true };
     dryRun = dryRun || effective.dryRun;
 

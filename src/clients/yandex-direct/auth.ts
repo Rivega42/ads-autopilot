@@ -201,14 +201,16 @@ async function credentialRepository(): Promise<CredentialRepository> {
 export const prismaCredentialStore: CredentialStore = {
   async load(clientId) {
     const repo = await credentialRepository();
-    const payload = await repo.getPayload(clientId, YANDEX_CHANNEL);
+    const payload = await repo.getPayload(clientId, YANDEX_CHANNEL, {
+      actor: 'token-refresh',
+    });
     if (payload === null) return null;
     return parseCredentials(payload);
   },
 
   async save(clientId, creds) {
     const repo = await credentialRepository();
-    await repo.save(clientId, YANDEX_CHANNEL, creds);
+    await repo.save(clientId, YANDEX_CHANNEL, creds, { actor: 'token-refresh' });
   },
 };
 

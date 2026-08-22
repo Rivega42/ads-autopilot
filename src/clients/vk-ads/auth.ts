@@ -110,7 +110,9 @@ async function defaultPost(url: string, body: URLSearchParams): Promise<VkAuthTr
  */
 async function defaultSave(clientId: string, creds: VkCredentials): Promise<void> {
   const { CredentialRepository } = await import('@/repos/CredentialRepository.js');
-  await new CredentialRepository().save(clientId, VK_CHANNEL, creds);
+  await new CredentialRepository().save(clientId, VK_CHANNEL, creds, {
+    actor: 'token-refresh',
+  });
 }
 
 export const defaultVkAuthDeps: VkAuthDeps = {

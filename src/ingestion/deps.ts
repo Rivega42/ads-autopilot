@@ -21,7 +21,10 @@ export function resolveDeps(partial: Partial<IngestionDeps> = {}): IngestionDeps
   return {
     db: partial.db ?? prisma,
     adapterFor: partial.adapterFor ?? getAdapter,
-    contextFor: partial.contextFor ?? ((clientId, provider) => buildContext(clientId, provider)),
+    contextFor:
+      partial.contextFor ??
+      ((clientId, provider) =>
+        buildContext(clientId, provider, { access: { actor: 'ingestion' } })),
     now: partial.now ?? ((): Date => new Date()),
   };
 }

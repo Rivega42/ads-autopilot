@@ -35,7 +35,10 @@ export function resolveDeps(partial: Partial<ModerationDeps> = {}): ModerationDe
   return {
     db: partial.db ?? prisma,
     adapterFor: partial.adapterFor ?? getAdapter,
-    contextFor: partial.contextFor ?? ((clientId, provider) => buildContext(clientId, provider)),
+    contextFor:
+      partial.contextFor ??
+      ((clientId, provider) =>
+        buildContext(clientId, provider, { access: { actor: 'moderation' } })),
     runClassify: partial.runClassify ?? runAgent,
     runRewrite: partial.runRewrite ?? runAgent,
     escalate: partial.escalate ?? sendEscalation,
