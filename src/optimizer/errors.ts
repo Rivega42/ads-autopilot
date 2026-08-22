@@ -40,6 +40,23 @@ export function describeFailure(
 }
 
 /**
+ * Потолок строк `ErrorLog` на один вызов `recordFailures`.
+ *
+ * Свернуть одинаковые причины в одну строку нельзя: `error_burst` считает именно
+ * строки, и свёртка погасила бы тревогу ровно в том случае, ради которого она
+ * заведена, — когда площадка отвергает всё подряд. Поэтому строка на отказ, но с
+ * потолком: предохранитель по доле сущностей разрешает трогать 30% кампании за
+ * прогон, то есть у крупной кампании это тысячи решений, а чистки `ErrorLog` в
+ * проекте нет вовсе — таблица растёт навсегда.
+ *
+ * Значение обязано быть строго больше `ERROR_BURST_THRESHOLD` (10) из
+ * `reporter/alerts.ts`: тревога срабатывает на «больше порога», и потолок ниже
+ * него означал бы, что массовый отказ одной кампании никого не будит. Инвариант
+ * проверяется тестом — константы живут в разных модулях и разъезжаются молча.
+ */
+export const FAILURE_ROWS_PER_BATCH_CAP = 25;
+
+/**
  * Пишет отказ оптимизатора в `ErrorLog`.
  *
  * До этого падения на путях, которые тратят деньги клиента, оставались только в
@@ -50,28 +67,86 @@ export function describeFailure(
  * потерять строку в журнале — про неё останется лог.
  */
 export async function recordFailure(db: PrismaClient, failure: OptimizerFailure): Promise<void> {
-  log.error(
-    {
-      clientId: failure.clientId,
-      provider: failure.provider,
-      campaignId: failure.campaignId,
-      stage: failure.stage,
-      code: failure.code,
-    },
-    failure.message,
-  );
-  try {
-    await db.errorLog.create({
-      data: {
+  await recordFailures(db, [failure]);
+}
+
+/**
+ * Пачка отказов одного этапа одной кампании — одним запросом.
+ *
+ * Пообъектные отказы площадки приходят десятками: `create` на каждый означал бы
+ * столько же round-trip'ов там, где кабинет уже лёг. Сверх потолка строки не
+ * теряются, а схлопываются в одну — с числом и разбивкой по кодам, чтобы масштаб
+ * остался виден человеку, а не только счётчику тревоги.
+ */
+export async function recordFailures(
+  db: PrismaClient,
+  failures: readonly OptimizerFailure[],
+): Promise<void> {
+  if (failures.length === 0) return;
+
+  const kept = failures.slice(0, FAILURE_ROWS_PER_BATCH_CAP);
+  const dropped = failures.slice(FAILURE_ROWS_PER_BATCH_CAP);
+
+  for (const failure of kept) {
+    log.error(
+      {
         clientId: failure.clientId,
         provider: failure.provider,
-        scope: `optimizer:${failure.stage}`,
+        campaignId: failure.campaignId,
+        stage: failure.stage,
         code: failure.code,
-        message: failure.message,
-        context: { stage: failure.stage, campaignId: failure.campaignId },
       },
+      failure.message,
+    );
+  }
+
+  const rows = kept.map((failure) => toRow(failure, failure.message));
+  const overflow = dropped[0];
+  if (overflow) {
+    log.error(
+      { clientId: overflow.clientId, campaignId: overflow.campaignId, dropped: dropped.length },
+      'optimizer failure rows over the per-batch cap',
+    );
+    rows.push({
+      ...toRow(overflow, `и ещё ${dropped.length} таких же отказов: ${countByCode(dropped)}`),
+      code: 'TRUNCATED',
     });
+  }
+
+  try {
+    await db.errorLog.createMany({ data: rows });
   } catch (err) {
     log.error({ err: describeError(err) }, 'cannot persist optimizer failure to ErrorLog');
   }
+}
+
+interface ErrorLogRow {
+  clientId: string;
+  provider: Provider;
+  scope: string;
+  code: string;
+  message: string;
+  context: { stage: string; campaignId: string };
+}
+
+function toRow(failure: OptimizerFailure, message: string): ErrorLogRow {
+  return {
+    clientId: failure.clientId,
+    provider: failure.provider,
+    scope: `optimizer:${failure.stage}`,
+    code: failure.code,
+    message,
+    context: { stage: failure.stage, campaignId: failure.campaignId },
+  };
+}
+
+function countByCode(failures: readonly OptimizerFailure[]): string {
+  const counts = new Map<string, number>();
+  for (const failure of failures) {
+    counts.set(failure.code, (counts.get(failure.code) ?? 0) + 1);
+  }
+  return [...counts]
+    .sort(([, a], [, b]) => b - a)
+    .map(([code, count]) => `${code}: ${count}`)
+    .join(', ');
 }

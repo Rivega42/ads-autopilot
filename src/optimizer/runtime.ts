@@ -1,4 +1,4 @@
-import { Prisma, type Provider } from '@prisma/client';
+import type { Prisma, Provider } from '@prisma/client';
 
 import type {
   ApplyDb,
@@ -26,29 +26,34 @@ const KEY_TTL_DAYS = 30;
  * теряла ключи при перезапуске воркера: тик, упавший после записи в кабинет,
  * применил бы изменение второй раз. Уникальность обеспечивает Postgres, а не
  * проверка «сначала прочитать» — параллельные воркеры иначе оба увидят пусто.
+ *
+ * `createMany({ skipDuplicates })` вместо `create` в try/catch: это тот же
+ * единственный `INSERT`, только с `ON CONFLICT DO NOTHING`, и занятый ключ
+ * возвращается счётчиком, а не исключением. Гарантия та же — решает Postgres,
+ * — а вот цена разная: на каждый штатный дубль Prisma печатала многострочный
+ * дамп `prisma:error` мимо `LOG_LEVEL`, и человек, запустивший `optimize
+ * --apply` второй раз за сутки, читал работающую дедупликацию как поломку.
+ * Ключ здесь единственный уникальный (он же первичный), поэтому `DO NOTHING`
+ * не может проглотить конфликт по другому полю.
  */
 export function createPrismaIdempotencyStore(
   db: Pick<typeof prisma, 'idempotencyKey'> = prisma,
 ): IdempotencyStore {
   return {
     async reserve(key: string): Promise<'reserved' | 'duplicate'> {
-      try {
-        await db.idempotencyKey.create({
-          data: {
+      const { count } = await db.idempotencyKey.createMany({
+        data: [
+          {
             key,
             scope: 'optimizer',
             entityType: '',
             entityId: '',
             expiresAt: new Date(Date.now() + KEY_TTL_DAYS * 24 * 60 * 60 * 1000),
           },
-        });
-        return 'reserved';
-      } catch (err) {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-          return 'duplicate';
-        }
-        throw err;
-      }
+        ],
+        skipDuplicates: true,
+      });
+      return count === 1 ? 'reserved' : 'duplicate';
     },
     async release(key: string): Promise<void> {
       await db.idempotencyKey.deleteMany({ where: { key } });

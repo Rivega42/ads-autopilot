@@ -39,18 +39,23 @@ const h = vi.hoisted(() => {
     searchQueries: unknown[];
     brief: { data: unknown } | null;
     negated: unknown[];
+    errors: unknown[];
     reservations: Set<string>;
   } = {
     campaigns: [],
     searchQueries: [],
     brief: null,
     negated: [],
+    errors: [],
     reservations: new Set<string>(),
   };
 
   return {
     state,
-    createApproval: vi.fn(async (action: ApprovalAction) => ({ id: `ap-${action.kind}` })),
+    createApproval: vi.fn(async (action: ApprovalAction) => ({
+      id: `ap-${action.kind}`,
+      error: null as string | null,
+    })),
     runOptimizer: vi.fn(),
     applyDecisions: vi.fn(),
     prisma: {
@@ -74,6 +79,12 @@ const h = vi.hoisted(() => {
         updateMany: vi.fn(async () => ({ count: 1 })),
       },
       keyword: { findMany: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
+      errorLog: {
+        createMany: vi.fn(async (args: { data: unknown[] }) => {
+          state.errors.push(...args.data);
+          return { count: args.data.length };
+        }),
+      },
     },
     runtime: {
       createApplyDb: vi.fn(() => ({})),
@@ -197,6 +208,7 @@ beforeEach(() => {
   h.state.searchQueries = [];
   h.state.brief = null;
   h.state.negated = [];
+  h.state.errors = [];
   h.state.reservations = new Set<string>();
   h.runOptimizer.mockResolvedValue(run());
   h.applyDecisions.mockResolvedValue(report());
@@ -602,5 +614,115 @@ describe('runScheduledOptimization: изменение без журнала', (
       where: { id: { in: ['kw-1'] } },
       data: { status: 'PAUSED' },
     });
+  });
+});
+
+interface ErrorRow {
+  clientId: string;
+  provider: string;
+  scope: string;
+  code: string;
+  message: string;
+}
+
+describe('runScheduledOptimization: отказ площадки виден тревоге', () => {
+  function bidDecrease(id: string): DecisionLike {
+    return {
+      action: 'BID_DECREASE',
+      entityType: 'KEYWORD',
+      entityId: id,
+      label: `фраза ${id}`,
+      prevValue: { kind: 'bid', amount: 200 },
+      nextValue: { kind: 'bid', amount: 170 },
+      reason: 'CPA 900 при цели 500',
+      requiresApproval: false,
+      layer: 'rule',
+      ruleId: 'decrease-bid-high-cpa',
+      approvalKind: null,
+    };
+  }
+
+  it('пообъектный отказ доходит до ErrorLog, а не только до pino', async () => {
+    h.applyDecisions.mockResolvedValue(
+      report({
+        failed: [
+          { decision: bidDecrease('kw-1'), reason: 'Недостаточно средств', platformApplied: false },
+          { decision: pause('kw-2'), reason: 'Недостаточно средств', platformApplied: false },
+        ],
+      }),
+    );
+
+    const summary = await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    expect(summary.applyFailed).toBe(2);
+    const rows = h.state.errors as ErrorRow[];
+    expect(rows).toHaveLength(2);
+    // Тревога бакетует по «клиент × площадка»: без этих двух полей строка не попадёт
+    // ни в один бакет и `error_burst` не увидит её ни при каком количестве.
+    expect(rows.every((r) => r.clientId === 'cl-1' && r.provider === 'YANDEX_DIRECT')).toBe(true);
+    expect(rows.every((r) => r.code === 'PLATFORM_WRITE_REFUSED')).toBe(true);
+    expect(rows[0]?.message).toContain('BID_DECREASE KEYWORD kw-1');
+    expect(rows[0]?.message).toContain('Недостаточно средств');
+  });
+
+  it('изменение без журнала помечено своим кодом: его предстоит сверять руками', async () => {
+    h.applyDecisions.mockResolvedValue(
+      report({
+        failed: [
+          { decision: pause('kw-1'), reason: 'ChangeLog недоступен', platformApplied: true },
+        ],
+      }),
+    );
+
+    await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    const rows = h.state.errors as ErrorRow[];
+    expect(rows.map((r) => r.code)).toEqual(['CHANGELOG_WRITE_FAILED']);
+    expect(rows[0]?.message).toContain('в кабинете есть');
+  });
+
+  it('успешный прогон журнал не засоряет', async () => {
+    h.applyDecisions.mockResolvedValue(
+      report({ applied: [{ decision: pause('kw-1'), changeLogId: 'cl-1', idempotencyKey: 'k' }] }),
+    );
+
+    await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    expect(h.state.errors).toEqual([]);
+  });
+});
+
+describe('runScheduledOptimization: карточка не доставлена', () => {
+  beforeEach(() => {
+    h.runOptimizer.mockResolvedValue(
+      run({ approvals: [{ kind: 'MASS_PAUSE', decisions: [pause('kw-1')], summary: 'x' }] }),
+    );
+  });
+
+  it('считается отдельно от выпущенных: нажать её некому', async () => {
+    h.createApproval.mockResolvedValueOnce({
+      id: 'ap-1',
+      error: '403: bot was blocked by the user',
+    });
+
+    const summary = await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    // Заявка существует и видна дашборду — поэтому она и «выпущена», и «не доставлена».
+    expect(summary.approvals).toBe(1);
+    expect(summary.approvalsUndelivered).toBe(1);
+    // Не `approvalsFailed`: карточка построена и записана, отказала доставка.
+    expect(summary.approvalsFailed).toBe(0);
+
+    const rows = h.state.errors as ErrorRow[];
+    expect(rows.map((r) => r.code)).toEqual(['APPROVAL_NOT_DELIVERED']);
+    expect(rows[0]?.scope).toBe('optimizer:approval');
+  });
+
+  it('доставленная карточка счётчик не трогает', async () => {
+    const summary = await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    expect(summary.approvals).toBe(1);
+    expect(summary.approvalsUndelivered).toBe(0);
+    expect(h.state.errors).toEqual([]);
   });
 });

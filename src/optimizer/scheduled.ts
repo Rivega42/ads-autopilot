@@ -2,10 +2,15 @@ import { createHash } from 'node:crypto';
 
 import type { Provider } from '@prisma/client';
 
-import { applyDecisions, type ApplyReport, type IdempotencyStore } from './apply.js';
+import {
+  applyDecisions,
+  type ApplyReport,
+  type FailedChange,
+  type IdempotencyStore,
+} from './apply.js';
 import { runOptimizer } from './engine.js';
 import type { OptimizerRun } from './engine.js';
-import { describeFailure, recordFailure } from './errors.js';
+import { describeFailure, recordFailure, recordFailures, type OptimizerFailure } from './errors.js';
 import { syncAppliedDecisions } from './local-state.js';
 import type { ApprovalRequest } from './policy.js';
 import { createApplyDb, createPlatformWriter, createPrismaIdempotencyStore } from './runtime.js';
@@ -49,6 +54,13 @@ export interface ScheduledOptimizationSummary {
   localStateFailed: number;
   approvals: number;
   approvalsFailed: number;
+  /**
+   * Карточки, которые созданы, но не доехали до человека: Telegram отказал (403 от
+   * заблокировавшего бота — обычный случай). Подмножество `approvals`, а не замена:
+   * строка в `PendingApproval` есть, её видит дашборд и добьёт крон экспирации, —
+   * но нажать её некому, и «выпущено: 2» без этой цифры читается как успех.
+   */
+  approvalsUndelivered: number;
   /** Карточка уже создана этим же прогоном — повтор задачи BullMQ второй не шлёт. */
   approvalsDuplicate: number;
   rejected: number;
@@ -194,6 +206,7 @@ export async function runScheduledOptimization(
     localStateFailed: 0,
     approvals: 0,
     approvalsFailed: 0,
+    approvalsUndelivered: 0,
     approvalsDuplicate: 0,
     rejected: 0,
     clamped: 0,
@@ -261,6 +274,10 @@ export async function runScheduledOptimization(
       summary.plannedOnly += report.planned.length;
       summary.noop += report.noop.length;
       summary.applyFailed += report.failed.length;
+      await recordFailures(
+        prisma,
+        report.failed.map((change) => platformFailure(campaign, change)),
+      );
       // Раньше пометки минус-фраз: `markNegated` бросает, и её падение не должно
       // забирать с собой отражение пауз и ставок.
       summary.localStateFailed += await syncLocalState(campaign.id, report);
@@ -283,6 +300,7 @@ export async function runScheduledOptimization(
         summary.approvals += outcome.created;
         summary.approvalsDuplicate += outcome.duplicate;
         summary.approvalsFailed += outcome.unbuildable;
+        summary.approvalsUndelivered += outcome.undelivered;
       } catch (err) {
         summary.approvalsFailed += 1;
         await recordFailure(prisma, {
@@ -303,6 +321,34 @@ interface CampaignRow {
   clientId: string;
   provider: Provider;
   externalId: string | null;
+}
+
+/**
+ * Пообъектный отказ площадки — повод для `ErrorLog`, а не только для pino.
+ *
+ * `recordFailure` звался лишь из catch-блоков вокруг всей кампании, то есть когда
+ * падал сам `applyDecisions`. Отказ площадки на конкретной ставке туда не попадал:
+ * `applyDecisions` его ловит и кладёт в `report.failed`, а дальше он оседал в
+ * строке лога `platform write failed` (`optimizer/runtime.ts`) — и всё. Алерт
+ * `error_burst` (TZ §3.6) и дашборд читают `ErrorLog`, значит площадка, отвергающая
+ * наши записи, не будила никого ни при пяти отказах, ни при пятистах.
+ *
+ * Код разный, потому что и разбираться человеку по ним предстоит по-разному:
+ * `PLATFORM_WRITE_REFUSED` — изменения нет нигде, `CHANGELOG_WRITE_FAILED` — оно
+ * живёт в кабинете без строки в журнале, и это сверять руками.
+ */
+function platformFailure(campaign: CampaignRow, change: FailedChange): OptimizerFailure {
+  const target = `${change.decision.action} ${change.decision.entityType} ${change.decision.entityId}`;
+  return {
+    clientId: campaign.clientId,
+    provider: campaign.provider,
+    campaignId: campaign.id,
+    stage: 'apply',
+    code: change.platformApplied ? 'CHANGELOG_WRITE_FAILED' : 'PLATFORM_WRITE_REFUSED',
+    message: change.platformApplied
+      ? `${target}: изменение в кабинете есть, строки в ChangeLog нет — ${change.reason}`
+      : `${target}: площадка не приняла изменение — ${change.reason}`,
+  };
 }
 
 /**
@@ -392,6 +438,8 @@ export interface ApprovalCardsOutcome {
   duplicate: number;
   /** Заявка не превратилась ни в одну карточку — человек не увидит ничего. */
   unbuildable: number;
+  /** Карточка создана, но не доставлена. Подмножество `created`. */
+  undelivered: number;
 }
 
 interface ApprovalCardsDeps {
@@ -446,10 +494,16 @@ async function createApprovalCards(
       { campaignId: campaign.id, kind: request.kind, decisions: request.decisions.length },
       'approval card skipped: no external ids or unsupported kind',
     );
-    return { created: 0, duplicate: 0, unbuildable: 1 };
+    return { created: 0, duplicate: 0, unbuildable: 1, undelivered: 0 };
   }
 
-  const outcome: ApprovalCardsOutcome = { created: 0, duplicate: 0, unbuildable: 0 };
+  const outcome: ApprovalCardsOutcome = {
+    created: 0,
+    duplicate: 0,
+    unbuildable: 0,
+    undelivered: 0,
+  };
+  const undelivered: OptimizerFailure[] = [];
   for (const action of actions) {
     // Пара «вид действия × канал» бывает неисполнимой: канал берётся из кампании, а
     // умеет каждый своё (у VK нет ни фраз, ни минус-слов). Отсеиваем здесь, до
@@ -472,8 +526,22 @@ async function createApprovalCards(
       continue;
     }
     try {
-      await createApproval(action, { dryRun: deps.dryRun });
+      const approval = await createApproval(action, { dryRun: deps.dryRun });
       outcome.created += 1;
+      // `createApproval` не бросает, когда Telegram отказал: заявка создана, причина
+      // лежит в `PendingApproval.error`. Молча считать её выпущенной нельзя — человек
+      // прочитает «выпущено: 2» и будет ждать нажатия карточки, которой не видел.
+      if (approval.error) {
+        outcome.undelivered += 1;
+        undelivered.push({
+          clientId: campaign.clientId,
+          provider: campaign.provider,
+          campaignId: campaign.id,
+          stage: 'approval',
+          code: 'APPROVAL_NOT_DELIVERED',
+          message: `карточка ${action.kind} создана, но не доставлена: ${approval.error}`,
+        });
+      }
     } catch (err) {
       // Заявки нет — держать ключ занятым нельзя, иначе повтор задачи не пришлёт
       // карточку вообще и человек так ничего и не увидит.
@@ -481,6 +549,7 @@ async function createApprovalCards(
       throw err;
     }
   }
+  await recordFailures(prisma, undelivered);
   return outcome;
 }
 

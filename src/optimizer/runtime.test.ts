@@ -1,4 +1,3 @@
-import { Prisma } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PlatformWriteRequest } from './apply.js';
@@ -25,7 +24,7 @@ const h = vi.hoisted(() => {
     state,
     adapter,
     prisma: {
-      idempotencyKey: { create: vi.fn(), deleteMany: vi.fn(async () => ({ count: 1 })) },
+      idempotencyKey: { createMany: vi.fn(), deleteMany: vi.fn(async () => ({ count: 1 })) },
       changeLog: { create: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
       campaign: { findUnique: vi.fn(async () => state.campaign) },
       adGroup: { findUnique: vi.fn(async () => state.adGroup) },
@@ -201,22 +200,27 @@ describe('createPlatformWriter', () => {
 
 describe('createPrismaIdempotencyStore', () => {
   it('reserves a free key', async () => {
-    h.prisma.idempotencyKey.create.mockResolvedValue({});
+    h.prisma.idempotencyKey.createMany.mockResolvedValue({ count: 1 });
     expect(await createPrismaIdempotencyStore(db).reserve('k1')).toBe('reserved');
   });
 
-  it('reads a unique-constraint violation as a duplicate, not as a failure', async () => {
-    h.prisma.idempotencyKey.create.mockRejectedValue(
-      new Prisma.PrismaClientKnownRequestError('duplicate', {
-        code: 'P2002',
-        clientVersion: 'test',
-      }),
-    );
+  it('читает занятый ключ как дубль, не поднимая ошибку', async () => {
+    h.prisma.idempotencyKey.createMany.mockResolvedValue({ count: 0 });
     expect(await createPrismaIdempotencyStore(db).reserve('k1')).toBe('duplicate');
   });
 
+  it('просит Postgres пропустить конфликт, а не ловит его исключением', async () => {
+    // Ровно это и убирает дамп `prisma:error` из вывода повторного прогона:
+    // штатный дубль перестаёт быть ошибкой на уровне драйвера.
+    h.prisma.idempotencyKey.createMany.mockResolvedValue({ count: 1 });
+    await createPrismaIdempotencyStore(db).reserve('k1');
+    expect(h.prisma.idempotencyKey.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skipDuplicates: true }),
+    );
+  });
+
   it('rethrows anything that is not a duplicate', async () => {
-    h.prisma.idempotencyKey.create.mockRejectedValue(new Error('connection refused'));
+    h.prisma.idempotencyKey.createMany.mockRejectedValue(new Error('connection refused'));
     await expect(createPrismaIdempotencyStore(db).reserve('k1')).rejects.toThrow(
       'connection refused',
     );

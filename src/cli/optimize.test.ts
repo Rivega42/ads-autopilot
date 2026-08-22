@@ -59,6 +59,7 @@ function summaryOf(over: Partial<ScheduledOptimizationSummary> = {}): ScheduledO
     localStateFailed: 0,
     approvals: 0,
     approvalsFailed: 0,
+    approvalsUndelivered: 0,
     approvalsDuplicate: 0,
     rejected: 0,
     clamped: 0,
