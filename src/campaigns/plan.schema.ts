@@ -27,6 +27,14 @@ import {
 const trimmed = (min: number, max: number): z.ZodString => z.string().trim().min(min).max(max);
 
 /**
+ * Длина имени группы в плане. Директ разрешает 255, но имя видит человек в кабинете
+ * и модель в промпте текстов, а не разбор длинной строки: сотни хватает обоим.
+ * Экспортируется, потому что переименование одноимённых групп в планировщике
+ * обязано укладываться ровно в этот предел.
+ */
+export const PLANNED_GROUP_NAME_MAX = 100;
+
+/**
  * Строка длиной не больше `limit` в счёте площадки (см. limits.ts) и не пустая.
  *
  * Нижняя граница здесь не формальность: обрезка под лимит умеет схлопнуть строку
@@ -62,7 +70,7 @@ export const structureDraftSchema = z.object({
   groups: z
     .array(
       z.object({
-        name: trimmed(1, 100),
+        name: trimmed(1, PLANNED_GROUP_NAME_MAX),
         /** Зачем эта группа существует: горячий спрос, бренд, конкуренты, регион. */
         intent: trimmed(1, 300),
         keywords: z
@@ -85,7 +93,7 @@ export const adTextsDraftSchema = z.object({
   groups: z
     .array(
       z.object({
-        name: trimmed(1, 100),
+        name: trimmed(1, PLANNED_GROUP_NAME_MAX),
         ads: z.array(adTextDraftSchema).min(1).max(DIRECT_MAX_ADS_PER_GROUP),
       }),
     )
@@ -120,7 +128,7 @@ export const plannedKeywordSchema = z.object({
 export type PlannedKeyword = z.infer<typeof plannedKeywordSchema>;
 
 export const plannedAdGroupSchema = z.object({
-  name: trimmed(1, 100),
+  name: trimmed(1, PLANNED_GROUP_NAME_MAX),
   regionIds: z.array(z.number().int()).min(1),
   keywords: z.array(plannedKeywordSchema).min(1).max(DIRECT_MAX_KEYWORDS_PER_GROUP),
   negativeKeywords: z.array(trimmed(1, 200)).max(500),

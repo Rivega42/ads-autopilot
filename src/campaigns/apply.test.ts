@@ -557,3 +557,77 @@ describe('applyPlan: идемпотентность', () => {
     expect(retry.calls.campaigns).toEqual([]);
   });
 });
+
+describe('applyPlan: одноимённые группы', () => {
+  /**
+   * План, сохранённый до того, как планировщик научился разводить имена, лежит в
+   * базе и заливается этой же функцией. Сопоставление созданного с планом по имени
+   * складывало обе группы в одну: все фразы и все объявления уезжали в ту, что
+   * попала в `Map` последней, а первая оставалась пустой — при статусе `created`.
+   */
+  const DUPLICATE_PLAN: CampaignPlan = campaignPlanSchema.parse({
+    id: 'plan-1',
+    clientId: 'c1',
+    createdAt: '2026-08-08T09:00:00.000Z',
+    totalDailyBudgetRub: 3_500,
+    summary: 'Две группы с одним именем',
+    campaigns: [
+      {
+        channel: Provider.YANDEX_DIRECT,
+        placement: 'search',
+        name: 'Поиск — Курсы',
+        dailyBudgetRub: 3_500,
+        targetCpaRub: 2_000,
+        strategy: { search: { type: 'HIGHEST_POSITION' }, network: { type: 'SERVING_OFF' } },
+        negativeKeywords: [],
+        adGroups: [
+          {
+            name: 'Горячий спрос',
+            regionIds: [213],
+            keywords: [{ phrase: 'курсы английского', bidRub: 100 }],
+            negativeKeywords: [],
+            ads: [{ title: 'Первое объявление', text: 'Разговорный курс.', href: LANDING }],
+          },
+          {
+            name: 'Горячий спрос',
+            regionIds: [213],
+            keywords: [{ phrase: 'английский для айтишников', bidRub: 100 }],
+            negativeKeywords: [],
+            ads: [{ title: 'Второе объявление', text: 'Курс с практикой.', href: LANDING }],
+          },
+        ],
+      },
+    ],
+    warnings: [],
+    prompts: [],
+  });
+
+  it('фразы и объявления остаются каждая в своей группе', async () => {
+    const { db, adGroups, keywords } = makeDb(DUPLICATE_PLAN);
+    const { writer, calls } = makeWriter();
+
+    const result = await applyPlan('plan-1', {
+      db,
+      writers: { [Provider.YANDEX_DIRECT]: writer },
+      ...deps(false, createInMemoryCampaignIdempotency()),
+    });
+
+    expect(result.campaigns[0]?.adGroups).toBe(2);
+    expect(calls.keywords).toEqual([
+      { adGroupExternalId: 'g0', phrase: 'курсы английского', bidRub: 100 },
+      { adGroupExternalId: 'g1', phrase: 'английский для айтишников', bidRub: 100 },
+    ]);
+    expect(calls.ads.map((ad) => [ad.adGroupExternalId, ad.title])).toEqual([
+      ['g0', 'Первое объявление'],
+      ['g1', 'Второе объявление'],
+    ]);
+
+    // Зеркало в БД — две разные группы, у каждой своя фраза.
+    expect(adGroups.map((g) => g['externalId'])).toEqual(['g0', 'g1']);
+    expect(new Set(keywords.map((k) => k['adGroupId'])).size).toBe(2);
+    expect(keywords.map((k) => k['phrase'])).toEqual([
+      'курсы английского',
+      'английский для айтишников',
+    ]);
+  });
+});

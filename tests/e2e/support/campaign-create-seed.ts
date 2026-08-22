@@ -30,8 +30,8 @@ const HEADERS = {
  * послабления (docs/LESSONS.md — мок, отвечающий удобно, прячет блокеры):
  *
  *  • «не более N объектов в одном вызове метода»: 10 кампаний, 1000 групп,
- *    1000 фраз, 1000 объявлений. Перебор — ошибка запроса 9300 на весь запрос,
- *    не создано ничего;
+ *    1000 фраз, 1000 объявлений в `add` и 10 000 идентификаторов в `Ads.moderate`.
+ *    Перебор — ошибка запроса 9300 на весь запрос, не создано ничего;
  *  • `TextAd` обязан вести хоть куда-то: без `Href`, `TurboPageId`, `VCardId` и
  *    `BusinessId` — ошибка операции 4003;
  *  • `RegionIds` проверяется как геотаргетинг: только минус-регионы, повтор
@@ -45,15 +45,34 @@ const HEADERS = {
  * мок, который спрашивает вложенность у проверяемого кода, доказывает сам себя.
  */
 
+const RUSSIA = 225;
+
 /** Кусок настоящего справочника GeoRegions: ребёнок → родитель. */
 const REGION_PARENT: Readonly<Record<number, number>> = {
+  1: RUSSIA, // Москва и область → Россия
   213: 1, // Москва → Москва и область
-  1: 225, // Москва и область → Россия
+  10174: RUSSIA, // Санкт-Петербург и Ленинградская область → Россия
   2: 10174, // Санкт-Петербург → Санкт-Петербург и Ленинградская область
-  10174: 225,
+  10995: RUSSIA, // Краснодарский край → Россия
+  35: 10995, // Краснодар → Краснодарский край
   239: 10995, // Сочи → Краснодарский край
-  10995: 225,
 };
+
+/** Корни справочника: у страны родителя нет, и это не пробел в дереве. */
+const COUNTRIES: ReadonlySet<number> = new Set([RUSSIA, 149, 159]);
+
+/**
+ * Всё, что не страна и не выписано выше, справочник держит внутри России через
+ * область, которой здесь нет: её номер ни на один ответ мока не влияет.
+ *
+ * Так отвечает и площадка: «Россия, кроме Сочи» Директ принимает, и с любым
+ * другим российским городом на месте Сочи — тоже. Мок, у которого неизвестный
+ * номер не вложен никуда, был бы строже площадки и отказывал бы исправному коду.
+ */
+function parentOf(id: number): number | undefined {
+  if (COUNTRIES.has(id)) return undefined;
+  return REGION_PARENT[id] ?? RUSSIA;
+}
 
 const MAX_OBJECTS: Readonly<Record<string, number>> = {
   campaigns: 10,
@@ -61,6 +80,9 @@ const MAX_OBJECTS: Readonly<Record<string, number>> = {
   keywords: 1_000,
   ads: 1_000,
 };
+
+/** У `Ads.moderate` предел свой, и он на порядок больше, чем у `Ads.add`. */
+const MAX_IDS_PER_MODERATE = 10_000;
 
 const ITEMS_KEY: Readonly<Record<string, string>> = {
   campaigns: 'Campaigns',
@@ -70,7 +92,7 @@ const ITEMS_KEY: Readonly<Record<string, string>> = {
 };
 
 function within(ancestor: number, id: number): boolean {
-  for (let cur: number | undefined = id; cur !== undefined; cur = REGION_PARENT[cur]) {
+  for (let cur: number | undefined = id; cur !== undefined; cur = parentOf(cur)) {
     if (cur === ancestor) return true;
   }
   return false;
@@ -189,7 +211,29 @@ export function createDirectAddMock(options: { token: string }): DirectAddMock {
 
     if (method === 'moderate') {
       const ids = (sent['SelectionCriteria'] as { Ids?: number[] } | undefined)?.Ids ?? [];
-      calls.push({ service, method, items: [], params: sent, token, operationErrors: [] });
+      const call: DirectAddCall = {
+        service,
+        method,
+        items: [],
+        params: sent,
+        token,
+        operationErrors: [],
+      };
+      calls.push(call);
+      if (ids.length > MAX_IDS_PER_MODERATE) {
+        call.requestError = 9300;
+        return HttpResponse.json(
+          {
+            error: {
+              error_code: 9300,
+              error_string: 'Превышено ограничение на количество объектов в одном запросе',
+              error_detail: `${service}.moderate: ${ids.length} при пределе ${MAX_IDS_PER_MODERATE}`,
+              request_id: HEADERS.RequestId,
+            },
+          },
+          { headers: HEADERS },
+        );
+      }
       return HttpResponse.json(
         { result: { ModerateResults: ids.map((id) => ({ Id: id })) } },
         { headers: HEADERS },
@@ -313,26 +357,62 @@ export interface PlannerStubs {
   runTexts: RunTextsAgent;
   structureCalls: number;
   textsCalls: number;
+  /** Имена групп, о которых спрашивали тексты, — в порядке запроса. */
+  askedGroups: string[];
 }
 
 /**
  * Детерминированная подмена обоих агентов (CLAUDE.md §5: LLM в тестах не зовём).
  * Счётчики нужны, чтобы доказать, что отказ случается до платного прогона модели.
+ *
+ * Тексты собираются не из черновика стратега, а из имён групп, перечисленных в
+ * промпте: живая модель отвечает на то, о чём её спросили, и мок обязан вести себя
+ * так же (docs/LESSONS.md). Мок, отвечающий по исходному черновику, не заметил бы
+ * переименования группы внутри планировщика, а модель заметит.
  */
-export function plannerStubs(structure: StructureDraft, texts: AdTextsDraft): PlannerStubs {
+export function plannerStubs(structure: StructureDraft): PlannerStubs {
   const stubs: PlannerStubs = {
     structureCalls: 0,
     textsCalls: 0,
+    askedGroups: [],
     runStructure: () => {
       stubs.structureCalls += 1;
       return Promise.resolve(agentRun(structure));
     },
-    runTexts: () => {
+    runTexts: (opts) => {
       stubs.textsCalls += 1;
-      return Promise.resolve(agentRun(texts));
+      const names = groupNamesFromPrompt(opts.system ?? '');
+      stubs.askedGroups.push(...names);
+      return Promise.resolve(agentRun({ groups: names.map(adsForGroup) }));
     },
   };
   return stubs;
+}
+
+/** `formatGroupsForPrompt` перечисляет группы заголовками `### <имя>`. */
+function groupNamesFromPrompt(system: string): string[] {
+  const names = system
+    .split('\n')
+    .filter((line) => line.startsWith('### '))
+    .map((line) => line.slice('### '.length).trim());
+  if (names.length === 0) {
+    throw new Error('в промпте текстов нет ни одной группы: мок не знает, о чём его спросили');
+  }
+  return names;
+}
+
+/** Имя группы уезжает в заголовок: по нему видно, чьё объявление где оказалось. */
+function adsForGroup(name: string): AdTextsDraft['groups'][number] {
+  return {
+    name,
+    ads: [
+      {
+        title: `Английский: ${name}`.slice(0, 33),
+        title2: 'Старт сегодня',
+        text: `Разговорный курс с практикой. ${name}.`.slice(0, 81),
+      },
+    ],
+  };
 }
 
 /** Группы с заданным числом фраз: так проверяется резка пачек по лимиту метода. */
@@ -349,20 +429,5 @@ export function structureOf(groups: number, keywordsPerGroup: number): Structure
       negativeKeywords: ['бесплатно'],
     })),
     campaignNegativeKeywords: ['скачать'],
-  };
-}
-
-export function textsFor(structure: StructureDraft): AdTextsDraft {
-  return {
-    groups: structure.groups.map((group) => ({
-      name: group.name,
-      ads: [
-        {
-          title: `Английский для IT: ${group.name}`.slice(0, 33),
-          title2: 'Старт сегодня',
-          text: 'Разговорный курс с практикой и обратной связью.',
-        },
-      ],
-    })),
   };
 }

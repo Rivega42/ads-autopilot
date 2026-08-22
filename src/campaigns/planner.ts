@@ -27,6 +27,7 @@ import {
   type PlannedAdGroup,
   type PlannedCampaign,
   type StructureDraft,
+  PLANNED_GROUP_NAME_MAX,
 } from '@/campaigns/plan.schema.js';
 import { savePlan, type PlanStore } from '@/campaigns/store.js';
 import { runAgent, type AgentRun, type RunAgentOptions } from '@/clients/llm/index.js';
@@ -369,6 +370,37 @@ interface GroupSkeleton {
   regionIds: number[];
 }
 
+/**
+ * Имена, которыми группы различаются везде дальше.
+ *
+ * Регистр и лишние пробелы не считаются различием: «Бренд» и «бренд» — это одна
+ * группа для человека в кабинете и одна строка для модели, которую мы просим
+ * вернуть тексты «ровно по этим именам».
+ */
+function nameKey(name: string): string {
+  return name.trim().toLowerCase().replace(/ё/gu, 'е').replace(/\s+/gu, ' ');
+}
+
+/**
+ * Разводит одноимённые группы номером в конце: «Доставка», «Доставка 2».
+ *
+ * Имя группы — единственная ручка, за которую её берут снаружи: по имени модель
+ * отвечает текстами (`### <имя>` в промпте), по имени группу узнаёт человек в
+ * кабинете. Двум группам с одним именем нельзя ни заказать разные тексты, ни
+ * показать разницу клиенту, поэтому имя обязано быть уникальным ещё до того,
+ * как план кем-то читается.
+ */
+function uniqueGroupName(name: string, taken: Set<string>): string {
+  let candidate = name.trim();
+  for (let n = 2; taken.has(nameKey(candidate)); n += 1) {
+    const suffix = ` ${n}`;
+    const room = PLANNED_GROUP_NAME_MAX - suffix.length;
+    candidate = `${Array.from(name.trim()).slice(0, room).join('').trim()}${suffix}`;
+  }
+  taken.add(nameKey(candidate));
+  return candidate;
+}
+
 /** Фильтрация и дедупликация фраз. Всё, что Директ не примет, отсеивается здесь. */
 function buildGroups(
   structure: StructureDraft,
@@ -376,6 +408,8 @@ function buildGroups(
   warnings: string[],
 ): GroupSkeleton[] {
   const seen = new Set<string>();
+  const takenNames = new Set<string>();
+  const renamed: string[] = [];
   const groups: GroupSkeleton[] = [];
   let dropped = 0;
 
@@ -398,8 +432,11 @@ function buildGroups(
       continue;
     }
 
+    const name = uniqueGroupName(group.name, takenNames);
+    if (name !== group.name.trim()) renamed.push(`«${group.name}» → «${name}»`);
+
     groups.push({
-      name: group.name,
+      name,
       intent: group.intent,
       keywords,
       negativeKeywords: dedupe(group.negativeKeywords ?? []),
@@ -407,6 +444,13 @@ function buildGroups(
     });
   }
 
+  if (renamed.length > 0) {
+    warnings.push(
+      `Группы с одинаковыми именами переименованы: ${renamed.join(', ')}. ` +
+        'Имя видит клиент в кабинете, и по нему же тексты объявлений связываются ' +
+        'с группой — двум группам одно имя носить нельзя.',
+    );
+  }
   if (dropped > 0) {
     warnings.push(`Отброшено фраз, не проходящих лимиты Директа: ${dropped}.`);
   }

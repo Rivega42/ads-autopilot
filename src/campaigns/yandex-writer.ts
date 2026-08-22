@@ -45,6 +45,16 @@ const MAX_KEYWORDS_PER_ADD = 1_000;
 const MAX_ADS_PER_ADD = 1_000;
 
 /**
+ * `Ads.moderate`: «не более 10 000 объявлений в одном вызове метода».
+ *
+ * Своя константа именно потому, что предыдущая оговорка работает в обе стороны:
+ * предел `Ads.add` (1 000) сюда не годится, хотя это тот же сервис. Направление
+ * ошибки было безопасным — лишние девять запросов и лишние баллы квоты на каждый, —
+ * но лимит соседнего метода остаётся лимитом соседнего метода.
+ */
+const MAX_ADS_PER_MODERATE = 10_000;
+
+/**
  * Создание кампании в Яндекс Директе.
  *
  * Модуль намеренно лежит здесь, а не в `src/clients/yandex-direct/`: в клиенте нет
@@ -201,7 +211,7 @@ export class YandexCampaignWriter implements CampaignWriter {
     if (adExternalIds.length === 0) return;
     const http = this.client(ctx);
 
-    for (const batch of chunk(adExternalIds.map(toNumericId), MAX_ADS_PER_ADD)) {
+    for (const batch of chunk(adExternalIds.map(toNumericId), MAX_ADS_PER_MODERATE)) {
       const res = await http.call(
         'ads',
         'moderate',

@@ -347,8 +347,8 @@ describe('инвариант dry-run', () => {
  * по протоколу):
  *
  *  • «не более N объектов в одном вызове метода»: 10 кампаний, 1000 групп,
- *    1000 фраз, 1000 объявлений. Перебор — ошибка запроса 9300, ни один объект
- *    не создан;
+ *    1000 фраз, 1000 объявлений в `add` и 10 000 идентификаторов в `Ads.moderate`.
+ *    Перебор — ошибка запроса 9300, ни один объект не создан;
  *  • `TextAd` без цели показа (ни `Href`, ни `TurboPageId`, ни `VCardId`, ни
  *    `BusinessId`) — ошибка операции 4003;
  *  • `RegionIds`: только минус-регионы, минус-регион, совпадающий с регионом
@@ -365,6 +365,9 @@ const MAX_OBJECTS: Readonly<Record<string, number>> = {
   ads: 1_000,
 };
 
+/** У `Ads.moderate` предел свой, и он на порядок больше, чем у `Ads.add`. */
+const MAX_IDS_PER_MODERATE = 10_000;
+
 const ITEMS_KEY: Readonly<Record<string, string>> = {
   campaigns: 'Campaigns',
   adgroups: 'AdGroups',
@@ -372,11 +375,43 @@ const ITEMS_KEY: Readonly<Record<string, string>> = {
   ads: 'Ads',
 };
 
-/** Кусок настоящего справочника: Москва в Москве и области, обе — в России. */
-const PARENT: Readonly<Record<number, number>> = { 213: 1, 1: 225, 2: 10174, 10174: 225 };
+const RUSSIA = 225;
+
+/**
+ * Куски настоящего справочника GeoRegions, где вложенность многоуровневая и где
+ * она, собственно, и решает.
+ */
+const PARENT: Readonly<Record<number, number>> = {
+  1: RUSSIA, // Москва и область
+  213: 1, // Москва
+  10174: RUSSIA, // Санкт-Петербург и Ленинградская область
+  2: 10174, // Санкт-Петербург
+  10995: RUSSIA, // Краснодарский край
+  35: 10995, // Краснодар
+  239: 10995, // Сочи
+};
+
+/** Корни справочника: у страны родителя нет, и это не пробел в дереве. */
+const COUNTRIES: ReadonlySet<number> = new Set([RUSSIA, 149, 159]);
+
+/**
+ * Всё, что не страна и не выписано выше, справочник держит внутри России через
+ * область, которой здесь нет.
+ *
+ * Так и отвечает площадка: «Россия, кроме Сочи» (`[225, -239]`) Директ принимает,
+ * и любой другой российский город на месте Сочи — тоже. Мок, у которого
+ * неизвестный номер не вложен никуда, был бы строже площадки и красил бы
+ * исправный код на первом же минус-городе не из Москвы и Питера. Цена допущения
+ * — регион чужой страны, не попавший в `COUNTRIES`, мок посчитает российским;
+ * ни один такой номер система не выдаёт.
+ */
+function parentOf(id: number): number | undefined {
+  if (COUNTRIES.has(id)) return undefined;
+  return PARENT[id] ?? RUSSIA;
+}
 
 function within(ancestor: number, id: number): boolean {
-  for (let cur: number | undefined = id; cur !== undefined; cur = PARENT[cur]) {
+  for (let cur: number | undefined = id; cur !== undefined; cur = parentOf(cur)) {
     if (cur === ancestor) return true;
   }
   return false;
@@ -436,6 +471,19 @@ function directTransport(): FakeTransport {
 
     if (method === 'moderate') {
       const ids = (params['SelectionCriteria'] as { Ids?: number[] })?.Ids ?? [];
+      if (ids.length > MAX_IDS_PER_MODERATE) {
+        return Promise.resolve({
+          status: 200,
+          headers: {},
+          data: {
+            error: {
+              error_code: 9300,
+              error_string: 'Превышено ограничение на количество объектов в одном запросе',
+              error_detail: `${service}.moderate: ${ids.length} при пределе ${MAX_IDS_PER_MODERATE}`,
+            },
+          },
+        });
+      }
       return Promise.resolve({
         status: 200,
         headers: {},
@@ -564,6 +612,67 @@ describe('протокол: что площадка принимает', () => {
     await expect(writerOf(transport).createAds(CTX, ads)).rejects.toThrow(ChannelError);
     // Первая тысяча не должна оказаться в кабинете при заведомо провальной второй.
     expect(transport.calls).toEqual([]);
+  });
+
+  it('«Россия, кроме Сочи» мок принимает — как и Директ', async () => {
+    const transport = directTransport();
+
+    // `[225, -239]` — то, что `buildRegionTargeting` законно строит для брифа
+    // «показывать по России, кроме Сочи». Мок, у которого Сочи не вложен никуда,
+    // ответил бы 5120 на исправный код — и красил бы тест вместо площадки.
+    const groups = await writerOf(transport).createAdGroups(CTX, '777', [
+      { name: 'Россия без Сочи', regionIds: [225, -239], negativeKeywords: [] },
+      // Казани в дереве мока нет, но она в России, и Директ такую группу примет.
+      { name: 'Россия без Казани', regionIds: [225, -43], negativeKeywords: [] },
+    ]);
+
+    expect(groups).toHaveLength(2);
+  });
+
+  it('минус-регион вне регионов показа мок по-прежнему отклоняет', async () => {
+    const transport = directTransport();
+
+    // Сочи не входит ни в Москву, ни в Питер — это 5120, и мягче тут быть нельзя.
+    await expect(
+      writerOf(transport).createAdGroups(CTX, '777', [
+        { name: 'Москва и Питер без Сочи', regionIds: [2, 213, -239], negativeKeywords: [] },
+      ]),
+    ).rejects.toThrow(ChannelError);
+
+    // Беларусь — не регион России, и минус-регионом при таргете «Россия» быть не может.
+    await expect(
+      writerOf(transport).createAdGroups(CTX, '777', [
+        { name: 'Россия без Беларуси', regionIds: [225, -149], negativeKeywords: [] },
+      ]),
+    ).rejects.toThrow(ChannelError);
+  });
+
+  it('на модерацию объявления уходят по лимиту Ads.moderate, а не Ads.add', async () => {
+    const transport = directTransport();
+    const ids = Array.from({ length: 1_200 }, (_, i) => String(i + 1));
+
+    await writerOf(transport).submitForModeration(CTX, ids);
+
+    // Предел `Ads.moderate` — 10 000 идентификаторов: 1200 уезжают одним вызовом,
+    // а не двумя по лимиту соседнего `Ads.add`. Каждый лишний вызов — лишние баллы.
+    expect(transport.calls).toHaveLength(1);
+    const sent = params(transport.calls[0])['SelectionCriteria'] as { Ids: number[] };
+    expect(sent.Ids).toHaveLength(1_200);
+  });
+
+  it('за десять тысяч идентификаторов пачка всё-таки режется', async () => {
+    const transport = directTransport();
+    const ids = Array.from({ length: 10_001 }, (_, i) => String(i + 1));
+
+    await writerOf(transport).submitForModeration(CTX, ids);
+
+    // Одной пачкой на 10 001 площадка ответила бы 9300 и не отправила ни одного.
+    expect(transport.calls).toHaveLength(2);
+    expect(
+      transport.calls.map(
+        (call) => (params(call)['SelectionCriteria'] as { Ids: number[] }).Ids.length,
+      ),
+    ).toEqual([10_000, 1]);
   });
 
   it('группа, фразы и объявления доезжают целиком и в правильном виде', async () => {

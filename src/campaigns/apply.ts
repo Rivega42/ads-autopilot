@@ -12,7 +12,7 @@ import {
   createPrismaCampaignIdempotency,
   type CampaignIdempotency,
 } from '@/campaigns/idempotency.js';
-import type { CampaignPlan, PlannedCampaign } from '@/campaigns/plan.schema.js';
+import type { CampaignPlan, PlannedAdGroup, PlannedCampaign } from '@/campaigns/plan.schema.js';
 import { loadPlan, type PlanStore } from '@/campaigns/store.js';
 import {
   createOutcomeOf,
@@ -184,6 +184,48 @@ export async function applyLoadedPlan(
   return { planId, clientId: plan.clientId, dryRun, campaigns: results };
 }
 
+/** Созданная группа рядом со своим местом в плане. */
+interface CreatedAdGroup {
+  planned: PlannedAdGroup;
+  externalId: string;
+}
+
+/**
+ * Сопоставляет созданные группы с планом по позиции, а не по имени.
+ *
+ * Имя группы идентификатором не является: `AdGroups.add` требует от `Name` только
+ * длины от 1 до 255 символов и уникальности внутри кампании не спрашивает — две
+ * группы с одним именем Директ создаст обе, вернув разные id. Сопоставление по имени
+ * складывало фразы и объявления обеих в ту, что попала в `Map` последней, а первая
+ * оставалась пустой: клиент платил за кампанию, где половина семантики показывается
+ * не под теми объявлениями, и при этом заливка отчитывалась статусом `created`.
+ *
+ * Планировщик такие имена больше не выдаёт, но планы, сохранённые до этого, лежат
+ * в базе и заливаются той же функцией — поэтому чинить нужно здесь, а не только там.
+ *
+ * Порядок ответа — часть контракта `createAdGroups` (см. writer.ts). Расхождение имён
+ * означает, что реализация контракт нарушила: пары строим всё равно (иначе фразы
+ * некуда деть), но след в логах обязателен.
+ */
+function pairAdGroups(
+  planned: readonly PlannedAdGroup[],
+  created: readonly CreatedNamedEntity[],
+): CreatedAdGroup[] {
+  const pairs: CreatedAdGroup[] = [];
+  for (const [index, entity] of created.entries()) {
+    const group = planned[index];
+    if (!group) break;
+    if (entity.name !== group.name) {
+      log.warn(
+        { index, expected: group.name, got: entity.name },
+        'ad group order does not match the plan',
+      );
+    }
+    pairs.push({ planned: group, externalId: entity.externalId });
+  }
+  return pairs;
+}
+
 interface CreateArgs {
   plan: CampaignPlan;
   planId: string;
@@ -286,23 +328,21 @@ async function createOneCampaign(args: CreateArgs): Promise<CampaignApplyResult>
     );
   }
 
-  let groups: CreatedNamedEntity[] = [];
+  let groups: CreatedAdGroup[] = [];
   let keywordCount = 0;
   let adIds: string[] = [];
 
   try {
-    groups = await writer.createAdGroups(ctx, externalId, item.adGroups);
-    const byName = new Map(groups.map((g) => [g.name, g.externalId]));
+    const created = await writer.createAdGroups(ctx, externalId, item.adGroups);
+    groups = pairAdGroups(item.adGroups, created);
 
     const keywords: KeywordCreateSpec[] = [];
     const ads: AdCreateSpec[] = [];
-    for (const group of item.adGroups) {
-      const adGroupExternalId = byName.get(group.name);
-      if (!adGroupExternalId) continue;
-      for (const keyword of group.keywords) {
+    for (const { planned, externalId: adGroupExternalId } of groups) {
+      for (const keyword of planned.keywords) {
         keywords.push({ adGroupExternalId, phrase: keyword.phrase, bidRub: keyword.bidRub });
       }
-      for (const ad of group.ads) {
+      for (const ad of planned.ads) {
         ads.push({ adGroupExternalId, ...ad });
       }
     }
@@ -358,7 +398,7 @@ async function createOneCampaign(args: CreateArgs): Promise<CampaignApplyResult>
 async function persistCampaign(
   args: CreateArgs,
   externalId: string,
-  groups: readonly CreatedNamedEntity[],
+  groups: readonly CreatedAdGroup[],
   adCount: number,
 ): Promise<string | null> {
   const { db, item, plan } = args;
@@ -386,18 +426,14 @@ async function persistCampaign(
       select: { id: true },
     });
 
-    const byName = new Map(item.adGroups.map((g) => [g.name, g]));
-    for (const created of groups) {
-      const planned = byName.get(created.name);
-      if (!planned) continue;
-
+    for (const { planned, externalId: groupExternalId } of groups) {
       const adGroup = await db.adGroup.upsert({
         where: {
-          campaignId_externalId: { campaignId: campaign.id, externalId: created.externalId },
+          campaignId_externalId: { campaignId: campaign.id, externalId: groupExternalId },
         },
         create: {
           campaignId: campaign.id,
-          externalId: created.externalId,
+          externalId: groupExternalId,
           name: planned.name,
           status: AdGroupStatus.ACTIVE,
           targetings: toJsonObject({ regionIds: planned.regionIds }),

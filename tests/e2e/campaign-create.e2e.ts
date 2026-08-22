@@ -5,7 +5,6 @@ import {
   plannerStubs,
   seedCampaignClient,
   structureOf,
-  textsFor,
   type DirectAddCall,
   type DirectAddMock,
 } from './support/campaign-create-seed.js';
@@ -13,6 +12,7 @@ import { resetDatabase } from './support/database.js';
 
 import type { ClientBriefData } from '@/ai/onboarding/brief.schema.js';
 import { applyPlan, type CampaignApplyResult } from '@/campaigns/apply.js';
+import type { StructureDraft } from '@/campaigns/plan.schema.js';
 import { EmptyPlanError, planCampaigns } from '@/campaigns/planner.js';
 import { resetYandexRuntimeState } from '@/clients/yandex-direct/http.js';
 import { prisma } from '@/db/prisma.js';
@@ -96,7 +96,7 @@ describe('план доезжает до кабинета целиком', () =>
     // `Keywords.add` (1000) и меньше предела `KeywordBids.set` (10 000). Именно на
     // этом промежутке видно, чей лимит взят.
     const structure = structureOf(6, 200);
-    const stubs = plannerStubs(structure, textsFor(structure));
+    const stubs = plannerStubs(structure);
     const clientId = await seed(briefOf());
 
     const plan = await planCampaigns(clientId, {
@@ -169,7 +169,7 @@ describe('план доезжает до кабинета целиком', () =>
 describe('план, который площадка бы отклонила, не строится вовсе', () => {
   it('вложенный минус-город сохраняется: «Россия, кроме Москвы» кабинет принимает', async () => {
     const structure = structureOf(1, 3);
-    const stubs = plannerStubs(structure, textsFor(structure));
+    const stubs = plannerStubs(structure);
     const clientId = await seed(briefOf({ geo: ['Россия'], negativeCities: ['Москва'] }));
 
     const plan = await planCampaigns(clientId, {
@@ -183,9 +183,30 @@ describe('план, который площадка бы отклонила, н�
     expect(direct.calls.flatMap((c) => c.operationErrors)).toEqual([]);
   });
 
+  it('«Россия, кроме Сочи и Казани» — законный таргетинг, и он доезжает до кабинета', async () => {
+    const structure = structureOf(1, 3);
+    const stubs = plannerStubs(structure);
+    const clientId = await seed(briefOf({ geo: ['Россия'], negativeCities: ['Сочи', 'Казань'] }));
+
+    const plan = await planCampaigns(clientId, {
+      runStructure: stubs.runStructure,
+      runTexts: stubs.runTexts,
+    });
+    const result = await applyPlan(plan.id ?? '', { campaignIndex: 0 });
+
+    // Оба города вложены в Россию, значит оба минус-региона законны: ни планировщик
+    // их не выбрасывает, ни площадка не отказывает. Казань здесь не для числа —
+    // она проверяет, что мок не строже Директа на городе, которого нет в его
+    // куске справочника.
+    expect(direct.callsTo('adgroups')[0]?.items[0]?.['RegionIds']).toEqual([225, -43, -239]);
+    expect(result.campaigns[0]?.status).toBe('created');
+    expect(direct.calls.flatMap((c) => c.operationErrors)).toEqual([]);
+    expect(plan.warnings.some((w) => w.includes('Минус-города не попали в таргетинг'))).toBe(false);
+  });
+
   it('бриф без ссылки на сайт: отказ до первого платного вызова модели', async () => {
     const structure = structureOf(1, 3);
-    const stubs = plannerStubs(structure, textsFor(structure));
+    const stubs = plannerStubs(structure);
     const brief = briefOf();
     delete brief.landingUrl;
     const clientId = await seed(brief);
@@ -201,7 +222,7 @@ describe('план, который площадка бы отклонила, н�
 
   it('бриф, исключающий все свои же города показа, планом не становится', async () => {
     const structure = structureOf(1, 3);
-    const stubs = plannerStubs(structure, textsFor(structure));
+    const stubs = plannerStubs(structure);
     const clientId = await seed(briefOf({ geo: ['Москва'], negativeCities: ['Москва'] }));
 
     await expect(
@@ -209,5 +230,94 @@ describe('план, который площадка бы отклонила, н�
     ).rejects.toThrow(EmptyPlanError);
 
     expect(direct.calls).toEqual([]);
+  });
+});
+
+describe('две группы с одинаковым именем не сливаются в одну', () => {
+  /**
+   * Стратег вправе назвать две группы одинаково — схема плана этого не запрещает,
+   * и Директ не запрещает тоже. До починки такая пара складывалась в одну: фразы и
+   * объявления обеих уезжали в группу, попавшую в `Map` по имени последней, первая
+   * оставалась пустой, а заливка отчитывалась статусом `created`. Половина
+   * оплаченной семантики показывалась не под теми объявлениями.
+   */
+  const DUPLICATE: StructureDraft = {
+    summary: 'Стратег дал двум группам одно имя',
+    groups: [
+      {
+        name: 'Доставка',
+        intent: 'Ищут доставку прямо сейчас',
+        keywords: ['доставка пиццы', 'привезти пиццу'],
+        negativeKeywords: [],
+      },
+      {
+        name: 'Доставка',
+        intent: 'Ищут заказ на дом',
+        keywords: ['заказать пиццу домой', 'пицца на дом'],
+        negativeKeywords: [],
+      },
+    ],
+    campaignNegativeKeywords: [],
+  };
+
+  it('каждая группа уносит в кабинет свои фразы и свои объявления', async () => {
+    const stubs = plannerStubs(DUPLICATE);
+    const clientId = await seed(briefOf({ geo: ['Москва'], negativeCities: [] }));
+
+    const plan = await planCampaigns(clientId, {
+      runStructure: stubs.runStructure,
+      runTexts: stubs.runTexts,
+    });
+    const result = await applyPlan(plan.id ?? '', { campaignIndex: 0 });
+
+    // Имя различает группы и для человека в кабинете, и для модели: тексты она
+    // возвращает по именам, и об одноимённых группах её просто нельзя спросить.
+    expect(plan.campaigns[0]?.adGroups.map((g) => g.name)).toEqual(['Доставка', 'Доставка 2']);
+    expect(stubs.askedGroups).toEqual(['Доставка', 'Доставка 2']);
+    expect(plan.warnings.some((w) => w.includes('переименованы'))).toBe(true);
+
+    expect(result.campaigns[0]?.status).toBe('created');
+    expect(direct.calls.flatMap((c) => c.operationErrors)).toEqual([]);
+
+    // Раскладка по группам глазами площадки: id групп мок выдаёт сам, поэтому
+    // проверяем не сами id, а то, что фразы и объявления одной группы попали
+    // в один и тот же id, а разных — в разные.
+    const cabinet = new Map<unknown, { phrases: string[]; titles: string[] }>();
+    const groupOf = (id: unknown): { phrases: string[]; titles: string[] } => {
+      const known = cabinet.get(id);
+      if (known) return known;
+      const fresh = { phrases: [], titles: [] };
+      cabinet.set(id, fresh);
+      return fresh;
+    };
+    for (const item of direct.callsTo('keywords').flatMap((c) => c.items)) {
+      groupOf(item['AdGroupId']).phrases.push(String(item['Keyword']));
+    }
+    for (const item of direct.callsTo('ads').flatMap((c) => c.items)) {
+      const ad = item['TextAd'] as Record<string, unknown>;
+      groupOf(item['AdGroupId']).titles.push(String(ad['Title']));
+    }
+
+    expect([...cabinet.values()].map((g) => ({ ...g, phrases: [...g.phrases].sort() }))).toEqual([
+      { phrases: ['доставка пиццы', 'привезти пиццу'], titles: ['Английский: Доставка'] },
+      {
+        phrases: ['заказать пиццу домой', 'пицца на дом'],
+        titles: ['Английский: Доставка 2'],
+      },
+    ]);
+
+    // Зеркало в БД обязано показывать то же самое: иначе оптимизатор завтра будет
+    // двигать ставки фразам, которых в этой группе нет.
+    const mirrored = await prisma.adGroup.findMany({
+      where: { campaign: { externalId: result.campaigns[0]?.externalId ?? '' } },
+      select: { name: true, keywords: { select: { phrase: true } } },
+      orderBy: { name: 'asc' },
+    });
+    expect(
+      mirrored.map((g) => ({ name: g.name, phrases: g.keywords.map((k) => k.phrase).sort() })),
+    ).toEqual([
+      { name: 'Доставка', phrases: ['доставка пиццы', 'привезти пиццу'] },
+      { name: 'Доставка 2', phrases: ['заказать пиццу домой', 'пицца на дом'] },
+    ]);
   });
 });

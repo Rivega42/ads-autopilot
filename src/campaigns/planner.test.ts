@@ -8,7 +8,11 @@ import {
   DIRECT_TITLE_MAX,
   textLength,
 } from '@/campaigns/limits.js';
-import type { AdTextsDraft, StructureDraft } from '@/campaigns/plan.schema.js';
+import {
+  PLANNED_GROUP_NAME_MAX,
+  type AdTextsDraft,
+  type StructureDraft,
+} from '@/campaigns/plan.schema.js';
 import {
   EmptyPlanError,
   IncompleteBriefError,
@@ -424,5 +428,132 @@ describe('planCampaigns: объявлению нужна цель показа',
     const ads = plan.campaigns.flatMap((c) => c.adGroups.flatMap((g) => g.ads));
     expect(ads.length).toBeGreaterThan(0);
     expect(ads.every((ad) => ad.href === BRIEF.landingUrl)).toBe(true);
+  });
+});
+
+/**
+ * Имя группы — единственная ручка, за которую её берут снаружи: по имени модель
+ * возвращает тексты (`### <имя>` в промпте), по имени группу узнаёт клиент в
+ * кабинете. Двум группам одно имя носить нельзя: спросить у модели тексты
+ * отдельно для каждой невозможно в принципе, а `Map` по имени схлопывает их
+ * содержимое в одно.
+ */
+describe('planCampaigns: одноимённые группы', () => {
+  function structureWith(names: [string, string]): StructureDraft {
+    return {
+      summary: 'Две группы, одно имя',
+      groups: [
+        {
+          name: names[0],
+          intent: 'Ищут курс прямо сейчас',
+          keywords: ['курсы английского для программистов'],
+          negativeKeywords: [],
+        },
+        {
+          name: names[1],
+          intent: 'Знают нас по имени',
+          keywords: ['школа английского для разработчиков'],
+          negativeKeywords: [],
+        },
+      ],
+      campaignNegativeKeywords: [],
+    };
+  }
+
+  /** Модель отвечает ровно про те группы, о которых её спросили, — как живая. */
+  function textsByPrompt(): { run: RunTextsAgent; asked: string[] } {
+    const asked: string[] = [];
+    const run: RunTextsAgent = (opts) => {
+      const names = (opts.system ?? '')
+        .split('\n')
+        .filter((line) => line.startsWith('### '))
+        .map((line) => line.slice('### '.length).trim());
+      asked.push(...names);
+      return Promise.resolve(
+        agentRun({
+          groups: names.map((name) => ({
+            name,
+            ads: [{ title: `Курс: ${name}`, text: `Разговорный курс. ${name}.` }],
+          })),
+        }),
+      );
+    };
+    return { run, asked };
+  }
+
+  it('второе такое же имя получает номер, и тексты не смешиваются', async () => {
+    const { db } = makeDb(BRIEF);
+    const texts = textsByPrompt();
+
+    const plan = await planCampaigns('c1', {
+      db,
+      runStructure: () => Promise.resolve(agentRun(structureWith(['Бренд', 'Бренд']))),
+      runTexts: texts.run,
+    });
+
+    expect(texts.asked).toEqual(['Бренд', 'Бренд 2']);
+    const groups = plan.campaigns[0]?.adGroups ?? [];
+    expect(
+      groups.map((g) => ({
+        name: g.name,
+        phrases: g.keywords.map((k) => k.phrase),
+        titles: g.ads.map((a) => a.title),
+      })),
+    ).toEqual([
+      {
+        name: 'Бренд',
+        phrases: ['курсы английского для программистов'],
+        titles: ['Курс: Бренд'],
+      },
+      {
+        name: 'Бренд 2',
+        phrases: ['школа английского для разработчиков'],
+        titles: ['Курс: Бренд 2'],
+      },
+    ]);
+  });
+
+  it('переименование не прячется от человека: оно в предупреждениях плана', async () => {
+    const { db } = makeDb(BRIEF);
+    const texts = textsByPrompt();
+
+    const plan = await planCampaigns('c1', {
+      db,
+      runStructure: () => Promise.resolve(agentRun(structureWith(['Бренд', 'Бренд']))),
+      runTexts: texts.run,
+    });
+
+    expect(plan.warnings.some((w) => w.includes('«Бренд» → «Бренд 2»'))).toBe(true);
+  });
+
+  it('регистр и лишние пробелы различием не считаются', async () => {
+    const { db } = makeDb(BRIEF);
+    const texts = textsByPrompt();
+
+    const plan = await planCampaigns('c1', {
+      db,
+      runStructure: () => Promise.resolve(agentRun(structureWith(['Бренд', 'бренд']))),
+      runTexts: texts.run,
+    });
+
+    // Клиент в кабинете видит две строки, отличающиеся регистром одной буквы;
+    // модель на такой промпт отвечает одним блоком текстов на обе группы.
+    expect(plan.campaigns[0]?.adGroups.map((g) => g.name)).toEqual(['Бренд', 'бренд 2']);
+  });
+
+  it('длинное имя с номером остаётся в пределах схемы плана', async () => {
+    const { db } = makeDb(BRIEF);
+    const texts = textsByPrompt();
+    const long = 'Группа '.repeat(20).trim().slice(0, PLANNED_GROUP_NAME_MAX);
+
+    const plan = await planCampaigns('c1', {
+      db,
+      runStructure: () => Promise.resolve(agentRun(structureWith([long, long]))),
+      runTexts: texts.run,
+    });
+
+    const names = plan.campaigns[0]?.adGroups.map((g) => g.name) ?? [];
+    expect(names[1]).toMatch(/ 2$/u);
+    for (const name of names) expect(name.length).toBeLessThanOrEqual(PLANNED_GROUP_NAME_MAX);
   });
 });
