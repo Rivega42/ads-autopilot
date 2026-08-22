@@ -40,10 +40,21 @@ const FULL_BRIEF: ClientBriefData = {
   competitors: [{ name: 'Skyeng', site: 'https://skyeng.ru' }],
   conversionGoals: [{ name: 'заявка на пробный урок' }],
   metrika: { counterId: 12_345_678, goalId: 555, attribution: 'LASTSIGN' },
+  landingUrl: 'https://it-english.ru/trial',
 };
 
+/** Тот же бриф у клиента, у которого сайта нет. */
+const BRIEF_WITHOUT_SITE: ClientBriefData = (() => {
+  const { landingUrl: _landingUrl, ...rest } = FULL_BRIEF;
+  return rest;
+})();
+
 /** Ответ клиента, из которого все требующие цитаты значения действительно находятся. */
-const QUOTED_ANSWER = 'CPA 2000, бюджет 5000 на канал, счётчик 12345678, цель 555';
+const QUOTED_ANSWER =
+  'Сайт it-english.ru/trial, CPA 2000, бюджет 5000 на канал, счётчик 12345678, цель 555';
+
+/** Тот же ответ от клиента без сайта: ссылку в нём взять неоткуда. */
+const ANSWER_WITHOUT_SITE = 'CPA 2000, бюджет 5000 на канал, счётчик 12345678, цель 555';
 const QUOTED_EVIDENCE = {
   targetCpaRub: 'CPA 2000',
   dailyBudgetRub: 'бюджет 5000',
@@ -368,7 +379,8 @@ describe('handleAnswer', () => {
     ]);
 
     await startInterview(CLIENT, { db: store.db, run });
-    const step = await handleAnswer(CLIENT, 'CPA 3000, бюджет 1000, счётчик 12345678, цель 555', {
+    const answer = 'Сайт it-english.ru/trial, CPA 3000, бюджет 1000, счётчик 12345678, цель 555';
+    const step = await handleAnswer(CLIENT, answer, {
       db: store.db,
       run,
     });
@@ -391,6 +403,144 @@ describe('handleAnswer', () => {
       expect(step.missing).toContain('targetCpaRub');
     }
     expect(store.get(CLIENT)?.status).toBe(BriefStatus.IN_PROGRESS);
+  });
+
+  /**
+   * Клиент без сайта (TZ §13.1 + `campaigns/planner.ts`).
+   *
+   * Объявление Директа обязано куда-то вести: `Ads.add` требует хотя бы один из
+   * `Href`, `TurboPageId`, `VCardId`, `BusinessId`, а система умеет только ссылку.
+   * Пока ссылка была необязательной, интервью говорило «бриф собран», а отказ
+   * прилетал этажом ниже — клиент к тому времени уже потратил своё время и наши
+   * деньги на модель.
+   */
+  describe('клиент без сайта', () => {
+    it('не заканчивает интервью, даже если модель сказала done', async () => {
+      const { run } = runner([
+        { reply: 'Что продаём?' },
+        {
+          reply: 'Собрал бриф. Стартуем?',
+          updates: BRIEF_WITHOUT_SITE,
+          evidence: QUOTED_EVIDENCE,
+          done: true,
+        },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      const step = await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+
+      expect(step.kind).toBe('question');
+      if (step.kind === 'question') expect(step.missing).toEqual(['landingUrl']);
+      expect(store.get(CLIENT)?.status).toBe(BriefStatus.IN_PROGRESS);
+    });
+
+    it('после трёх вопросов про ссылку говорит правду и перестаёт спрашивать', async () => {
+      const { run, calls } = runner([
+        { reply: 'Что продаём?' },
+        {
+          reply: 'А сайт какой?',
+          updates: BRIEF_WITHOUT_SITE,
+          evidence: QUOTED_EVIDENCE,
+          asking: 'landingUrl',
+        },
+        { reply: 'Пришли ссылку, пожалуйста.', asking: 'landingUrl' },
+        { reply: 'Всё-таки нужна ссылка.', asking: 'landingUrl' },
+        { reply: 'Этого хода быть не должно.' },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+      await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
+      const step = await handleAnswer(CLIENT, 'нет, только группа в ВК', { db: store.db, run });
+
+      expect(step.kind).toBe('needs_human');
+      if (step.kind === 'needs_human') {
+        expect(step.missing).toEqual(['landingUrl']);
+        expect(step.text).toContain('Директ');
+        expect(step.text.toLowerCase()).toContain('ссылк');
+        // Не молчаливое «бриф завершён» и не 25 вопросов до потолка.
+        expect(step.askedCount).toBeLessThan(MAX_QUESTIONS);
+      }
+      // Четыре хода: приветствие и три вопроса про ссылку. Пятый уже не оплачен.
+      expect(calls).toHaveLength(4);
+      expect(store.get(CLIENT)?.status).toBe(BriefStatus.IN_PROGRESS);
+    });
+
+    it('после перезапуска повторяет тот же ответ, а не последний вопрос модели', async () => {
+      const { run } = runner([
+        { reply: 'Что продаём?' },
+        {
+          reply: 'А сайт какой?',
+          updates: BRIEF_WITHOUT_SITE,
+          evidence: QUOTED_EVIDENCE,
+          asking: 'landingUrl',
+        },
+        { reply: 'Пришли ссылку, пожалуйста.', asking: 'landingUrl' },
+        { reply: 'Всё-таки нужна ссылка.', asking: 'landingUrl' },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+      await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
+      const stopped = await handleAnswer(CLIENT, 'нет и не будет', { db: store.db, run });
+
+      const resumed = runner([{ reply: 'Этого хода быть не должно.' }]);
+      const step = await startInterview(CLIENT, { db: store.db, run: resumed.run });
+
+      expect(resumed.calls).toHaveLength(0);
+      expect(step.text).toBe(stopped.text);
+    });
+
+    it('присланная позже ссылка доводит бриф до конца', async () => {
+      const { run } = runner([
+        { reply: 'Что продаём?' },
+        {
+          reply: 'А сайт какой?',
+          updates: BRIEF_WITHOUT_SITE,
+          evidence: QUOTED_EVIDENCE,
+          asking: 'landingUrl',
+        },
+        { reply: 'Пришли ссылку.', asking: 'landingUrl' },
+        { reply: 'Без ссылки никак.', asking: 'landingUrl' },
+        {
+          reply: 'Записал, бриф собран.',
+          updates: { landingUrl: 'https://it-english.ru/trial' },
+          done: true,
+        },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+      await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
+      await handleAnswer(CLIENT, 'нет', { db: store.db, run });
+      const step = await handleAnswer(CLIENT, 'нашёл: it-english.ru/trial', { db: store.db, run });
+
+      expect(step.kind).toBe('complete');
+      expect(store.get(CLIENT)?.status).toBe(BriefStatus.COMPLETE);
+      expect(store.get(CLIENT)?.data).toMatchObject({
+        landingUrl: 'https://it-english.ru/trial',
+      });
+    });
+
+    it('ссылку, которой клиент не называл, в бриф не пускает', async () => {
+      // Обязательное поле модель заполнить хочет, а выдуманный адрес — это чужой
+      // сайт, на который клиент купит трафик.
+      const { run } = runner([
+        { reply: 'Что продаём?' },
+        {
+          reply: 'Собрал бриф. Стартуем?',
+          updates: { ...BRIEF_WITHOUT_SITE, landingUrl: 'https://it-english.ru' },
+          evidence: QUOTED_EVIDENCE,
+          done: true,
+        },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      const step = await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+
+      expect(step.kind).toBe('question');
+      expect(store.get(CLIENT)?.data).not.toHaveProperty('landingUrl');
+    });
   });
 
   it('отклоняет ход, если строку успел переписать другой процесс', async () => {

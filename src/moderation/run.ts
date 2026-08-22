@@ -67,6 +67,11 @@ export interface ModerationRunSummary {
   unchanged: number;
   escalated: number;
   skipped: number;
+  /**
+   * Объявления, отставленные после упавшей починки (`REPAIR_BACKOFF_MINUTES`).
+   * Ненулевое — это не застой, а очередь: слот потолка ушёл соседнему отказу.
+   */
+  backedOff: number;
   /** Отклонённые объявления, до которых прогон не дошёл из-за потолка. */
   deferred: number;
   rulesCount: number;
@@ -122,6 +127,7 @@ export async function runModerationCheck(
     unchanged: 0,
     escalated: 0,
     skipped: 0,
+    backedOff: 0,
     deferred: 0,
     rulesCount: RULES_COUNT,
     failures: [],
@@ -205,8 +211,15 @@ async function checkTarget(
       // объявлениям (порядок `listAds` стабилен, так что тем же самым каждый прогон),
       // а свежие отказы откладывать до бесконечности.
       // `unchanged` в этом смысле то же самое: предпросмотр уже показан, модель не
-      // звали, в кабинет не ходили — работы не было.
-      if (outcome.status !== 'skipped' && outcome.status !== 'unchanged') left -= 1;
+      // звали, в кабинет не ходили — работы не было. `backoff` — тем более: это
+      // объявление уступает очередь как раз потому, что на нём починка падает.
+      if (
+        outcome.status !== 'skipped' &&
+        outcome.status !== 'unchanged' &&
+        outcome.status !== 'backoff'
+      ) {
+        left -= 1;
+      }
     } catch (err) {
       // Одно объявление не чинится — остальные в этом же кабинете чинятся.
       left -= 1;
@@ -232,6 +245,9 @@ function tally(
       return;
     case 'unchanged':
       summary.unchanged += 1;
+      return;
+    case 'backoff':
+      summary.backedOff += 1;
       return;
     default:
       summary.skipped += 1;

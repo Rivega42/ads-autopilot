@@ -25,7 +25,14 @@ const FULL: ClientBriefData = {
   competitors: [{ name: 'Skyeng', site: 'https://skyeng.ru' }],
   conversionGoals: [{ name: 'заявка на пробный урок', metrikaGoalId: 123 }],
   metrika: { counterId: 12_345_678, goalId: 123, attribution: 'LASTSIGN' },
+  landingUrl: 'https://it-english.ru/trial',
 };
+
+/** Бриф клиента, у которого сайта нет: ровно тот случай, ради которого писан §15.1. */
+const WITHOUT_SITE: ClientBriefData = (() => {
+  const { landingUrl: _landingUrl, ...rest } = FULL;
+  return rest;
+})();
 
 describe('clientBriefSchema', () => {
   it('принимает полностью собранный бриф', () => {
@@ -136,7 +143,19 @@ describe('missingBriefFields', () => {
   });
 
   it('не считает недостающими необязательные поля', () => {
-    expect(missingBriefFields(FULL)).not.toContain('landingUrl');
+    const { notes: _notes, ...withoutNotes } = FULL;
+    expect(missingBriefFields(withoutNotes)).toEqual([]);
+  });
+
+  /**
+   * Директ не примет объявление без цели показа: нужен хотя бы один из `Href`,
+   * `TurboPageId`, `VCardId`, `BusinessId` (Ads.add), а из них система заполняет
+   * только `Href` (`campaigns/planner.ts`). Бриф, собранный без ссылки, — это
+   * интервью, законченное словами «всё, стартуем», и отказ планировщика следом.
+   */
+  it('без ссылки на сайт бриф не собран', () => {
+    expect(missingBriefFields(WITHOUT_SITE)).toEqual(['landingUrl']);
+    expect(REQUIRED_BRIEF_FIELDS).toContain('landingUrl');
   });
 });
 
@@ -176,6 +195,13 @@ describe('briefWarnings', () => {
     const warning = briefWarnings(neverAsked).join(' ');
     expect(warning).toContain('не спрашивали');
     expect(warning).not.toContain('Метрики нет');
+  });
+
+  it('замечает бриф, собранный до того, как ссылка стала обязательной', () => {
+    // Такие строки уже лежат в БД: схема их принимает, а кампанию по ним не завести.
+    const warning = briefWarnings(WITHOUT_SITE).join(' ');
+    expect(warning).toContain('ссылк');
+    expect(warning).toContain('Директ');
   });
 
   it('на чистом брифе молчит', () => {

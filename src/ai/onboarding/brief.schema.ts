@@ -120,6 +120,13 @@ export const clientBriefSchema = z.object({
    */
   metrika: metrikaBriefSchema.nullish(),
 
+  /**
+   * Цель показа объявления. Обязательна не по вкусу, а по протоколу: `Ads.add`
+   * Директа принимает `TextAd` только с одним из `Href`, `TurboPageId`, `VCardId`,
+   * `BusinessId`, и из них система заполняет единственный — `Href`
+   * (`campaigns/planner.ts`). Схема оставляет поле необязательным ради брифов,
+   * собранных до этого правила; «собран ли бриф» решает `REQUIRED_BRIEF_FIELDS`.
+   */
   landingUrl: z.string().trim().url().max(500).optional(),
   notes: trimmedString(1, 2_000).optional(),
 });
@@ -168,6 +175,7 @@ export const REQUIRED_BRIEF_FIELDS = [
   'dailyBudgetRub',
   'budgetScope',
   'negativeCities',
+  'landingUrl',
 ] as const satisfies readonly BriefField[];
 
 /** Человеческие подписи — уезжают в промпт как список «чего не хватает». */
@@ -185,7 +193,9 @@ export const BRIEF_FIELD_LABELS: Readonly<Record<BriefField, string>> = {
   metrika:
     'Яндекс.Метрика: номер счётчика, id цели-заявки, модель атрибуции ' +
     '(«Метрики нет» — тоже ответ)',
-  landingUrl: 'ссылка на посадочную страницу (необязательно)',
+  landingUrl:
+    'ссылка на сайт или посадочную страницу: Директ не примет объявление, ' +
+    'которому некуда вести',
   notes: 'важные оговорки: сезонность, ограничения, что нельзя обещать (необязательно)',
 };
 
@@ -316,6 +326,15 @@ export function briefWarnings(brief: ClientBriefData): string[] {
     warnings.push(
       'Про Яндекс.Метрику клиента не спрашивали: бриф собран до этого вопроса. ' +
         'Загрузка конверсий выключена, пока не известен счётчик — спроси и заполни.',
+    );
+  }
+
+  if (brief.landingUrl === undefined) {
+    // Схему такой бриф проходит — он собран до того, как ссылка стала обязательной.
+    // Запускаться по нему всё равно нельзя: планировщик откажет (`EmptyPlanError`).
+    warnings.push(
+      'Ссылки на сайт в брифе нет: Директ не примет объявление без неё, ' +
+        'кампанию по такому брифу не собрать. Спроси ссылку и заполни.',
     );
   }
 

@@ -51,6 +51,30 @@ export const AGENT_NAME = 'onboarding';
  */
 export const MAX_QUESTIONS = 25;
 
+/**
+ * Сколько раз интервью спрашивает про ссылку на сайт, прежде чем сказать правду.
+ *
+ * Ссылка обязательна не по вкусу, а по протоколу: Директ принимает объявление
+ * только с целью показа, и единственная, которую система умеет заполнить, — `Href`
+ * (`campaigns/planner.ts`). У клиента без сайта ответа на этот вопрос нет ни на
+ * третий раз, ни на двадцатый, поэтому потолок вопросов здесь не годится: он
+ * означал бы двадцать оплаченных ходов и «нужен человек» в конце. Три попытки —
+ * это шанс сходить за ссылкой и вернуться, дальше повторять вопрос бессмысленно.
+ */
+export const LANDING_URL_ATTEMPTS = 3;
+
+/**
+ * Что слышит клиент, у которого сайта нет.
+ *
+ * Худший вариант — молчаливое «бриф собран» и отказ на создании кампании: клиент
+ * прошёл интервью, потратил своё время и наши деньги на модель и остался ни с чем.
+ */
+export const NO_LANDING_REPLY =
+  'Без ссылки на сайт или посадочную страницу кампанию в Яндекс Директе завести ' +
+  'не получится: он не принимает объявление, которому некуда вести, а визитку и ' +
+  'турбо-страницы мы пока не делаем. Остальное я записал — как появится ссылка, ' +
+  'пришли её сюда, и мы продолжим с этого места.';
+
 /** Ответ клиента длиннее этого обрезаем: в TG прилетают простыни, а transcript в Json. */
 const MAX_ANSWER_CHARS = 4_000;
 
@@ -290,18 +314,26 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
     log.warn({ clientId, ...item }, 'onboarding: update rejected, no quote from the client');
   }
 
+  const missing = missingBriefFields(draft);
+  const parsed = missing.length === 0 ? parseCompleteBrief(draft) : null;
+
+  // Считается по расшифровке, а не отдельным счётчиком в строке: поле, о котором
+  // спрашивал каждый ход, там уже записано.
+  const landingAsks = countAsks(transcript, 'landingUrl') + (turn.asking === 'landingUrl' ? 1 : 0);
+  const outOfLandingAttempts =
+    parsed?.ok !== true && missing.includes('landingUrl') && landingAsks >= LANDING_URL_ATTEMPTS;
+
   transcript.askedCount += 1;
   transcript.turns.push({
     role: 'assistant',
-    text: turn.reply,
+    // В расшифровку уезжает то же, что увидел клиент: иначе перезапуск повторил бы
+    // ему вопрос модели вместо честного ответа (`startInterview` берёт текст отсюда).
+    text: outOfLandingAttempts ? NO_LANDING_REPLY : turn.reply,
     at: ctx.now().toISOString(),
     aiRunId: run.aiRunId,
     promptVersion: prompt.version,
     asking: turn.asking ?? null,
   });
-
-  const missing = missingBriefFields(draft);
-  const parsed = missing.length === 0 ? parseCompleteBrief(draft) : null;
 
   if (turn.done && missing.length > 0) {
     // Решает схема, а не модель: «done» при незаполненных полях означало бы бриф,
@@ -329,6 +361,19 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
       'onboarding interview complete',
     );
     return { kind: 'complete', text: turn.reply, brief: parsed.brief, warnings };
+  }
+
+  if (outOfLandingAttempts) {
+    log.warn(
+      { clientId, askedCount: transcript.askedCount, landingAsks },
+      'onboarding: client has no landing page, Direct campaign is impossible',
+    );
+    return {
+      kind: 'needs_human',
+      text: NO_LANDING_REPLY,
+      missing,
+      askedCount: transcript.askedCount,
+    };
   }
 
   if (transcript.askedCount >= MAX_QUESTIONS) {
@@ -458,6 +503,10 @@ function completedStep(row: BriefRow): InterviewStep {
     missing,
     askedCount: 0,
   };
+}
+
+function countAsks(transcript: InterviewTranscript, field: BriefField): number {
+  return transcript.turns.filter((t) => t.role === 'assistant' && t.asking === field).length;
 }
 
 function formatFields(fields: readonly BriefField[]): string {

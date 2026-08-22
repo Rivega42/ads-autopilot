@@ -19,7 +19,7 @@ import type { InterviewTurn } from './turn.schema.js';
 
 export interface RejectedUpdate {
   field: BriefField;
-  reason: 'no-evidence' | 'evidence-not-found' | 'value-not-quoted';
+  reason: 'no-evidence' | 'evidence-not-found' | 'value-not-quoted' | 'url-not-mentioned';
   /** Что именно модель пыталась записать — нужно в логе, чтобы разбирать промпт. */
   value: unknown;
   quote?: string;
@@ -129,6 +129,29 @@ export function quoteMentionsNumber(quote: string, value: number): boolean {
   return numbersIn(quote).has(value);
 }
 
+/**
+ * Ссылка, названная клиентом.
+ *
+ * Схема требует полный URL, а клиент пишет «наш сайт okna-spb.ru», поэтому сравнивать
+ * строки целиком нельзя: схему и `www.` отбрасываем, остальное сводим к буквам и
+ * цифрам тем же нормализатором, что и цитаты. Совпадать обязан весь адрес вместе с
+ * путём: `okna-spb.ru` и `okna-spb.ru/akcii` ведут в разные места, и второе клиент
+ * не называл.
+ *
+ * Проверка нужна ровно потому, что ссылка стала обязательной: поле, без которого
+ * интервью не закончить, модель заполнить хочет, а выдуманный адрес — это чужой
+ * сайт, на который клиент купит трафик.
+ */
+export function urlMentioned(value: string, messages: readonly string[]): boolean {
+  const needle = normalizeQuote(stripUrlPrefix(value));
+  if (needle.length < 2) return false;
+  return messages.some((message) => normalizeQuote(stripUrlPrefix(message)).includes(needle));
+}
+
+function stripUrlPrefix(text: string): string {
+  return text.replace(/https?:\/\//giu, '').replace(/(^|[^\p{L}\p{N}])www\./giu, '$1');
+}
+
 type QuoteVerdict = { ok: true } | { ok: false; reason: RejectedUpdate['reason'] };
 
 function checkQuote(
@@ -191,6 +214,16 @@ export function applyTurnUpdates(
 
   for (const [field, value] of Object.entries(turn.updates ?? {}) as [BriefField, unknown][]) {
     if (value === undefined) continue;
+
+    if (field === 'landingUrl' && typeof value === 'string') {
+      if (!urlMentioned(value, clientMessages)) {
+        rejected.push({ field, reason: 'url-not-mentioned', value });
+        continue;
+      }
+      next.landingUrl = value;
+      accepted.push(field);
+      continue;
+    }
 
     // `null` — это отказ клиента («Метрики нет»), а не значение: выдумать в нём
     // нечего, и требовать цитату не за что.

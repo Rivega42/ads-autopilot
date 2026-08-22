@@ -32,10 +32,15 @@ export {
 } from '@/moderation/poll.js';
 export {
   escalateMissingAd,
+  repairBackoffKey,
   repairRejectedAd,
+  BACKOFF_SCOPE,
   ESCALATION_ACTION,
   MAX_MODERATION_RETRIES,
   MISSING_ACTION,
+  PREVIEW_SCOPE,
+  REPAIR_BACKOFF_MINUTES,
+  REPAIR_BACKOFF_TICKS,
   REWRITE_ACTION,
   type RepairContext,
   type RepairOutcome,

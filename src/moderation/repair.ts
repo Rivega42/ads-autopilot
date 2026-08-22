@@ -13,6 +13,8 @@ import type { EscalationCause, ModerationEscalation } from '@/moderation/escalat
 import type { MissingAd, ModerationTarget, RejectedAd } from '@/moderation/poll.js';
 import { rewriteRejectedAd } from '@/moderation/rewrite.js';
 import type { AdText, ClassifiedRejection } from '@/moderation/types.js';
+import { cronIntervalMinutes } from '@/reporter/alerts.js';
+import { CRON_SCHEDULE, QUEUE_NAMES } from '@/scheduler/schedule.js';
 
 const log = logger.child({ scope: 'moderation:repair' });
 
@@ -36,6 +38,35 @@ export const PREVIEW_SCOPE = 'moderation.preview';
  */
 export const PREVIEW_KEY_TTL_DAYS = 30;
 export const ESCALATION_ACTION = 'moderation_escalated';
+
+/** Отметка о том, что починка этого объявления только что упала. */
+export const BACKOFF_SCOPE = 'moderation.backoff';
+
+/**
+ * Период крона `check-moderation` в минутах.
+ *
+ * Считается из самого расписания, а не записан числом рядом: отдельная константа
+ * разъезжается с кроном при первой же его правке (`reporter/alerts.ts` наступил на
+ * это первым, оттуда и функция — она общая, а перенос её в `scheduler` был бы
+ * правкой чужого модуля).
+ */
+export const MODERATION_TICK_MINUTES = cronIntervalMinutes(
+  CRON_SCHEDULE[QUEUE_NAMES.checkModeration],
+);
+
+/**
+ * Сколько тиков объявление ждёт после упавшей починки.
+ *
+ * Инвариант: строго больше одного периода крона, иначе отступа нет вовсе. Дальше —
+ * размен между честной очередью и скоростью восстановления: шесть тиков означают,
+ * что застрявшее объявление стоит не больше восьми оплаченных попыток в сутки
+ * вместо сорока восьми, а между двумя его попытками потолок успевает пропустить
+ * `MAX_REPAIRS_PER_RUN × 6` чужих отказов. Цена — авария провайдера отодвигает
+ * починку не на полчаса, а на три часа; объявление всё это время и так не крутится.
+ */
+export const REPAIR_BACKOFF_TICKS = 6;
+
+export const REPAIR_BACKOFF_MINUTES = REPAIR_BACKOFF_TICKS * MODERATION_TICK_MINUTES;
 export const MISSING_ACTION = 'moderation_missing';
 
 export interface RepairContext {
@@ -52,6 +83,8 @@ export type RepairOutcome =
   | { status: 'escalated'; cause: EscalationCause }
   /** Предпросмотр по этому входу уже показывали: модель не звали. */
   | { status: 'unchanged' }
+  /** Прошлая починка этого объявления упала: ждём, чтобы пропустить очередь. */
+  | { status: 'backoff'; until: Date }
   | { status: 'skipped'; reason: string };
 
 /**
@@ -101,6 +134,51 @@ async function reservePreview(deps: ModerationDeps, ad: RejectedAd): Promise<boo
 async function releasePreview(deps: ModerationDeps, ad: RejectedAd): Promise<void> {
   await bestEffort(ad.id, 'failed to release the moderation preview key', () =>
     deps.db.idempotencyKey.deleteMany({ where: { key: previewKey(ad) } }),
+  );
+}
+
+export function repairBackoffKey(adId: string): string {
+  return `${BACKOFF_SCOPE}:${adId}`;
+}
+
+/**
+ * До какого времени объявление отставлено после упавшей починки; `null` — не отставлено.
+ *
+ * Срок проверяется здесь, а не отдаётся на откуп чистке просроченных ключей
+ * (`scheduler/purge.ts`): отступ обязан кончаться сам по себе, даже если чистка
+ * встала, — иначе одна упавшая починка выключала бы объявление навсегда.
+ */
+async function backoffUntil(deps: ModerationDeps, adId: string): Promise<Date | null> {
+  const row = await deps.db.idempotencyKey.findUnique({
+    where: { key: repairBackoffKey(adId) },
+    select: { expiresAt: true },
+  });
+  if (row === null) return null;
+  return row.expiresAt > deps.now() ? row.expiresAt : null;
+}
+
+/**
+ * Отставляет объявление после починки, не оставившей о себе следа.
+ *
+ * Отдельной сущности под счётчик попыток нет намеренно: ключ с временем жизни в
+ * проекте уже есть и уже чистится кроном (`scheduler/purge.ts`). Best-effort: наверх
+ * обязана уйти исходная ошибка починки, а не отказ записи отметки.
+ */
+async function deferRepair(deps: ModerationDeps, ad: RejectedAd): Promise<void> {
+  const key = repairBackoffKey(ad.id);
+  const expiresAt = new Date(deps.now().getTime() + REPAIR_BACKOFF_MINUTES * 60_000);
+  await bestEffort(ad.id, 'failed to defer the ad after a failed repair', () =>
+    deps.db.idempotencyKey.upsert({
+      where: { key },
+      create: {
+        key,
+        scope: BACKOFF_SCOPE,
+        entityType: 'ad',
+        entityId: ad.id,
+        expiresAt,
+      },
+      update: { expiresAt },
+    }),
   );
 }
 
@@ -449,8 +527,28 @@ async function bestEffort(
   }
 }
 
+/**
+ * Была ли попытка засчитана: захват строки (`REJECTED` → `REWRITING`) двигает
+ * `Ad.moderationRetries`, и дальше объявление ограничивает себя само — после
+ * `MAX_MODERATION_RETRIES` оно паркуется. До захвата отказ не двигает ничего.
+ */
+interface RepairAttempt {
+  claimed: boolean;
+}
+
 export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promise<RepairOutcome> {
   const { deps, target, ctx, adapter } = rc;
+
+  // До всего остального: смысл отступа в том, чтобы объявление пропустило очередь,
+  // а не в том, чтобы подешевле повторить то же самое.
+  const until = await backoffUntil(deps, ad.id);
+  if (until !== null) {
+    log.info(
+      { adId: ad.id, clientId: target.clientId, until: until.toISOString() },
+      'repair deferred: previous attempt on this ad failed',
+    );
+    return { status: 'backoff', until };
+  }
 
   if (ad.status !== AdStatus.ACTIVE) {
     // Выключенное объявление никому не показывается, а починка стоит двух вызовов
@@ -485,8 +583,9 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
     return { status: 'unchanged' };
   }
 
+  const attempt: RepairAttempt = { claimed: false };
   try {
-    return await rewriteAndResubmit(rc, ad, updateAdText);
+    return await rewriteAndResubmit(rc, ad, updateAdText, attempt);
   } catch (err) {
     // Отметка означает «ответ по этому входу уже получен и показан». Отказ её не
     // подтверждает: оставить ключ занятым — значит выключить объявление из починки на
@@ -494,6 +593,12 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
     // как норма. Отпускается только на отказе: `escalated` — это полученный и оплаченный
     // ответ, и платить за него каждые полчаса заново не за что.
     if (ctx.dryRun) await releasePreview(deps, ad);
+    // Отступ — только за попытку, которую никто не засчитал. Отказ после захвата
+    // строки счётчик уже потратил, и три таких отказа паркуют объявление сами.
+    // А отказ до захвата не оставляет следа нигде: в dry-run счётчик не растёт
+    // никогда, отпущенный ключ предпросмотра снова разрешает платный вызов, и то
+    // же самое объявление забирало бы слот потолка каждые полчаса вечно.
+    if (!attempt.claimed) await deferRepair(deps, ad);
     throw err;
   }
 }
@@ -509,6 +614,7 @@ async function rewriteAndResubmit(
   rc: RepairContext,
   ad: RejectedAd,
   updateAdText: NonNullable<ChannelAdapter['updateAdText']>,
+  attempt: RepairAttempt,
 ): Promise<RepairOutcome> {
   const { deps, target, ctx } = rc;
 
@@ -571,6 +677,7 @@ async function rewriteAndResubmit(
   if (claim.count === 0) {
     return { status: 'skipped', reason: 'claimed by another run or no longer active' };
   }
+  attempt.claimed = true;
 
   let applied: WriteResult;
   try {

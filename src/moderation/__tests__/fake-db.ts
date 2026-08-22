@@ -135,7 +135,7 @@ export class FakeDb {
   readonly changeLogs: ChangeLogRow[] = [];
   readonly errorLogs: ErrorLogRow[] = [];
   readonly adWrites: AdWrite[] = [];
-  readonly idempotencyKeys: { key: string; scope: string }[] = [];
+  readonly idempotencyKeys: { key: string; scope: string; expiresAt: Date }[] = [];
 
   seedClient(row: Partial<ClientRow> & { id: string }): ClientRow {
     const client: ClientRow = {
@@ -323,11 +323,41 @@ export class FakeDb {
   };
 
   readonly idempotencyKey = {
-    create: async (args: { data: { key: string; scope: string } }): Promise<void> => {
+    create: async (args: {
+      data: { key: string; scope: string; expiresAt: Date };
+    }): Promise<void> => {
       if (this.idempotencyKeys.some((row) => row.key === args.data.key)) {
         throw new FakeUniqueViolation('key');
       }
-      this.idempotencyKeys.push({ key: args.data.key, scope: args.data.scope });
+      this.idempotencyKeys.push({
+        key: args.data.key,
+        scope: args.data.scope,
+        expiresAt: args.data.expiresAt,
+      });
+    },
+
+    // Срок жизни ключа здесь настоящий: отступ по объявлению держится именно на
+    // нём, и хранилище, забывающее `expiresAt`, показывало бы вечный отступ.
+    findUnique: async (args: { where: { key: string } }): Promise<{ expiresAt: Date } | null> => {
+      const row = this.idempotencyKeys.find((k) => k.key === args.where.key);
+      return row === undefined ? null : { expiresAt: row.expiresAt };
+    },
+
+    upsert: async (args: {
+      where: { key: string };
+      create: { key: string; scope: string; expiresAt: Date };
+      update: { expiresAt: Date };
+    }): Promise<void> => {
+      const row = this.idempotencyKeys.find((k) => k.key === args.where.key);
+      if (row === undefined) {
+        this.idempotencyKeys.push({
+          key: args.create.key,
+          scope: args.create.scope,
+          expiresAt: args.create.expiresAt,
+        });
+        return;
+      }
+      row.expiresAt = args.update.expiresAt;
     },
 
     deleteMany: async (args: { where: { key: string } }): Promise<{ count: number }> => {

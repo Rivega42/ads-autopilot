@@ -8,7 +8,7 @@ import { AuthError } from '@/lib/errors.js';
 import { FakeDb } from '@/moderation/__tests__/fake-db.js';
 import { fakeAdapter, queueRunner, remoteAd } from '@/moderation/__tests__/fakes.js';
 import type { ModerationEscalation } from '@/moderation/escalate.js';
-import { MISSING_ACTION } from '@/moderation/repair.js';
+import { MISSING_ACTION, REPAIR_BACKOFF_MINUTES } from '@/moderation/repair.js';
 import { listModerationTargets, runModerationCheck } from '@/moderation/run.js';
 import type { AdRewriteDraft, RejectionClassificationDraft } from '@/moderation/schema.js';
 
@@ -319,6 +319,9 @@ describe('runModerationCheck', () => {
     // занятый упавшей моделью, означал бы: провайдер поднялся, а прогон отвечает
     // `unchanged` и не зовёт модель — и так месяц. Заметить это по сводке нельзя:
     // ненулевой `unchanged` при DRY_RUN документирован как норма.
+    //
+    // Отступ после отказа этого не отменяет: он измеряется тиками крона, а не
+    // месяцем, виден в сводке (`backedOff`) и кончается сам.
     const dry = async (clientId: string): Promise<ChannelContext> => ({
       clientId,
       credentials: {},
@@ -326,6 +329,10 @@ describe('runModerationCheck', () => {
     });
     const { adapter, opts } = options({ contextFor: dry });
     const base = { ...opts, adapterFor: () => adapter, contextFor: dry };
+    const working = {
+      runClassify: queueRunner<RejectionClassificationDraft>([CLASSIFICATION]).run,
+      runRewrite: queueRunner<AdRewriteDraft>([REWRITE]).run,
+    };
 
     const outage = await runModerationCheck({
       ...base,
@@ -335,14 +342,109 @@ describe('runModerationCheck', () => {
     expect(outage.failures).toHaveLength(1);
     expect(outage.failures[0]?.stage).toBe('repair:ad1');
 
-    // Провайдер поднялся: следующий тик обязан снова позвать модель.
-    const recovered = await runModerationCheck({
-      ...base,
-      runClassify: queueRunner<RejectionClassificationDraft>([CLASSIFICATION]).run,
-      runRewrite: queueRunner<AdRewriteDraft>([REWRITE]).run,
-    });
-    expect(recovered).toMatchObject({ planned: 1, unchanged: 0 });
+    // Ближайший тик объявление пропускает: слот потолка отдан соседям.
+    const soon = await runModerationCheck({ ...base, ...working });
+    expect(soon).toMatchObject({ planned: 0, unchanged: 0, backedOff: 1 });
+
+    // Отступ вышел — модель зовут снова, ключ предпросмотра этому не мешает.
+    const later = new Date(Date.now() + (REPAIR_BACKOFF_MINUTES + 1) * 60_000);
+    const recovered = await runModerationCheck({ ...base, ...working, now: () => later });
+    expect(recovered).toMatchObject({ planned: 1, unchanged: 0, backedOff: 0 });
     expect(recovered.failures).toEqual([]);
+  });
+
+  describe('объявление, на котором починка падает всегда', () => {
+    /**
+     * Слот потолка достаётся тому, кто в листинге кабинета первый, а порядок
+     * `listAds` стабилен. Пока упавшая починка не оставляет о себе ни следа —
+     * счётчик попыток растёт только на реальной отправке, а в dry-run не растёт
+     * никогда, — одно и то же объявление забирает слот каждый тик, и соседний
+     * отказ не дожидается очереди никогда.
+     */
+    function seedNeighbour(): ReturnType<typeof fakeAdapter> {
+      db.seedAd({
+        id: 'ad1b',
+        adGroupId: 'g-cl1',
+        externalId: 'a1b',
+        title: 'Самый лучший ремонт холодильников',
+        body: 'Починим сегодня, недорого и с гарантией на работу мастера.',
+        moderationStatus: ModerationStatus.PENDING,
+      });
+      return fakeAdapter({
+        channel: Provider.YANDEX_DIRECT,
+        ads: [
+          REJECTED_REMOTE,
+          remoteAd({
+            externalId: 'a1b',
+            adGroupExternalId: 'ext-cl1',
+            title: 'Самый лучший ремонт холодильников',
+            text: 'Починим сегодня, недорого и с гарантией на работу мастера.',
+            moderationStatus: 'REJECTED',
+            moderationReason: 'Превосходная степень без подтверждения',
+          }),
+          APPROVED_REMOTE,
+        ],
+        updateAdText: () => ({ applied: true, plan: {} }),
+      });
+    }
+
+    /** Классификатор, который падает только на первом объявлении листинга. */
+    function classifierBrokenOn(
+      title: string,
+    ): typeof CLASSIFICATION extends never
+      ? never
+      : ReturnType<typeof queueRunner<RejectionClassificationDraft>>['run'] {
+      const ok = queueRunner<RejectionClassificationDraft>([CLASSIFICATION]).run;
+      return (opts) => {
+        if ((opts.system ?? '').includes(title)) return Promise.reject(new Error('LLM 500'));
+        return ok(opts);
+      };
+    }
+
+    it('после отказа уступает потолок соседнему отказу', async () => {
+      const adapter = seedNeighbour();
+      const { opts } = options();
+      const run = {
+        ...opts,
+        adapterFor: () => adapter,
+        maxRepairs: 1,
+        runClassify: classifierBrokenOn('Лучший ремонт стиральных машин'),
+      };
+
+      const first = await runModerationCheck(run);
+      expect(first.failures).toHaveLength(1);
+      expect(first).toMatchObject({ rewritten: 0, deferred: 1 });
+
+      const second = await runModerationCheck(run);
+      // Слот достался соседу, а не тому же самому объявлению.
+      expect(second).toMatchObject({ rewritten: 1, failures: [] });
+      expect(db.adOf('ad1b').title).toBe(REWRITE.title);
+    });
+
+    it('после отступа возвращается в очередь само', async () => {
+      const adapter = seedNeighbour();
+      const { opts } = options();
+      const broken = {
+        ...opts,
+        adapterFor: () => adapter,
+        maxRepairs: 1,
+        runClassify: classifierBrokenOn('Лучший ремонт стиральных машин'),
+      };
+
+      await runModerationCheck(broken);
+      await runModerationCheck(broken);
+
+      const later = new Date(Date.now() + (REPAIR_BACKOFF_MINUTES + 1) * 60_000);
+      const healed = await runModerationCheck({
+        ...opts,
+        adapterFor: () => adapter,
+        maxRepairs: 1,
+        now: () => later,
+      });
+
+      expect(healed).toMatchObject({ rewritten: 1, failures: [] });
+      expect(db.adOf('ad1').title).toBe(REWRITE.title);
+    });
   });
 
   it('при аварии провайдера потолок ограничивает попытки, но отложенное не теряется', async () => {
@@ -395,15 +497,17 @@ describe('runModerationCheck', () => {
     expect(outage.failures).toHaveLength(1);
     expect(db.adOf('ad1').title).not.toBe(REWRITE.title);
 
+    // Упавшее объявление уступает очередь: потолок достаётся отложенному соседу.
     const first = await runModerationCheck(working());
-    expect(first).toMatchObject({ rewritten: 1, deferred: 1 });
-    expect(db.adOf('ad1').title).toBe(REWRITE.title);
-    cabinet[0] = { ...REJECTED_REMOTE, moderationStatus: 'ACCEPTED' };
-
-    // Отложенное объявление ничего не потеряло: свой потолок оно получает следующим.
-    const second = await runModerationCheck(working());
-    expect(second).toMatchObject({ rewritten: 1, deferred: 0 });
+    expect(first).toMatchObject({ rewritten: 1, backedOff: 1, deferred: 0 });
     expect(db.adOf('ad1b').title).toBe(REWRITE.title);
+    cabinet[1] = { ...cabinet[1], moderationStatus: 'ACCEPTED' } as (typeof cabinet)[number];
+
+    // Ничего не потеряно и здесь: после отступа объявление возвращается в очередь.
+    const later = new Date(Date.now() + (REPAIR_BACKOFF_MINUTES + 1) * 60_000);
+    const second = await runModerationCheck({ ...working(), now: () => later });
+    expect(second).toMatchObject({ rewritten: 1, backedOff: 0, deferred: 0 });
+    expect(db.adOf('ad1').title).toBe(REWRITE.title);
   });
 
   describe('строка без объявления в кабинете', () => {

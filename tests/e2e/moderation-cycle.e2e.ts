@@ -21,8 +21,11 @@ import { resetYandexRuntimeState } from '@/clients/yandex-direct/http.js';
 import { prisma } from '@/db/prisma.js';
 import {
   MAX_MODERATION_RETRIES,
+  repairBackoffKey,
   repairRejectedAd,
   resolveDeps,
+  PREVIEW_SCOPE,
+  REPAIR_BACKOFF_MINUTES,
   REWRITE_CALLS,
   runModerationCheck,
   type RepairContext,
@@ -109,6 +112,11 @@ function seed(
     campaignName: name,
     groups: [{ externalId: String(ids.group), name: 'Основная группа', ads }],
   });
+}
+
+/** Отметки предпросмотра этого объявления: ключи отступа лежат в той же таблице. */
+function previewKeyCount(adId: string): Promise<number> {
+  return prisma.idempotencyKey.count({ where: { entityId: adId, scope: PREVIEW_SCOPE } });
 }
 
 function textsSentTo(chatId: string): string[] {
@@ -863,6 +871,9 @@ describe('AI-Модератор: отказ площадки → перепис�
      * провайдер поднялся, а прогон отвечает `unchanged` — «показывать нечего» — и так
      * до истечения ключа. Заметить это по сводке нельзя: ненулевой `unchanged` при
      * `DRY_RUN` документирован как норма, а `DRY_RUN` по умолчанию `true`.
+     *
+     * Отступ после отказа (`REPAIR_BACKOFF_MINUTES`) этого не отменяет: он живёт
+     * тиками крона, а не месяцем, виден в сводке (`backedOff`) и кончается сам.
      */
     const adId = dry.adIds['rejected'] ?? '';
     const planning = {
@@ -875,7 +886,7 @@ describe('AI-Модератор: отказ площадки → перепис�
     // Новый вердикт — новый вход модели, а значит и новая отметка.
     direct.setVerdict(IDS.dry.rejected, 'REJECTED', 'Сравнение с конкурентом без ссылки');
     // Отметки прошлых входов этого объявления никуда не делись — считаем прирост.
-    const keysBefore = await prisma.idempotencyKey.count({ where: { entityId: adId } });
+    const keysBefore = await previewKeyCount(adId);
 
     const model = stub();
     const outage = await runModerationCheck({
@@ -886,19 +897,31 @@ describe('AI-Модератор: отказ площадки → перепис�
     expect(outage).toMatchObject({ rejected: 1, planned: 0, unchanged: 0 });
     expect(outage.failures).toHaveLength(1);
     expect(outage.failures[0]).toMatchObject({ stage: `repair:${adId}` });
-    // Ключ отпущен: занятым он остался бы только после полученного ответа.
-    expect(await prisma.idempotencyKey.count({ where: { entityId: adId } })).toBe(keysBefore);
+    // Ключ предпросмотра отпущен: занятым он остался бы только после полученного ответа.
+    expect(await previewKeyCount(adId)).toBe(keysBefore);
+    // Вместо него стоит отступ: до его конца объявление уступает потолок соседям.
+    expect(await prisma.idempotencyKey.count({ where: { key: repairBackoffKey(adId) } })).toBe(1);
 
-    const recovered = await runModerationCheck({
+    const stillWaiting = await runModerationCheck({
       ...planning,
       runClassify: model.classify,
       runRewrite: model.rewrite,
     });
-    expect(recovered).toMatchObject({ rejected: 1, planned: 1, unchanged: 0 });
+    expect(stillWaiting).toMatchObject({ rejected: 1, planned: 0, backedOff: 1 });
+    expect(model.rewriteCalls).toBe(0);
+
+    const later = new Date(Date.now() + (REPAIR_BACKOFF_MINUTES + 1) * 60_000);
+    const recovered = await runModerationCheck({
+      ...planning,
+      runClassify: model.classify,
+      runRewrite: model.rewrite,
+      now: () => later,
+    });
+    expect(recovered).toMatchObject({ rejected: 1, planned: 1, unchanged: 0, backedOff: 0 });
     expect(recovered.failures).toEqual([]);
     expect(model.rewriteCalls).toBe(1);
     // А вот показанный предпросмотр отметку оставляет — иначе следующий тик заплатит снова.
-    expect(await prisma.idempotencyKey.count({ where: { entityId: adId } })).toBe(keysBefore + 1);
+    expect(await previewKeyCount(adId)).toBe(keysBefore + 1);
   });
 
   it('пообъектная ошибка Директа не считается успешной отправкой', async () => {

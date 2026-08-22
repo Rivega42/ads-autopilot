@@ -224,6 +224,42 @@ describe('applyTurnUpdates', () => {
     expect(result.draft.geo).toEqual(['Москва', 'Казань']);
   });
 
+  /**
+   * Ссылка стала обязательной (`REQUIRED_BRIEF_FIELDS`), и это подняло цену
+   * выдумки: поле, без которого интервью не закончить, модель заполнить хочет.
+   * Выдуманный адрес — это чужой сайт, на который клиент купит трафик.
+   */
+  it('принимает ссылку, названную клиентом без схемы', () => {
+    const result = applyTurnUpdates(
+      {},
+      turn({ updates: { landingUrl: 'https://okna-spb.ru/lp' } }),
+      [...CLIENT_SAID, 'сайт okna-spb.ru/lp'],
+    );
+    expect(result.draft.landingUrl).toBe('https://okna-spb.ru/lp');
+    expect(result.accepted).toContain('landingUrl');
+  });
+
+  it('отбрасывает ссылку, которой в ответах клиента нет', () => {
+    const result = applyTurnUpdates(
+      {},
+      turn({ updates: { landingUrl: 'https://it-english.ru' } }),
+      CLIENT_SAID,
+    );
+    expect(result.draft.landingUrl).toBeUndefined();
+    expect(result.rejected[0]).toMatchObject({ field: 'landingUrl', reason: 'url-not-mentioned' });
+  });
+
+  it('не считает названной ссылку, у которой клиент назвал только домен', () => {
+    // «okna-spb.ru» и «okna-spb.ru/akcii» ведут в разные места, и второе клиент
+    // не называл: страница акции могла быть закрыта ещё в прошлом сезоне.
+    const result = applyTurnUpdates(
+      {},
+      turn({ updates: { landingUrl: 'https://okna-spb.ru/akcii' } }),
+      [...CLIENT_SAID, 'наш сайт okna-spb.ru'],
+    );
+    expect(result.draft.landingUrl).toBeUndefined();
+  });
+
   it('не трогает исходный черновик', () => {
     const draft = { product: 'Пылесосы' };
     applyTurnUpdates(draft, turn({ updates: { product: 'Не пылесосы' } }), []);

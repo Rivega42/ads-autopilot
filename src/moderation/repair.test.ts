@@ -14,8 +14,12 @@ import { resolveDeps, type ModerationDeps } from '@/moderation/deps.js';
 import type { ModerationEscalation } from '@/moderation/escalate.js';
 import type { RejectedAd } from '@/moderation/poll.js';
 import {
+  repairBackoffKey,
   repairRejectedAd,
+  BACKOFF_SCOPE,
   ESCALATION_ACTION,
+  PREVIEW_SCOPE,
+  REPAIR_BACKOFF_MINUTES,
   REWRITE_ACTION,
   type RepairContext,
 } from '@/moderation/repair.js';
@@ -75,6 +79,19 @@ beforeEach(() => {
   });
 });
 
+/** Ключи предпросмотра и ключи отступа лежат в одной таблице — разводим по scope. */
+function previewKeys(): string[] {
+  return db.idempotencyKeys.filter((k) => k.scope === PREVIEW_SCOPE).map((k) => k.key);
+}
+
+function backoffKeys(): string[] {
+  return db.idempotencyKeys.filter((k) => k.scope === BACKOFF_SCOPE).map((k) => k.key);
+}
+
+function afterBackoff(): Date {
+  return new Date(Date.now() + (REPAIR_BACKOFF_MINUTES + 1) * 60_000);
+}
+
 interface Harness {
   rc: RepairContext;
   classifyCalls: unknown[];
@@ -87,6 +104,7 @@ function harness(
     adapter?: RepairContext['adapter'];
     rewrites?: readonly (AdRewriteDraft | Error)[];
     channel?: Provider;
+    now?: () => Date;
   } = {},
 ): Harness {
   const classify = queueRunner<RejectionClassificationDraft>([CLASSIFICATION]);
@@ -98,6 +116,7 @@ function harness(
     escalate: async (payload) => {
       escalations.push(payload);
     },
+    ...(over.now === undefined ? {} : { now: over.now }),
   });
 
   const adapter =
@@ -621,12 +640,18 @@ describe('repairRejectedAd: dry-run не платит за один и тот ж
 
     await expect(repairRejectedAd(failing.rc, rejected())).rejects.toThrow('LLM 503');
 
-    expect(db.idempotencyKeys).toEqual([]);
+    expect(previewKeys()).toEqual([]);
 
+    // Отступ по объявлению после отказа остаётся — иначе тот же отказ забирал бы
+    // слот потолка каждые полчаса вечно (см. `REPAIR_BACKOFF_MINUTES`).
     const next = harness({ ctx: DRY() });
-    const outcome = await repairRejectedAd(next.rc, rejected());
+    expect(await repairRejectedAd(next.rc, rejected())).toMatchObject({ status: 'backoff' });
+    expect(next.rewriteCalls).toHaveLength(0);
+
+    const later = harness({ ctx: DRY(), now: afterBackoff });
+    const outcome = await repairRejectedAd(later.rc, rejected());
     expect(outcome).toMatchObject({ status: 'planned' });
-    expect(next.rewriteCalls).toHaveLength(1);
+    expect(later.rewriteCalls).toHaveLength(1);
   });
 
   it('отметка остаётся занятой, когда модель ответила, а вариант не прошёл проверки', async () => {
@@ -657,7 +682,7 @@ describe('repairRejectedAd: dry-run не платит за один и тот ж
 
     await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow('Директ недоступен');
 
-    expect(db.idempotencyKeys).toEqual([]);
+    expect(previewKeys()).toEqual([]);
   });
 
   it('вне dry-run ключ не резервируется: там от повтора держит захват строки', async () => {
@@ -666,5 +691,69 @@ describe('repairRejectedAd: dry-run не платит за один и тот ж
     await repairRejectedAd(h.rc, rejected());
 
     expect(db.idempotencyKeys).toEqual([]);
+  });
+});
+
+/**
+ * Отступ по объявлению после упавшей починки.
+ *
+ * Упавшая починка не двигает ни счётчик попыток, ни статус строки: в dry-run счётчик
+ * не растёт никогда (он тратится только на реальную отправку), а вне dry-run отказ
+ * классификатора или переписывания случается до захвата строки. След не остаётся
+ * нигде — и объявление, на котором модель падает всегда, забирает слот
+ * `MAX_REPAIRS_PER_RUN` каждый тик, а порядок `listAds` стабилен, так что тот же
+ * самый. Лечится отступом: ключ с временем жизни в проекте уже есть.
+ */
+describe('repairRejectedAd: отступ после упавшей починки', () => {
+  it('ставится и вне dry-run — там падение случается до захвата строки', async () => {
+    const h = harness({ ctx: channelContext(false), rewrites: [new Error('LLM 503')] });
+
+    await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow('LLM 503');
+
+    expect(backoffKeys()).toEqual([repairBackoffKey('ad1')]);
+    // Счётчик попыток не тронут: до отправки дело не дошло.
+    expect(db.adOf('ad1').moderationRetries).toBe(0);
+
+    const next = harness({ ctx: channelContext(false) });
+    expect(await repairRejectedAd(next.rc, rejected())).toMatchObject({ status: 'backoff' });
+    expect(next.classifyCalls).toHaveLength(0);
+  });
+
+  it('кончается сам, даже если чистка просроченных ключей встала', async () => {
+    const h = harness({ ctx: channelContext(false), rewrites: [new Error('LLM 503')] });
+    await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow('LLM 503');
+
+    // Ключ никто не удалял — просрочка проверяется на месте.
+    const later = harness({ ctx: channelContext(false), now: afterBackoff });
+    expect(await repairRejectedAd(later.rc, rejected())).toMatchObject({ status: 'rewritten' });
+    expect(backoffKeys()).toEqual([repairBackoffKey('ad1')]);
+  });
+
+  it('не ставится, если отправка упала уже после захвата строки', async () => {
+    // Такой отказ попытку потратил: `Ad.moderationRetries` вырос, и после
+    // `MAX_MODERATION_RETRIES` объявление паркуется само. Отступ поверх этого
+    // отодвигал бы починку на три часа без всякой нужды.
+    const h = harness({
+      ctx: channelContext(false),
+      adapter: fakeAdapter({
+        channel: Provider.YANDEX_DIRECT,
+        updateAdText: () => {
+          throw new Error('Директ недоступен');
+        },
+      }),
+    });
+
+    await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow('Директ недоступен');
+
+    expect(backoffKeys()).toEqual([]);
+    expect(db.adOf('ad1').moderationRetries).toBe(1);
+  });
+
+  it('успешная починка отступа не оставляет', async () => {
+    const h = harness({ ctx: channelContext(false) });
+
+    await repairRejectedAd(h.rc, rejected());
+
+    expect(backoffKeys()).toEqual([]);
   });
 });
