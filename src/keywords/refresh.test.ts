@@ -213,6 +213,43 @@ describe('runWeeklyKeywordRefresh', () => {
     expect(summary.results[0]?.negativesSuppressed).toBe(1);
   });
 
+  it('короткая словоформа живого ключа тоже защищена от минус-слова', async () => {
+    // «тур» и «туры» для Директа одно слово: записав «тур» в группу с живым
+    // ключом «туры в турцию», мы выключили бы показы по собственному ключу.
+    const { db, upsert } = store({
+      queries: [
+        { adGroupId: 'ag1', query: 'туры в турцию цена' },
+        { adGroupId: 'ag2', query: 'курсы английского цена' },
+      ],
+      keywords: [
+        { adGroupId: 'ag1', phrase: 'туры в турцию' },
+        { adGroupId: 'ag2', phrase: 'курсы английского для программистов' },
+      ],
+    });
+    const predictive: RunNegativesAgent = () =>
+      Promise.resolve({
+        data: { negatives: [{ phrase: 'тур', reason: 'информационный спрос' }] },
+        text: '',
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        usage: { tokensIn: 1, tokensOut: 1 },
+        costUsd: 0,
+        latencyMs: 1,
+        cached: false,
+        aiRunId: '4',
+      } satisfies AgentRun<NegativeSuggestion>);
+
+    const summary = await runWeeklyKeywordRefresh({ db, ...BASE, runNegatives: predictive });
+
+    const groups = upsert.mock.calls.map(
+      (call) =>
+        (call[0] as { where: { adGroupId_matchType_phrase: { adGroupId: string } } }).where
+          .adGroupId_matchType_phrase.adGroupId,
+    );
+    expect(groups).toEqual(['ag2']);
+    expect(summary.results[0]?.negativesSuppressed).toBe(1);
+  });
+
   it('предсказание без живых ключей никуда не пишется: проверить его не обо что', async () => {
     const { db, upsert } = store({
       queries: [

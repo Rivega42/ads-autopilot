@@ -53,6 +53,17 @@ describe('crudeStem', () => {
     expect(crudeStem('чай')).toBe('чай');
   });
 
+  it('сводит и короткие словоформы: «роза» и «розы» для Директа одно слово', () => {
+    // Основа нужна ровно для проверки самоминусовки, а Директ минусует по лемме.
+    // Пока «роза» и «розы» давали разные основы, минус-слово проходило проверку
+    // и выключало собственный ключ клиента.
+    expect(crudeStem('роза')).toBe(crudeStem('розы'));
+    expect(crudeStem('тур')).toBe(crudeStem('туры'));
+    expect(crudeStem('окно')).toBe(crudeStem('окна'));
+    expect(crudeStem('дом')).toBe(crudeStem('дома'));
+    expect(crudeStem('слой')).toBe(crudeStem('слои'));
+  });
+
   it('в ключ дедупликации не попадает: словоформы — разные частоты в Wordstat', () => {
     expect(canonicalKey('курс английского')).not.toBe(canonicalKey('курсы английского'));
   });

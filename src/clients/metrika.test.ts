@@ -8,7 +8,10 @@ const { MetrikaClient, METRIKA_MAX_PAGES, METRIKA_PAGE_LIMIT } =
   await import('@/clients/metrika.js');
 
 interface MetrikaPage {
-  data: Array<{ dimensions: Array<{ name: string | null }>; metrics: Array<number | null> }>;
+  data: Array<{
+    dimensions: Array<{ name: string | null; id?: string | number }>;
+    metrics: Array<number | null>;
+  }>;
   total_rows?: number;
 }
 
@@ -87,6 +90,49 @@ describe('getGoalConversions', () => {
     reply([{ data: [{ dimensions: [{ name: null }, { name: '100' }], metrics: [5, 0] }] }]);
 
     expect(await client().getGoalConversions(PARAMS)).toEqual([]);
+  });
+
+  it('берёт из среза и печатное имя, и номер из поля id', async () => {
+    reply([
+      {
+        data: [
+          {
+            dimensions: [{ name: '2026-08-01' }, { id: 87_651_001, name: 'Торты 2026 — поиск' }],
+            metrics: [5, 1200],
+          },
+        ],
+      },
+    ]);
+
+    const rows = await client().getGoalConversions(PARAMS);
+
+    // Номер не выцарапывается из имени: Метрика назвала его сама.
+    expect(rows[0]).toEqual({
+      date: '2026-08-01',
+      campaignLabel: 'Торты 2026 — поиск',
+      campaignId: '87651001',
+      goalId: 777,
+      conversions: 5,
+      revenue: 1200,
+    });
+  });
+
+  it('нечисловой id среза номером кампании не притворяется', async () => {
+    reply([
+      {
+        data: [
+          {
+            dimensions: [{ name: '2026-08-01' }, { id: 'не определено', name: 'Не определено' }],
+            metrics: [1, 0],
+          },
+        ],
+      },
+    ]);
+
+    const rows = await client().getGoalConversions(PARAMS);
+
+    expect(rows[0]).not.toHaveProperty('campaignId');
+    expect(rows[0]).toMatchObject({ campaignLabel: 'Не определено' });
   });
 
   it('401 от Метрики — это ошибка авторизации, а не пустой отчёт', async () => {

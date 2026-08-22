@@ -123,6 +123,25 @@ describe('selectNegatives', () => {
     expect(result.dropped).toEqual([{ phrase: 'английский', reason: 'self-harm' }]);
   });
 
+  it('короткая словоформа не проносит минус-слово мимо защиты ядра', () => {
+    // Директ минусует по лемме: «тур» выключит показы по ключу «туры в турцию»
+    // ровно так же, как «туры». Проверка обязана видеть это в обе стороны —
+    // короткая форма может оказаться и в минус-слове, и в самом ядре.
+    const short = selectNegatives({
+      candidates: [candidate('тур')],
+      protectedPhrases: ['туры в турцию'],
+    });
+    expect(short.negatives).toEqual([]);
+    expect(short.dropped).toEqual([{ phrase: 'тур', reason: 'self-harm' }]);
+
+    const long = selectNegatives({
+      candidates: [candidate('розы')],
+      protectedPhrases: ['роза доставка'],
+    });
+    expect(long.negatives).toEqual([]);
+    expect(long.dropped).toEqual([{ phrase: 'розы', reason: 'self-harm' }]);
+  });
+
   it('схлопывает дубликаты по каноническому ключу', () => {
     const result = selectNegatives({
       candidates: [candidate('Бесплатно'), candidate('бесплатно')],

@@ -16,10 +16,26 @@ const log = logger.child({ scope: 'metrika' });
  * и с собственной моделью атрибуции — для сверки нужен независимый источник.
  */
 
+/**
+ * Значение среза. Кроме печатного имени Метрика кладёт сюда `id` справочника —
+ * для среза кампании Директа это её номер, и он не требует разбора строки.
+ *
+ * `id` объявлен необязательным, потому что у среза даты его нет вовсе, а у
+ * остальных срезов его наличие на живом счётчике не проверено (см.
+ * `@needs-live-token` ниже). Схема с `passthrough` его и раньше пропускала —
+ * просто никто не читал.
+ */
+const dimensionSchema = z
+  .object({
+    name: z.string().nullable(),
+    id: z.union([z.string(), z.number()]).nullish(),
+  })
+  .passthrough();
+
 const metrikaResponseSchema = z.object({
   data: z.array(
     z.object({
-      dimensions: z.array(z.object({ name: z.string().nullable() }).passthrough()),
+      dimensions: z.array(dimensionSchema),
       metrics: z.array(z.number().nullable()),
     }),
   ),
@@ -30,8 +46,20 @@ const metrikaResponseSchema = z.object({
 export interface MetrikaGoalStat {
   /** yyyy-MM-dd */
   date: string;
-  /** ID кампании Директа, если срез запрошен по нему. */
-  campaignExternalId?: string;
+  /**
+   * Печатное значение среза кампании Директа: то ли голый номер, то ли имя
+   * кампании с номером внутри, то ли имя без номера вовсе. Не идентификатор —
+   * сопоставлять по нему в лоб нельзя.
+   */
+  campaignLabel?: string;
+  /**
+   * Номер кампании Директа из поля `id` того же среза, когда Метрика его прислала.
+   *
+   * @needs-live-token наличие поля на живом счётчике не проверено. Поэтому оно
+   * не заменяет разбор имени, а дополняет его: сопоставление ниже по течению
+   * принимает оба варианта и выбирает тот, что совпал с кампанией клиента.
+   */
+  campaignId?: string;
   goalId: number;
   conversions: number;
   revenue: number;
@@ -60,6 +88,18 @@ export const METRIKA_MAX_PAGES = 50;
 
 type MetrikaRow = z.infer<typeof metrikaResponseSchema>['data'][number];
 
+/**
+ * `id` среза, если это номер. Всё остальное — `undefined`: у части срезов там
+ * лежит строковый ключ справочника, и выдавать его за номер кампании нельзя.
+ */
+function numericId(raw: string | number | null | undefined): string | undefined {
+  if (typeof raw === 'number')
+    return Number.isSafeInteger(raw) && raw > 0 ? String(raw) : undefined;
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.trim();
+  return /^[1-9]\d*$/.test(trimmed) ? trimmed : undefined;
+}
+
 function toGoalStats(
   rows: readonly MetrikaRow[],
   goalId: number,
@@ -70,14 +110,16 @@ function toGoalStats(
     // Строки без даты бессмысленны для дневной статистики — отбрасываем явно.
     if (!date) return [];
 
-    const campaign = byCampaign ? row.dimensions[1]?.name : undefined;
+    const campaign = byCampaign ? row.dimensions[1] : undefined;
     const stat: MetrikaGoalStat = {
       date,
       goalId,
       conversions: row.metrics[0] ?? 0,
       revenue: row.metrics[1] ?? 0,
     };
-    if (campaign) stat.campaignExternalId = campaign;
+    if (campaign?.name) stat.campaignLabel = campaign.name;
+    const campaignId = numericId(campaign?.id);
+    if (campaignId !== undefined) stat.campaignId = campaignId;
     return [stat];
   });
 }

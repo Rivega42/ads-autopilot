@@ -63,6 +63,21 @@ export interface MetrikaSyncResult {
   zeroed: number;
   /** Строк, чью кампанию не удалось сопоставить с нашей БД. */
   unresolved: number;
+  /**
+   * Значения среза несопоставленных строк — до `UNRESOLVED_SAMPLE_LIMIT` штук.
+   *
+   * Счётчика мало: по одному числу нельзя отличить «Метрика помнит кампанию,
+   * которой у нас нет» от «мы не разобрали имя собственной кампании», а
+   * последствия у этих случаев разные. Значение среза называет случай прямо.
+   */
+  unresolvedSamples: string[];
+  /**
+   * Обнуление окна отменено, потому что ответ Метрики не лёг ни на одну кампанию.
+   *
+   * Обнуление по молчанию Метрики — задуманное поведение (см. докблок
+   * `syncMetrikaConversions`), обнуление по неразобранному ответу — нет.
+   */
+  zeroingSuspended: boolean;
   /** Что реально лежит в колонке `conversions` у этого клиента за окно. */
   attribution: AttributionSummary;
 }
@@ -143,18 +158,63 @@ function hasLegacyConfig(credentials: Record<string, unknown>): boolean {
   return LEGACY_CONFIG_KEYS.some((key) => credentials[key] !== undefined);
 }
 
+/** Все группы цифр значения среза. Год в имени — такая же группа, как номер. */
+const DIGIT_GROUPS = /\d+/gu;
+
+/** Сколько несопоставленных значений показать человеку. Больше — это уже лог, а не сигнал. */
+const UNRESOLVED_SAMPLE_LIMIT = 5;
+
+export type DirectCampaignMatch =
+  /** Ровно одна кампания клиента: строку можно записывать. */
+  | { status: 'matched'; externalId: string }
+  /** Кандидатов несколько, и все они наши: какой из них номер кампании — неизвестно. */
+  | { status: 'ambiguous'; candidates: string[] }
+  /** Ни один кандидат не совпал с кампанией клиента. */
+  | { status: 'unmatched'; candidates: string[] };
+
 /**
- * Идентификатор кампании Директа из значения среза `ym:s:lastsignDirectClickOrder`.
+ * Кампания Директа для строки Метрики.
  *
- * @needs-live-token формат значения не проверен на живом счётчике: Метрика
- * отдаёт то чистый номер, то номер внутри человекочитаемого имени. Разбираем
- * оба варианта; всё остальное честно считаем несопоставленным, а не гадаем.
+ * Раньше номер выцарапывался из значения среза первой же группой цифр длиной
+ * 4+, и на имени вида «Поиск — торты 2026 (Москва)» ею оказывался год. Строка
+ * либо не сопоставлялась ни с чем, либо — хуже — сопоставлялась с чужой
+ * кампанией, если у клиента нашлась кампания с таким номером.
+ *
+ * Поэтому решает не разбор строки, а сверка с кабинетом: из значения среза
+ * берутся ВСЕ кандидаты — поле `id` (если Метрика его прислала) и каждая группа
+ * цифр в имени, — и остаются те, что совпали с `externalId` уже загруженных
+ * кампаний этого клиента. Год кампанией клиента не является и отсеивается сам,
+ * гадать про формат значения не приходится, а неоднозначность («наших» совпало
+ * несколько) честно называется неоднозначностью, а не берётся первой попавшейся.
+ *
+ * @needs-live-token формат значения на живом счётчике по-прежнему не проверен —
+ * именно поэтому принимаются оба источника кандидатов сразу.
  */
-export function directCampaignId(dimension: string | undefined): string | undefined {
-  if (!dimension) return undefined;
-  const trimmed = dimension.trim();
-  if (/^\d+$/.test(trimmed)) return trimmed;
-  return /(\d{4,})/.exec(trimmed)?.[1];
+export function directCampaignId(
+  row: Pick<MetrikaGoalStat, 'campaignId' | 'campaignLabel'>,
+  known: ReadonlySet<string>,
+): DirectCampaignMatch {
+  const candidates = campaignCandidates(row);
+  const ours = candidates.filter((candidate) => known.has(candidate));
+  const [first, second] = ours;
+
+  if (first !== undefined && second === undefined) return { status: 'matched', externalId: first };
+  if (second !== undefined) return { status: 'ambiguous', candidates: ours };
+  return { status: 'unmatched', candidates };
+}
+
+function campaignCandidates(row: Pick<MetrikaGoalStat, 'campaignId' | 'campaignLabel'>): string[] {
+  const candidates: string[] = [];
+  const id = row.campaignId?.trim();
+  if (id) candidates.push(id);
+  const label = row.campaignLabel?.trim();
+  if (label) candidates.push(...(label.match(DIGIT_GROUPS) ?? []));
+  return [...new Set(candidates)];
+}
+
+/** Что показать в логе и в результате, когда строка не легла ни на одну кампанию. */
+function unresolvedLabel(row: Pick<MetrikaGoalStat, 'campaignId' | 'campaignLabel'>): string {
+  return row.campaignLabel ?? (row.campaignId !== undefined ? `#${row.campaignId}` : '(пусто)');
 }
 
 /**
@@ -172,6 +232,14 @@ export function directCampaignId(dimension: string | undefined): string | undefi
  * модели атрибуции, отчёт складывал их в CPA, которого не существует ни в
  * одной из них, а оптимизатор перекладывал бюджет на кампанию просто за то,
  * что её не оказалось в ответе Метрики.
+ *
+ * У обнуления ровно одно основание — молчание Метрики про кампанию-день. Строка,
+ * которую мы получили, но не смогли адресовать, таким основанием НЕ является:
+ * раньше эти два случая были неразличимы, и достаточно было года в названии
+ * кампании, чтобы её конверсии за всё окно уехали в ноль, CPA — в `null`, а
+ * оптимизатор увидел «расход есть, конверсий нет» и снял кампанию с показов.
+ * Поэтому несопоставленные строки считаются, попадают в лог и в результат, а
+ * если не сопоставилась ни одна — обнуление за прогон отменяется целиком.
  *
  * Каждый прогон заканчивается сверкой источников по окну — в том числе когда
  * счётчик не настроен: единственность модели не должна держаться на том, что
@@ -192,6 +260,8 @@ export async function syncMetrikaConversions(
     written: 0,
     zeroed: 0,
     unresolved: 0,
+    unresolvedSamples: [],
+    zeroingSuspended: false,
     attribution: emptyAttribution(),
   };
 
@@ -239,7 +309,37 @@ export async function syncMetrikaConversions(
     return { ...base, configured: true, attribution: await audit() };
   }
 
-  const { totals, unresolved } = groupByCampaignDate(rows, byExternalId);
+  const { totals, unresolved, unresolvedSamples } = groupByCampaignDate(rows, byExternalId);
+  const seen = { fetched: rows.length, unresolved, unresolvedSamples };
+
+  if (unresolved > 0) {
+    // Раньше несопоставленная строка не оставляла в логе ничего: счётчик уезжал
+    // в результат прогона, а прогон в кроне никто не читает. Между тем именно
+    // здесь видно и «кампанию переименовали», и «Метрика знает кампанию, которой
+    // у нас нет», — и различить их можно только по самому значению среза.
+    log.warn(
+      { clientId, ...range, ...seen },
+      'metrika rows were not matched to a campaign of this client',
+    );
+  }
+
+  // Ни одна строка не легла на кампании клиента — та же ситуация, что и пустой
+  // ответ: сопоставление сломано, и обнулять по нему окно нельзя. Разница только
+  // в том, что здесь конверсии Метрика прислала, а адресовать их некуда.
+  if (totals.length === 0) {
+    log.warn(
+      { clientId, ...range, ...seen },
+      'no metrika row matched a campaign of this client, keeping stored conversions',
+    );
+    return {
+      ...base,
+      ...seen,
+      configured: true,
+      zeroingSuspended: true,
+      attribution: await audit(),
+    };
+  }
+
   const written = await applyConversions(deps.db, totals);
   const zeroed = await zeroUnreported(
     deps.db,
@@ -251,11 +351,10 @@ export async function syncMetrikaConversions(
   log.info({ clientId, ...range, written, zeroed, unresolved }, 'metrika conversions applied');
   return {
     ...base,
+    ...seen,
     configured: true,
-    fetched: rows.length,
     written,
     zeroed,
-    unresolved,
     attribution: await audit(),
   };
 }
@@ -304,15 +403,18 @@ interface ConversionTotal {
 function groupByCampaignDate(
   rows: readonly MetrikaGoalStat[],
   byExternalId: Map<string, string>,
-): { totals: ConversionTotal[]; unresolved: number } {
+): { totals: ConversionTotal[]; unresolved: number; unresolvedSamples: string[] } {
   const byKey = new Map<string, ConversionTotal>();
+  const known = new Set(byExternalId.keys());
+  const samples = new Set<string>();
   let unresolved = 0;
 
   for (const row of rows) {
-    const externalId = directCampaignId(row.campaignExternalId);
-    const entityId = externalId ? byExternalId.get(externalId) : undefined;
-    if (!entityId) {
+    const match = directCampaignId(row, known);
+    const entityId = match.status === 'matched' ? byExternalId.get(match.externalId) : undefined;
+    if (entityId === undefined) {
       unresolved += 1;
+      if (samples.size < UNRESOLVED_SAMPLE_LIMIT) samples.add(unresolvedLabel(row));
       continue;
     }
     const key = `${entityId} ${row.date}`;
@@ -321,7 +423,7 @@ function groupByCampaignDate(
     byKey.set(key, total);
   }
 
-  return { totals: [...byKey.values()], unresolved };
+  return { totals: [...byKey.values()], unresolved, unresolvedSamples: [...samples] };
 }
 
 /**
