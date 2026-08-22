@@ -10,7 +10,7 @@ importers:
     dependencies:
       '@anthropic-ai/sdk':
         specifier: ^0.115.0
-        version: 0.115.0(zod@3.25.76)
+        version: 0.115.0(zod@4.4.3)
       '@fastify/cors':
         specifier: ^11.3.0
         version: 11.3.0
@@ -58,7 +58,7 @@ importers:
         version: 6.0.0
       openai:
         specifier: ^7.4.0
-        version: 7.4.0(zod@3.25.76)
+        version: 7.4.0(zod@4.4.3)
       p-queue:
         specifier: ^9.3.3
         version: 9.3.3
@@ -75,8 +75,8 @@ importers:
         specifier: ^7.9.1
         version: 7.9.1(@types/react-dom@18.3.7(@types/react@19.2.18))(@types/react@19.2.18)(magicast@0.3.5)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(typescript@5.9.3)
       zod:
-        specifier: ^3.23.0
-        version: 3.25.76
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@commitlint/cli':
         specifier: ^19.5.0
@@ -2023,6 +2023,7 @@ packages:
   eslint@9.39.5:
     resolution: {integrity: sha512-DgZS62aPLXKlnxILS/AYCoRvHaZeXceIzlXPkkGGzJWSow1aEk0lbTlxUSlyjC8jcaKxAdOnTDz+o1JFSBsyjw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'
@@ -3811,8 +3812,8 @@ packages:
   zeptomatch@2.1.0:
     resolution: {integrity: sha512-KiGErG2J0G82LSpniV0CtIzjlJ10E04j02VOudJsPyPwNZgGnRKQy7I1R7GMyg/QswnE4l7ohSGrQbQbjXPPDA==}
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
 snapshots:
 
@@ -3821,12 +3822,12 @@ snapshots:
       '@jridgewell/gen-mapping': 0.3.13
       '@jridgewell/trace-mapping': 0.3.31
 
-  '@anthropic-ai/sdk@0.115.0(zod@3.25.76)':
+  '@anthropic-ai/sdk@0.115.0(zod@4.4.3)':
     dependencies:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.0.0
     optionalDependencies:
-      zod: 3.25.76
+      zod: 4.4.3
 
   '@babel/code-frame@7.29.7':
     dependencies:
@@ -6735,9 +6736,9 @@ snapshots:
     dependencies:
       mimic-function: 5.0.1
 
-  openai@7.4.0(zod@3.25.76):
+  openai@7.4.0(zod@4.4.3):
     optionalDependencies:
-      zod: 3.25.76
+      zod: 4.4.3
 
   optionator@0.9.4:
     dependencies:
@@ -7681,4 +7682,4 @@ snapshots:
       grammex: 3.1.13
       graphmatch: 1.1.1
 
-  zod@3.25.76: {}
+  zod@4.4.3: {}
