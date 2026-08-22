@@ -17,10 +17,15 @@ import {
 } from '@/ai/onboarding/index.js';
 import { approvalActionSchema } from '@/approval/index.js';
 import { submitCampaignPlan } from '@/campaigns/approval.js';
+import {
+  campaignSlot,
+  createAddresses,
+  createdCampaigns,
+  type CreatedCampaign,
+} from '@/campaigns/created.js';
 import { buildRegionTargeting, resolveRegions } from '@/campaigns/geo.js';
-import { campaignCreateKey, PENDING_EXTERNAL_ID } from '@/campaigns/idempotency.js';
 import { DIRECT_MIN_DAILY_BUDGET_RUB } from '@/campaigns/limits.js';
-import type { CampaignPlan, PlannedCampaign } from '@/campaigns/plan.schema.js';
+import type { CampaignPlan } from '@/campaigns/plan.schema.js';
 import {
   planBudgets,
   planCampaigns,
@@ -48,8 +53,10 @@ const log = logger.child({ scope: 'campaign-entry' });
  *
  *  • деньги на модель — все проверки, которые можно сделать без неё (бриф, гео,
  *    бюджет, доступы, уже собранный план), делаются до первого платного вызова;
- *  • бюджет клиента — повторный вход не строит второй план и не выпускает вторую
- *    кампанию: он находит уже собранный план и переспрашивает по нему.
+ *  • бюджет клиента — повторный вход не выпускает вторую кампанию. Что у клиента
+ *    уже создано, считается по ключам идемпотентности (`campaigns/created.ts`),
+ *    а не по последнему плану: план сменяется от любой правки брифа, а кампания
+ *    в кабинете от этого никуда не девается.
  *
  * Формат ответа — не текст, а разбор случая: CLI печатает его подробно, бот шлёт
  * коротко, а решение «можно ли дальше» принимается один раз и в одном месте.
@@ -68,12 +75,12 @@ export interface LiveApproval {
   decision: ApprovalDecision;
   expiresAt: Date;
   chatId: string | null;
-}
-
-export interface CreatedCampaignRef {
-  campaignIndex: number;
-  name: string;
-  externalId: string;
+  /**
+   * Ошибка доставки карточки. Не null — карточки в чате нет, и нажать её некому:
+   * такая заявка живая только в базе (`createApproval` ставит поле ровно на
+   * провале отправки и обнуляет при успехе).
+   */
+  error: string | null;
 }
 
 /** План прошлого захода, годный к переиспользованию, и то, что от него осталось. */
@@ -81,9 +88,9 @@ export interface ReusablePlan {
   plan: CampaignPlan;
   /**
    * Позиции кампаний, которых ещё нет в кабинете, — только по ним выпускаются
-   * карточки. Именно позиции плана, а не порядок в отфильтрованном списке: из
-   * позиции выводится ключ идемпотентности (`campaignCreateKey`), и перенумерация
-   * означала бы вторую кампанию на те же деньги.
+   * карточки. Именно позиции плана, а не порядок в отфильтрованном списке: по
+   * позиции исполнитель апрува находит кампанию в плане, а с ней и её адрес
+   * создания. Перенумерация означала бы карточку не про ту кампанию.
    */
   untouched: number[];
 }
@@ -104,9 +111,9 @@ export type CampaignEntryBlock =
   | { kind: 'landing_missing' }
   | { kind: 'budget_too_small'; dailyBudgetRub: number; minRub: number; notes: string[] }
   | { kind: 'geo_contradiction'; geo: string[]; negativeCities: string[] }
-  | { kind: 'awaiting_decision'; approvals: LiveApproval[] }
-  | { kind: 'attempt_unresolved'; planId: string; campaigns: string[] }
-  | { kind: 'already_created'; planId: string; campaigns: CreatedCampaignRef[] };
+  | { kind: 'awaiting_decision'; approvals: LiveApproval[]; undelivered: LiveApproval[] }
+  | { kind: 'attempt_unresolved'; campaigns: string[] }
+  | { kind: 'already_created'; campaigns: CreatedCampaign[] };
 
 /** Всё проверено, модель ещё не звали. */
 export interface CampaignEntryReady {
@@ -121,6 +128,13 @@ export interface CampaignEntryReady {
   dryRun: boolean;
   /** Готовый план прошлого захода: если он есть, модель звать не придётся. */
   reusablePlan: ReusablePlan | null;
+  /**
+   * Что у клиента уже создано в кабинете — по ключам идемпотентности, а не по
+   * последнему плану. Карточки выпускаются только по местам, которых здесь нет.
+   */
+  created: CreatedCampaign[];
+  /** Живые заявки, которых нет в чате: запуск заменит их новыми карточками. */
+  undelivered: LiveApproval[];
 }
 
 export type CampaignEntryCheck = CampaignEntryBlock | CampaignEntryReady;
@@ -266,61 +280,69 @@ export async function checkCampaignEntry(
     notes.push('Ни один город из брифа не распознан — таргетинг встанет на всю Россию.');
   }
 
+  /**
+   * Недоставленная карточка ожиданием решения не считается: её нет в чате, нажать
+   * её некому, и «реши по карточкам» человеку сказали бы про то, чего он не видит.
+   * Запуск такие заявки закрывает и выпускает карточки заново.
+   */
   const live = await liveApprovals(db, clientId, now);
-  if (live.length > 0) return { kind: 'awaiting_decision', approvals: live };
+  const undelivered = live.filter((a) => a.error !== null);
+  const actionable = live.filter((a) => a.error === null);
+  if (actionable.length > 0) {
+    return { kind: 'awaiting_decision', approvals: actionable, undelivered };
+  }
+  if (undelivered.length > 0) {
+    notes.push(
+      `Карточек прошлого захода не доставлено: ${undelivered.length}. ` +
+        'Запуск выпустит их заново — решать по ним нечего, их нет в чате.',
+    );
+  }
+
+  /**
+   * Что уже создано — спрашиваем у клиента, а не у последнего плана.
+   *
+   * Это и есть защита от второй кампании на те же деньги. План перестаёт быть
+   * последним при любой правке брифа (а `ClientBrief.updatedAt` поднимается даже
+   * на «спасибо» в интервью), и кампании, созданные по нему, вместе с ним
+   * исчезали из виду: новый план — новые ключи, обе кампании «нетронуты», ✅✅ —
+   * дубль. Ключи же переживают любую пересборку плана и любую чистку.
+   */
+  const created = await createdCampaigns(db, clientId);
+  const unresolved = created.filter((c) => c.externalId === null || c.slot === null);
+  if (unresolved.length > 0) {
+    return { kind: 'attempt_unresolved', campaigns: unresolved.map(describeCreated) };
+  }
+
+  const taken = new Set(created.map((c) => c.slot));
+  const wanted = budgets.map((budget) => campaignSlot(budget));
+  const free = wanted.filter((slot) => !taken.has(slot));
+  if (free.length === 0) return { kind: 'already_created', campaigns: created };
+  if (created.length > 0) {
+    // Сводку и карточки человек получит только по недостающим кампаниям: в счёт
+    // нового решения не входят деньги, которые уже тратятся.
+    notes.push(
+      `Кампании этого клиента, уже созданные в кабинете: ${created.length}. ` +
+        'Карточки выпущу только по тем, которых там ещё нет.',
+    );
+  }
 
   const plan = await latestPlan(db, clientId);
   /**
    * План, собранный до последней правки брифа, переиспользовать нельзя: клиент мог
    * поменять бюджет или города, а в плане останутся старые — и человек одобрит
-   * карточку, которая обещает не то, о чём он договорился. Для проверок «уже
-   * создано» и «попытка не завершена» такой план по-прежнему годится: он про то,
-   * что уже произошло, а не про то, что будет.
+   * карточку, которая обещает не то, о чём он договорился.
    */
   const staleBy = plan === null ? null : briefRow.updatedAt > new Date(plan.createdAt);
   let reusable: ReusablePlan | null = null;
-  if (plan?.id) {
-    const states = await planCampaignStates(db, plan.id, plan.campaigns);
-    const unresolved = states.filter((s) => s.state === 'unfinished');
-    if (unresolved.length > 0) {
-      return {
-        kind: 'attempt_unresolved',
-        planId: plan.id,
-        campaigns: unresolved.map((s) => s.name),
-      };
-    }
-    const created = states.filter((s) => s.externalId !== null);
-    if (created.length === states.length) {
-      return {
-        kind: 'already_created',
-        planId: plan.id,
-        campaigns: created.map((s) => ({
-          campaignIndex: s.campaignIndex,
-          name: s.name,
-          externalId: s.externalId ?? '',
-        })),
-      };
-    }
-
-    /**
-     * План создан наполовину: по одной кампании нажали ✅, по другой — ❌.
-     *
-     * Дальше идут только нетронутые. Выпустить карточку на созданную кампанию
-     * деньгами не грозит — ключ идемпотентности не даст создать вторую, — но
-     * человеку показали бы сводку с дневным расходом, куда посчитаны и те деньги,
-     * что уже тратятся, и подписью «после одобрения кампания начинает тратить
-     * дневной бюджет». Нажатие по такой карточке не делает ничего: врёт текст.
-     */
-    if (created.length > 0) {
-      notes.push(
-        `Часть кампаний прошлого плана уже создана: ${created.length} из ${states.length}.`,
-      );
-    }
-    if (staleBy === false) {
-      reusable = {
-        plan,
-        untouched: states.filter((s) => s.state === 'untouched').map((s) => s.campaignIndex),
-      };
+  if (plan && staleBy === false) {
+    const untouched = plan.campaigns
+      .map((campaign, index) => ({ index, slot: campaignSlot(campaign) }))
+      .filter((position) => !taken.has(position.slot));
+    const slots = new Set(untouched.map((position) => position.slot));
+    // План годится, только если он покрывает ровно недостающие места: бюджет мог
+    // вырасти, и нужной кампании в старом плане просто нет.
+    if (slots.size === free.length && free.every((slot) => slots.has(slot))) {
+      reusable = { plan, untouched: untouched.map((position) => position.index) };
     }
   }
 
@@ -337,7 +359,16 @@ export async function checkCampaignEntry(
     regionIds: targeting.regionIds,
     dryRun: effectiveDryRun(opts.dryRun),
     reusablePlan: reusable,
+    created,
+    undelivered,
   };
+}
+
+/** Как назвать созданную кампанию человеку, когда имени из плана нет. */
+function describeCreated(campaign: CreatedCampaign): string {
+  if (campaign.name !== null) return campaign.name;
+  if (campaign.slot !== null) return campaign.slot;
+  return `план ${campaign.address.split(':')[0] ?? '?'} больше не читается — место неизвестно`;
 }
 
 /**
@@ -359,8 +390,13 @@ export async function launchCampaign(
   }
 
   const db = opts.db ?? prisma;
+  const now = (opts.now ?? ((): Date => new Date()))();
   const dryRun = effectiveDryRun(opts.dryRun);
-  const reusable = check.kind === 'ready' && opts.fresh !== true ? check.reusablePlan : null;
+  const fresh = opts.fresh === true;
+  // `already_created` сюда доходит только с явным `fresh`; в обоих случаях список
+  // созданных кампаний нужен целиком — из него берутся адреса операций.
+  const created = check.kind === 'ready' ? check.created : check.campaigns;
+  const reusable = check.kind === 'ready' && !fresh ? check.reusablePlan : null;
 
   let plan: CampaignPlan;
   let campaignIndexes: number[];
@@ -370,7 +406,14 @@ export async function launchCampaign(
   } else {
     const build = opts.planner ?? planCampaigns;
     try {
-      plan = await build(clientId, { db, channels: channelsOf(opts), ...(opts.plan ?? {}) });
+      plan = await build(clientId, {
+        db,
+        channels: channelsOf(opts),
+        // Адрес операции создания уезжает в план: карточка нового плана, выпущенная
+        // на уже созданную кампанию, упрётся в занятый ключ, а не создаст вторую.
+        createAddress: createAddresses(clientId, created, { fresh }),
+        ...(opts.plan ?? {}),
+      });
     } catch (err) {
       // Планировщик — единственный, кто знает, почему план не собрался. Его отказ
       // это не сбой системы, а факт о клиенте: пересказываем человеку как есть.
@@ -379,8 +422,20 @@ export async function launchCampaign(
       }
       throw err;
     }
-    campaignIndexes = plan.campaigns.map((_, index) => index);
+
+    const taken = new Set(created.map((campaign) => campaign.slot));
+    campaignIndexes = plan.campaigns
+      .map((campaign, index) => ({ index, slot: campaignSlot(campaign) }))
+      .filter((position) => fresh || !taken.has(position.slot))
+      .map((position) => position.index);
+    // Свежий план не принёс ни одной недостающей кампании: предлагать нечего, и
+    // карточка «на всё созданное» была бы предложением заплатить второй раз.
+    if (campaignIndexes.length === 0) return { kind: 'already_created', campaigns: created };
   }
+
+  // Заявки, до чата не доехавшие, закрываем до выпуска новых: иначе на ту же
+  // позицию плана повисло бы две карточки, из которых нажимается одна.
+  if (check.kind === 'ready') await supersedeUndelivered(db, check.undelivered, now);
 
   const submit = opts.submit ?? submitCampaignPlan;
   const approvals = await submit(plan, {
@@ -435,7 +490,14 @@ async function liveApprovals(
       ],
     },
     orderBy: { createdAt: 'asc' },
-    select: { id: true, payload: true, decision: true, expiresAt: true, chatId: true },
+    select: {
+      id: true,
+      payload: true,
+      decision: true,
+      expiresAt: true,
+      chatId: true,
+      error: true,
+    },
   });
 
   const live: LiveApproval[] = [];
@@ -452,9 +514,46 @@ async function liveApprovals(
       decision: row.decision,
       expiresAt: row.expiresAt,
       chatId: row.chatId,
+      error: row.error ?? null,
     });
   }
   return live;
+}
+
+/**
+ * Закрывает заявки, карточки которых Telegram не принял.
+ *
+ * Ждать их истечения нельзя: до APPROVAL_TIMEOUT_HOURS вход считал бы, что решение
+ * в процессе, и повтор команды ничего бы не выпустил. Оставить висеть — тоже:
+ * тогда на одну позицию плана пришлось бы две PENDING-заявки, и вторая карточка
+ * ушла бы в чат при живой первой.
+ *
+ * EXPIRED, а не FAILED: решения человека не было и применение не начиналось —
+ * заявка просто не дожила до чата. Причину дописываем в `error`, чтобы по строке
+ * было видно, что её закрыл повтор, а не крон.
+ */
+async function supersedeUndelivered(
+  db: CampaignEntryStore,
+  approvals: readonly LiveApproval[],
+  now: Date,
+): Promise<void> {
+  for (const approval of approvals) {
+    const closed = await db.pendingApproval.updateMany({
+      // Условный UPDATE, как везде в approval-модуле: между чтением и записью
+      // человек мог нажать кнопку, и выиграть должен ровно один из нас.
+      where: { id: approval.id, decision: ApprovalDecision.PENDING },
+      data: {
+        decision: ApprovalDecision.EXPIRED,
+        decidedAt: now,
+        error: `карточка не доставлена (${approval.error ?? 'причина не записана'}); заменена новой`,
+      },
+    });
+    if (closed.count === 0) {
+      log.warn({ approvalId: approval.id }, 'undelivered approval was taken by someone else');
+      continue;
+    }
+    log.info({ approvalId: approval.id }, 'undelivered approval superseded by a new card');
+  }
 }
 
 async function latestPlan(db: CampaignEntryStore, clientId: string): Promise<CampaignPlan | null> {
@@ -469,49 +568,9 @@ async function latestPlan(db: CampaignEntryStore, clientId: string): Promise<Cam
     return await loadPlan(db, row.id);
   } catch (err) {
     // План писали мы сами: нечитаемый план означает, что код уехал вперёд данных.
-    // Переспрашивать по нему нельзя, а строить новый — можно: из нечитаемого
-    // плана ничего не создавалось (иначе его читал бы и исполнитель апрува).
+    // Переспрашивать по нему нельзя. Строить новый поверх него — можно: что по
+    // нему успели создать, видно по ключам (`createdCampaigns`), а не по payload.
     log.warn({ clientId, planId: row.id, err: describeError(err) }, 'latest plan unreadable');
     return null;
   }
-}
-
-interface PlanCampaignState {
-  campaignIndex: number;
-  name: string;
-  /** `created` — кампания в кабинете; `unfinished` — попытка начата и не завершена. */
-  state: 'untouched' | 'unfinished' | 'created';
-  externalId: string | null;
-}
-
-/**
- * Что стало с кампаниями плана — по ключам идемпотентности, а не по строкам заявок.
- *
- * Заявка со статусом APPLIED не означает созданной кампании: в dry-run она
- * применяется точно так же, ничего не создавая. Ключ, наоборот, резервируется
- * ровно перед обращением к площадке и дописывается её ответом — это и есть
- * единственная запись о том, что кабинет о кампании знает.
- */
-async function planCampaignStates(
-  db: CampaignEntryStore,
-  planId: string,
-  campaigns: readonly PlannedCampaign[],
-): Promise<PlanCampaignState[]> {
-  const keys = campaigns.map((_, index) => campaignCreateKey(planId, index));
-  const rows = await db.idempotencyKey.findMany({
-    where: { key: { in: keys } },
-    select: { key: true, entityId: true },
-  });
-  const byKey = new Map(rows.map((row) => [row.key, row.entityId]));
-
-  return campaigns.map((campaign, index) => {
-    const entityId = byKey.get(campaignCreateKey(planId, index));
-    if (entityId === undefined) {
-      return { campaignIndex: index, name: campaign.name, state: 'untouched', externalId: null };
-    }
-    if (entityId === PENDING_EXTERNAL_ID) {
-      return { campaignIndex: index, name: campaign.name, state: 'unfinished', externalId: null };
-    }
-    return { campaignIndex: index, name: campaign.name, state: 'created', externalId: entityId };
-  });
 }

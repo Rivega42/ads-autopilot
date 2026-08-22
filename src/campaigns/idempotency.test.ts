@@ -141,6 +141,22 @@ describe('createInMemoryCampaignIdempotency', () => {
   });
 });
 
+describe('campaignCreateKey', () => {
+  it('адрес из плана становится ключом целиком', () => {
+    // Ключ не помнит, из какого плана кампания родилась: план сменится, а адрес
+    // останется — на этом и держится защита от второй кампании.
+    expect(campaignCreateKey('plan-2', 3, 'client-1:YANDEX_DIRECT:search:0')).toBe(
+      `${CAMPAIGN_CREATE_SCOPE}:client-1:YANDEX_DIRECT:search:0`,
+    );
+  });
+
+  it('план без адреса ключей не меняет', () => {
+    // Планы, сохранённые до появления адреса, обязаны заливаться по-прежнему:
+    // одобренная карточка не должна перестать работать в момент выката.
+    expect(campaignCreateKey('plan-1', 0)).toBe(`${CAMPAIGN_CREATE_SCOPE}:plan-1:0`);
+  });
+});
+
 describe('вызовы БД', () => {
   it('release использует deleteMany: отсутствующая строка — не ошибка', async () => {
     const deleteMany = vi.fn(() => Promise.resolve({ count: 0 }));

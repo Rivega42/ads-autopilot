@@ -267,7 +267,9 @@ async function createOneCampaign(args: CreateArgs): Promise<CampaignApplyResult>
     };
   }
 
-  const key = campaignCreateKey(planId, index);
+  // Адрес из плана, а не «планид плюс позиция»: план, собранный поверх уже
+  // созданной кампании, наследует её адрес, и повтор упирается в занятый ключ.
+  const key = campaignCreateKey(planId, index, item.createKey);
   const reservation = await args.idempotency.reserve(key);
   if (reservation.status === 'duplicate') {
     return {

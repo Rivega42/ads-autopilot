@@ -55,10 +55,18 @@ export {
   type CampaignEntryStore,
   type CampaignLaunchOptions,
   type CampaignLaunchOutcome,
-  type CreatedCampaignRef,
   type LiveApproval,
   type ReusablePlan,
 } from '@/campaigns/entry.js';
+
+export {
+  campaignSlot,
+  createAddresses,
+  createdCampaigns,
+  type CreateAddressFor,
+  type CreatedCampaign,
+  type CreatedStore,
+} from '@/campaigns/created.js';
 
 export {
   renderEntryBlock,

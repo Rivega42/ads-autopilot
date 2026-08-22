@@ -3,6 +3,7 @@ import { Provider, type PrismaClient } from '@prisma/client';
 import { parseCompleteBrief, type ClientBriefData } from '@/ai/onboarding/brief.schema.js';
 import { loadPrompt } from '@/ai/prompt-loader.js';
 import { splitBudget, totalDailyBudget, type BudgetPart } from '@/campaigns/budget.js';
+import type { CreateAddressFor } from '@/campaigns/created.js';
 import { buildRegionTargeting, regionName, resolveRegions } from '@/campaigns/geo.js';
 import {
   DIRECT_MAX_ADS_PER_GROUP,
@@ -93,6 +94,14 @@ export type RunTextsAgent = (
 export interface PlanCampaignsOptions {
   /** Каналы плана. По умолчанию — только Директ: только для него есть создание. */
   channels?: Provider[];
+  /**
+   * Откуда кампании плана берут адрес операции создания (`PlannedCampaign.createKey`).
+   *
+   * Решает не планировщик: адрес зависит от того, что у клиента уже создано и просил
+   * ли человек ещё одну кампанию поверх (см. `campaigns/created.ts`). Без него план
+   * получает ключи старого формата — так собирают план тесты, которым до кабинета дела нет.
+   */
+  createAddress?: CreateAddressFor;
   /** false — план не сохраняется и `id` остаётся null (CLI-просмотр). */
   persist?: boolean;
   db?: PlannerStore;
@@ -219,7 +228,7 @@ export async function planCampaigns(
   }
 
   const campaigns: PlannedCampaign[] = budgets.map((budget) =>
-    buildCampaign(brief, structure, groups, texts, budget),
+    buildCampaign(brief, structure, groups, texts, budget, opts.createAddress?.(budget)),
   );
 
   const plan = campaignPlanSchema.parse({
@@ -634,6 +643,7 @@ function buildCampaign(
   groups: readonly GroupSkeleton[],
   texts: TextsByGroup,
   budget: CampaignBudget,
+  createKey: string | undefined,
 ): PlannedCampaign {
   const bid = startingBid(brief.targetCpaRub, budget.placement);
 
@@ -653,6 +663,7 @@ function buildCampaign(
   return {
     channel: budget.channel,
     placement: budget.placement,
+    ...(createKey === undefined ? {} : { createKey }),
     name: campaignName(brief, budget.placement),
     dailyBudgetRub: budget.dailyBudgetRub,
     targetCpaRub: brief.targetCpaRub,

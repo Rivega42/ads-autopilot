@@ -13,6 +13,7 @@ import {
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { registeredChannels } from '@/channels/registry.js';
 import { generateCreativeSetOnDemand } from '@/creatives/index.js';
+import { credentialsUsageLines, runCredentialsCommand } from '@/credentials/index.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import { runIngestion, runSearchQueryIngestion } from '@/ingestion/index.js';
@@ -36,6 +37,7 @@ function printUsage(): void {
       'Команды:',
       '  channels            показать зарегистрированные адаптеры',
       '  clients             список клиентов и их каналов',
+      ...credentialsUsageLines(),
       '  ingest              загрузить сущности и статистику из кабинетов',
       '  search-queries      загрузить поисковые запросы',
       '  campaign            проверить готовность к запуску; с --apply — собрать план',
@@ -50,6 +52,7 @@ function printUsage(): void {
       '  --segment <имя>     сегмент для creatives (по умолчанию — горячий спрос)',
       '  --new               campaign: собрать новый план, даже если кампании уже созданы',
       '  --chat <id>         campaign: куда слать карточки (по умолчанию — чат клиента)',
+      '  --provider <канал>  credentials: yandex_direct | vk_ads',
       '  --help',
       '',
       'Без --apply ни одна команда ничего не пишет и не тратит деньги.',
@@ -296,8 +299,14 @@ const SETTLED_BLOCKS: ReadonlySet<CampaignEntryBlock['kind']> = new Set([
  * Это и есть смысл ненулевого кода возврата: не «ответ отрицательный», а «без
  * тебя дальше не поедет» — дыра в брифе, отсутствующий токен, незавершённая
  * попытка создания, неизвестный клиент в аргументе.
+ *
+ * «Карточка ждёт решения» штатна ровно до тех пор, пока карточка есть в чате.
+ * Заявка, которую Telegram не принял, нажимается некем: чинить нужно доставку,
+ * и скрипт, обходящий клиентов, обязан увидеть это кодом возврата, а не строкой
+ * «реши по карточкам» среди успешных.
  */
 function needsHumanFix(block: CampaignEntryBlock): boolean {
+  if (block.kind === 'awaiting_decision') return block.undelivered.length > 0;
   return !SETTLED_BLOCKS.has(block.kind);
 }
 
@@ -437,6 +446,7 @@ async function main(): Promise<void> {
       segment: { type: 'string' },
       new: { type: 'boolean', default: false },
       chat: { type: 'string' },
+      provider: { type: 'string' },
       help: { type: 'boolean', default: false },
     },
   });
@@ -467,6 +477,14 @@ async function main(): Promise<void> {
         apply: values.apply,
         fresh: values.new,
         ...(values.chat === undefined ? {} : { chatId: values.chat }),
+      });
+      break;
+    case 'credentials':
+      await runCredentialsCommand({
+        action: positionals[1],
+        clientId: values.client,
+        provider: values.provider,
+        apply: values.apply,
       });
       break;
     case 'optimize':

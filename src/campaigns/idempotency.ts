@@ -60,11 +60,24 @@ export interface CampaignIdempotency {
 }
 
 /**
- * Ключ операции создания. Детерминированный: те же план и позиция — тот же ключ,
- * поэтому повторный запуск того же плана схлопывается, а новый план — нет.
+ * Ключ операции создания.
+ *
+ * Адрес операции живёт в плане (`PlannedCampaign.createKey`) и говорит, кому и на
+ * какое место кампания создаётся: `<clientId>:<канал>:<размещение>:<поколение>`
+ * (см. `campaigns/created.ts`). План, собранный поверх уже созданной кампании,
+ * наследует её адрес — и ✅ по его карточке упирается в занятый ключ вместо того,
+ * чтобы создать вторую кампанию с тем же именем и тем же дневным бюджетом.
+ *
+ * Пока адрес выводился из `planId` и позиции, детерминированность ключа кончалась
+ * на границе плана: любая правка брифа рождала новый план, а с ним — новые ключи
+ * на те же кампании.
+ *
+ * Планы, сохранённые до появления адреса, ключей не меняют: без `address` формула
+ * ровно прежняя, и кампания, созданная по такому плану, остаётся найденной по
+ * своему старому ключу.
  */
-export function campaignCreateKey(planId: string, campaignIndex: number): string {
-  return `${CAMPAIGN_CREATE_SCOPE}:${planId}:${campaignIndex}`;
+export function campaignCreateKey(planId: string, campaignIndex: number, address?: string): string {
+  return `${CAMPAIGN_CREATE_SCOPE}:${address ?? `${planId}:${campaignIndex}`}`;
 }
 
 function isUniqueViolation(err: unknown): boolean {

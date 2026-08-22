@@ -155,6 +155,13 @@ export type CampaignPlacement = z.infer<typeof campaignPlacementSchema>;
 export const plannedCampaignSchema = z.object({
   channel: z.nativeEnum(Provider),
   placement: campaignPlacementSchema,
+  /**
+   * Адрес операции создания: из него выводится ключ идемпотентности
+   * (`campaignCreateKey`). Необязателен, потому что планы, сохранённые до его
+   * появления, обязаны читаться и заливаться по-прежнему — иначе одобренная
+   * карточка перестала бы работать в момент выката.
+   */
+  createKey: z.string().min(1).max(200).optional(),
   name: trimmed(1, 255),
   dailyBudgetRub: z.number().min(DIRECT_MIN_DAILY_BUDGET_RUB),
   targetCpaRub: z.number().positive(),

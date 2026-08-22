@@ -40,12 +40,21 @@ function briefOf(over: Partial<ClientBriefData> = {}): ClientBriefData {
   };
 }
 
+/**
+ * План на `campaigns` кампаний.
+ *
+ * Места (канал × поиск/РСЯ) обязаны различаться: `planBudgets` выдаёт ровно одну
+ * кампанию на место, и место — это адрес, по которому система помнит, что уже
+ * создано. Фикстура с двумя одинаковыми местами описывала бы план, которого не
+ * бывает, и прятала бы ровно ту проверку, ради которой места и заведены.
+ */
 function planOf(campaigns = 1): CampaignPlan {
+  const places = [
+    { placement: 'search' as const, name: 'Поиск — Курсы', dailyBudgetRub: 3_500 },
+    { placement: 'network' as const, name: 'РСЯ — Курсы', dailyBudgetRub: 1_500 },
+  ];
   const campaign = {
     channel: Provider.YANDEX_DIRECT,
-    placement: 'search' as const,
-    name: 'Поиск — Курсы',
-    dailyBudgetRub: 3_500,
     targetCpaRub: 2_000,
     strategy: { search: { type: 'HIGHEST_POSITION' }, network: { type: 'SERVING_OFF' } },
     negativeKeywords: [],
@@ -59,19 +68,22 @@ function planOf(campaigns = 1): CampaignPlan {
       },
     ],
   };
+  const planned = places.slice(0, campaigns).map((place) => ({ ...campaign, ...place }));
   return {
     id: PLAN_ID,
     clientId: CLIENT_ID,
     createdAt: new Date('2026-08-01T10:00:00Z').toISOString(),
-    totalDailyBudgetRub: 3_500 * campaigns,
+    totalDailyBudgetRub: planned.reduce((acc, c) => acc + c.dailyBudgetRub, 0),
     summary: 'План на поиск',
-    campaigns: Array.from({ length: campaigns }, (_, i) => ({
-      ...campaign,
-      name: `${campaign.name} ${i + 1}`,
-    })),
+    campaigns: planned,
     warnings: [],
     prompts: [],
   };
+}
+
+/** Бриф, которому хватает денег ровно на одну кампанию: минимум Директа на поиск. */
+function singleCampaignBrief(): ClientBriefData {
+  return briefOf({ dailyBudgetRub: 500 });
 }
 
 interface ApprovalRow {
@@ -80,6 +92,8 @@ interface ApprovalRow {
   expiresAt: Date;
   chatId: string | null;
   payload: unknown;
+  /** Не null — карточку Telegram не принял, и в чате её нет. */
+  error: string | null;
 }
 
 interface FakeState {
@@ -96,6 +110,11 @@ interface WhereDecision {
   expiresAt?: { gt?: Date };
 }
 
+interface KeyWhere {
+  key?: { startsWith?: string };
+  OR?: KeyWhere[];
+}
+
 /**
  * Хранилище в памяти, отвечающее по условиям запроса, а не «что удобно».
  *
@@ -103,6 +122,12 @@ interface WhereDecision {
  * «пока карточка жива, второй план не строим», и фейк, возвращающий все строки
  * подряд, доказывал бы обратное (docs/LESSONS.md).
  */
+function matchesKey(key: string, where: KeyWhere): boolean {
+  if (where.OR) return where.OR.some((clause) => matchesKey(key, clause));
+  const prefix = where.key?.startsWith;
+  return prefix === undefined || key.startsWith(prefix);
+}
+
 function fakeStore(state: FakeState): CampaignEntryStore {
   const matches = (row: ApprovalRow, clause: WhereDecision): boolean => {
     const decision = clause.decision;
@@ -146,11 +171,31 @@ function fakeStore(state: FakeState): CampaignEntryStore {
         );
         return Promise.resolve(rows);
       },
+      updateMany: ({
+        where,
+        data,
+      }: {
+        where: { id: string; decision: ApprovalDecision };
+        data: { decision: ApprovalDecision };
+      }) => {
+        // Условие по решению — часть проверяемого поведения: заявку, которую уже
+        // забрал человек, повтор закрыть не должен.
+        const row = (state.approvals ?? []).find(
+          (candidate) => candidate.id === where.id && candidate.decision === where.decision,
+        );
+        if (!row) return Promise.resolve({ count: 0 });
+        row.decision = data.decision;
+        return Promise.resolve({ count: 1 });
+      },
     },
     creative: {
       findFirst: ({ where }: { where: { provider: string } }) => {
         expect(where.provider).toBe(CAMPAIGN_PLAN_PROVIDER);
         return Promise.resolve(state.plan ? { id: PLAN_ID } : null);
+      },
+      findMany: ({ where }: { where: { provider: string } }) => {
+        expect(where.provider).toBe(CAMPAIGN_PLAN_PROVIDER);
+        return Promise.resolve(state.plan ? [{ id: PLAN_ID }] : []);
       },
       findUnique: () =>
         Promise.resolve(
@@ -164,8 +209,10 @@ function fakeStore(state: FakeState): CampaignEntryStore {
         ),
     },
     idempotencyKey: {
-      findMany: ({ where }: { where: { key: { in: string[] } } }) =>
-        Promise.resolve((state.keys ?? []).filter((row) => where.key.in.includes(row.key))),
+      // Префиксы разбираются честно: на них держится ответ «что у клиента уже
+      // создано», и фейк, возвращающий все ключи подряд, доказывал бы обратное.
+      findMany: ({ where }: { where: KeyWhere }) =>
+        Promise.resolve((state.keys ?? []).filter((row) => matchesKey(row.key, where))),
     },
   };
 
@@ -275,6 +322,7 @@ describe('checkCampaignEntry: что уже происходит с клиент
       decision: ApprovalDecision.PENDING,
       expiresAt: new Date('2026-08-20T14:00:00Z'),
       chatId: '42',
+      error: null,
       payload: {
         kind: 'create_campaign',
         clientId: CLIENT_ID,
@@ -297,6 +345,40 @@ describe('checkCampaignEntry: что уже происходит с клиент
     expect(renderEntryBlock(outcome as never)).toContain('Поиск — Курсы');
   });
 
+  it('недоставленная карточка ожиданием решения не считается', async () => {
+    // Строка в базе есть, а карточки в чате нет: «реши по карточкам» здесь —
+    // предложение нажать то, чего человек не видит, и так до истечения заявки.
+    const outcome = await checkCampaignEntry(CLIENT_ID, {
+      db: fakeStore(ready({ approvals: [approval({ error: 'bot was blocked' })] })),
+      now,
+    });
+    expect(outcome.kind).toBe('ready');
+    if (outcome.kind !== 'ready') return;
+
+    expect(outcome.undelivered.map((a) => a.id)).toEqual(['appr-1']);
+    expect(outcome.notes.join(' ')).toContain('не доставлено: 1');
+  });
+
+  it('доставленная карточка держит вход, а про недоставленную рядом сказано', async () => {
+    const outcome = await checkCampaignEntry(CLIENT_ID, {
+      db: fakeStore(
+        ready({
+          approvals: [
+            approval(),
+            approval({ id: 'appr-2', error: 'bot was blocked', chatId: '43' }),
+          ],
+        }),
+      ),
+      now,
+    });
+    expect(outcome.kind).toBe('awaiting_decision');
+    if (outcome.kind !== 'awaiting_decision') return;
+
+    expect(outcome.approvals.map((a) => a.id)).toEqual(['appr-1']);
+    expect(outcome.undelivered.map((a) => a.id)).toEqual(['appr-2']);
+    expect(renderEntryBlock(outcome)).toContain('Telegram не принял');
+  });
+
   it('истёкшая карточка живой не считается: решать по ней уже нечего', async () => {
     const outcome = await checkCampaignEntry(CLIENT_ID, {
       db: fakeStore(
@@ -311,6 +393,7 @@ describe('checkCampaignEntry: что уже происходит с клиент
     const outcome = await checkCampaignEntry(CLIENT_ID, {
       db: fakeStore(
         ready({
+          brief: { data: singleCampaignBrief() },
           plan: planOf(),
           keys: [{ key: campaignCreateKey(PLAN_ID, 0), entityId: '777' }],
           // Заявка применена, но это ничего не доказывает: в dry-run она такая же.
@@ -319,8 +402,33 @@ describe('checkCampaignEntry: что уже происходит с клиент
       ),
       now,
     });
-    expect(outcome).toMatchObject({ kind: 'already_created', planId: PLAN_ID });
+    expect(outcome.kind).toBe('already_created');
     expect(renderEntryBlock(outcome as never)).toContain('777');
+  });
+
+  it('кампания, созданная по прошлому плану, видна и после того, как план сменился', async () => {
+    // Ровно тот путь, которым появлялась вторая кампания: правка брифа рождает
+    // новый план, а вместе с ним — новые ключи. Пока «что создано» считалось по
+    // последнему плану, кампания прошлого исчезала из виду насовсем.
+    const outcome = await checkCampaignEntry(CLIENT_ID, {
+      db: fakeStore(
+        ready({
+          brief: { data: briefOf(), updatedAt: new Date('2026-08-19T10:00:00Z') },
+          plan: planOf(2),
+          keys: [{ key: campaignCreateKey(PLAN_ID, 0), entityId: '777' }],
+        }),
+      ),
+      now,
+    });
+    expect(outcome.kind).toBe('ready');
+    if (outcome.kind !== 'ready') return;
+
+    // План пересобирать придётся (бриф новее), но поиск в счёт нового решения
+    // уже не входит: он создан и тратит деньги.
+    expect(outcome.reusablePlan).toBeNull();
+    expect(outcome.created.map((c) => c.externalId)).toEqual(['777']);
+    expect(outcome.created.map((c) => c.slot)).toEqual([`${Provider.YANDEX_DIRECT}:search`]);
+    expect(outcome.notes.join(' ')).toContain('уже созданные в кабинете: 1');
   });
 
   it('незавершённая попытка требует человека, а не повтора', async () => {
@@ -335,6 +443,28 @@ describe('checkCampaignEntry: что уже происходит с клиент
     });
     expect(outcome.kind).toBe('attempt_unresolved');
     expect(renderEntryBlock(outcome as never)).toContain('вручную');
+  });
+
+  it('созданная кампания без опознанного места тоже требует человека', async () => {
+    // Второе условие того же «нельзя»: ключ старого формата разбирается через
+    // план, которым кампания создавалась, и место (канал × размещение) оттуда
+    // может не прочитаться — план не парсится или позиции в нём уже нет. Тогда
+    // кампания в кабинете есть, а на какое место она встала — неизвестно, и
+    // выдавать план поверх неё нельзя: он займёт то же место второй раз.
+    //
+    // Проверка нужна отдельно от «незавершённой попытки»: снять из условия
+    // `slot === null` и ни один другой тест не покраснеет, а защита исчезнет.
+    const outcome = await checkCampaignEntry(CLIENT_ID, {
+      db: fakeStore(
+        ready({
+          plan: planOf(),
+          keys: [{ key: campaignCreateKey(PLAN_ID, 5), entityId: '777' }],
+        }),
+      ),
+      now,
+    });
+
+    expect(outcome.kind).toBe('attempt_unresolved');
   });
 
   it('по наполовину созданному плану переспрашиваем только про нетронутые кампании', async () => {
@@ -352,7 +482,7 @@ describe('checkCampaignEntry: что уже происходит с клиент
     if (outcome.kind !== 'ready') return;
 
     expect(outcome.reusablePlan?.untouched).toEqual([1]);
-    expect(outcome.notes.join(' ')).toContain('уже создана: 1 из 2');
+    expect(outcome.notes.join(' ')).toContain('уже созданные в кабинете: 1');
 
     const text = renderReadiness(outcome);
     expect(text).toContain('модель звать не буду');
@@ -363,7 +493,7 @@ describe('checkCampaignEntry: что уже происходит с клиент
     const outcome = await checkCampaignEntry(CLIENT_ID, {
       db: fakeStore(
         ready({
-          plan: planOf(),
+          plan: planOf(2),
           brief: { data: briefOf(), updatedAt: new Date('2026-08-10T10:00:00Z') },
         }),
       ),
@@ -409,7 +539,7 @@ describe('launchCampaign', () => {
     const submit = vi.fn().mockResolvedValue([{ id: 'appr-1' }]);
 
     const outcome = await launchCampaign(CLIENT_ID, {
-      db: fakeStore(ready({ plan: planOf() })),
+      db: fakeStore(ready({ plan: planOf(2) })),
       planner: planner as never,
       submit: submit as never,
     });
@@ -445,7 +575,11 @@ describe('launchCampaign', () => {
 
     const outcome = await launchCampaign(CLIENT_ID, {
       db: fakeStore(
-        ready({ plan: planOf(), keys: [{ key: campaignCreateKey(PLAN_ID, 0), entityId: '777' }] }),
+        ready({
+          brief: { data: singleCampaignBrief() },
+          plan: planOf(),
+          keys: [{ key: campaignCreateKey(PLAN_ID, 0), entityId: '777' }],
+        }),
       ),
       fresh: true,
       planner: planner as never,
@@ -460,7 +594,11 @@ describe('launchCampaign', () => {
     const planner = vi.fn();
     const outcome = await launchCampaign(CLIENT_ID, {
       db: fakeStore(
-        ready({ plan: planOf(), keys: [{ key: campaignCreateKey(PLAN_ID, 0), entityId: '777' }] }),
+        ready({
+          brief: { data: singleCampaignBrief() },
+          plan: planOf(),
+          keys: [{ key: campaignCreateKey(PLAN_ID, 0), entityId: '777' }],
+        }),
       ),
       planner: planner as never,
       submit: deps(ready()).submit as never,
@@ -468,6 +606,36 @@ describe('launchCampaign', () => {
 
     expect(planner).not.toHaveBeenCalled();
     expect(outcome.kind).toBe('already_created');
+  });
+
+  it('повтор после недоставки закрывает старую заявку и выпускает карточку заново', async () => {
+    // Иначе на одну позицию плана повисло бы две PENDING-заявки: одна с карточкой
+    // в чате, другая — без.
+    const submit = vi.fn().mockResolvedValue([{ id: 'appr-2' }]);
+    const state = ready({
+      plan: planOf(2),
+      approvals: [
+        {
+          id: 'appr-1',
+          decision: ApprovalDecision.PENDING,
+          expiresAt: new Date('2026-08-20T14:00:00Z'),
+          chatId: '42',
+          error: 'bot was blocked',
+          payload: {},
+        },
+      ],
+    });
+
+    const outcome = await launchCampaign(CLIENT_ID, {
+      db: fakeStore(state),
+      now: () => new Date('2026-08-20T12:00:00Z'),
+      planner: vi.fn() as never,
+      submit: submit as never,
+    });
+
+    expect(outcome.kind).toBe('submitted');
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(state.approvals?.[0]?.decision).toBe(ApprovalDecision.EXPIRED);
   });
 
   it('отказ планировщика пересказывается человеку, а не пробрасывается', async () => {
@@ -508,14 +676,14 @@ describe('launchCampaign', () => {
 
     const submit = vi.fn().mockResolvedValue([]);
     await launchCampaign(CLIENT_ID, {
-      db: fakeStore(ready({ plan: planOf() })),
+      db: fakeStore(ready({ plan: planOf(2) })),
       submit: submit as never,
     });
     expect(submit.mock.calls[0]?.[1]).toMatchObject({ dryRun: true });
 
     submit.mockClear();
     await launchCampaign(CLIENT_ID, {
-      db: fakeStore(ready({ plan: planOf() })),
+      db: fakeStore(ready({ plan: planOf(2) })),
       dryRun: true,
       submit: submit as never,
     });
@@ -524,7 +692,7 @@ describe('launchCampaign', () => {
     // Опция умеет только усилить защиту: снять её отсюда нельзя.
     submit.mockClear();
     await launchCampaign(CLIENT_ID, {
-      db: fakeStore(ready({ plan: planOf() })),
+      db: fakeStore(ready({ plan: planOf(2) })),
       dryRun: false,
       submit: submit as never,
     });
@@ -536,7 +704,7 @@ describe('renderPlanSummary', () => {
   it('показывает состав плана: группы, фразы, объявления и регионы', () => {
     const text = renderPlanSummary(planOf(2), { dryRun: false });
 
-    expect(text).toContain('Общий дневной бюджет: 7 000 ₽/сут');
+    expect(text).toContain('Общий дневной бюджет: 5 000 ₽/сут');
     expect(text).toContain('Групп: 1, фраз: 1, объявлений: 1');
     expect(text).toContain('Регионы: Москва');
     expect(text).toContain('DRY_RUN снят');
@@ -545,11 +713,11 @@ describe('renderPlanSummary', () => {
   it('часть плана считает деньги по себе, а не по всему плану', () => {
     const text = renderPlanSummary(planOf(2), { dryRun: false, only: [1] });
 
-    // 7 000 ₽ здесь было бы обещанием списать и то, что уже списывается.
-    expect(text).toContain('Общий дневной бюджет: 3 500 ₽/сут');
+    // 5 000 ₽ здесь было бы обещанием списать и то, что уже списывается.
+    expect(text).toContain('Общий дневной бюджет: 1 500 ₽/сут');
     expect(text).toContain('из них уже создано: 1');
-    expect(text).toContain('Поиск — Курсы 2');
-    expect(text).not.toContain('Поиск — Курсы 1');
+    expect(text).toContain('РСЯ — Курсы');
+    expect(text).not.toContain('Поиск — Курсы');
   });
 
   it('группа без фраз показывает «не задано», а не ставку в ноль рублей', () => {

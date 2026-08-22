@@ -2,6 +2,7 @@ import { ApprovalDecision, Provider } from '@prisma/client';
 
 import { BRIEF_FIELD_LABELS } from '@/ai/onboarding/index.js';
 import { formatAmount } from '@/approval/card.js';
+import type { CreatedCampaign } from '@/campaigns/created.js';
 import type { CampaignEntryBlock, CampaignEntryReady } from '@/campaigns/entry.js';
 import { regionName } from '@/campaigns/geo.js';
 import type { CampaignPlan, PlannedCampaign } from '@/campaigns/plan.schema.js';
@@ -114,6 +115,14 @@ export function renderEntryBlock(block: CampaignEntryBlock): string {
             `${decisionLabel(a.decision)}`,
         ),
         'Реши по карточкам в чате: ✅ запустит, ❌ отменит.',
+        // Про недоставленные говорим отдельной строкой: предлагать нажать то, чего
+        // в чате нет, — это обещать запуск, которого не будет.
+        ...(block.undelivered.length === 0
+          ? []
+          : [
+              `⚠️ Ещё ${block.undelivered.length} карточек Telegram не принял — ` +
+                'их в чате нет. Выпущу заново, когда решишь по доставленным.',
+            ]),
       ].join('\n');
 
     case 'attempt_unresolved':
@@ -122,13 +131,13 @@ export function renderEntryBlock(block: CampaignEntryBlock): string {
           'в кабинете. Повтор заблокирован ключом идемпотентности — это защита от ' +
           'второй кампании на те же деньги.',
         ...block.campaigns.map((name) => `  • ${name}`),
-        `Нужен разбор вручную: проверить кабинет и план ${block.planId}.`,
+        'Нужен разбор вручную: проверить кабинет клиента.',
       ].join('\n');
 
     case 'already_created':
       return [
-        'По последнему плану кампании уже созданы:',
-        ...block.campaigns.map((c) => `  • «${c.name}» — id в кабинете ${c.externalId}`),
+        'В кабинете этого клиента кампании уже созданы:',
+        ...block.campaigns.map((c) => `  • ${createdLabel(c)} — id в кабинете ${c.externalId}`),
         'Повторный запуск ничего не продублирует, но и нового не создаст. ' +
           'Нужна ещё одна кампания — это отдельное решение и отдельные деньги.',
       ].join('\n');
@@ -138,6 +147,13 @@ export function renderEntryBlock(block: CampaignEntryBlock): string {
       return exhaustive;
     }
   }
+}
+
+/** Имя из плана, а если плана под рукой нет — место, которое кампания занимает. */
+function createdLabel(campaign: CreatedCampaign): string {
+  if (campaign.name !== null) return `«${campaign.name}»`;
+  if (campaign.channel === null || campaign.placement === null) return 'кампания';
+  return `${placementLabel(campaign.placement)} (${channelLabel(campaign.channel)})`;
 }
 
 function decisionLabel(decision: ApprovalDecision): string {
