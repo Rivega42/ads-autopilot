@@ -161,7 +161,9 @@ export function quoteMentionsNumber(quote: string, value: number): boolean {
 export function urlMentioned(value: string, messages: readonly string[]): boolean {
   const needles = urlNeedles(value);
   if (needles.length === 0) return false;
-  const haystacks = messages.map((message) => normalizeQuote(stripUrlPrefix(message)));
+  const haystacks = messages.map((message) =>
+    normalizeQuote(stripUrlPrefix(withoutEmails(message))),
+  );
   return needles.some((needle) => haystacks.some((hay) => hay.includes(needle)));
 }
 
@@ -188,47 +190,45 @@ function stripUrlPrefix(text: string): string {
   return text.replace(/https?:\/\//giu, '').replace(/(^|[^\p{L}\p{N}])www\./giu, '$1');
 }
 
+const EMAIL_RE = /[\p{L}\p{N}][\p{L}\p{N}._%+-]*@[\p{L}\p{N}][\p{L}\p{N}.-]*\.[\p{L}]{2,24}/giu;
+
 /**
- * Зоны, по которым слово с точкой считается адресом само по себе.
+ * Текст без адресов почты.
  *
- * Список нужен из-за обратной стороны: «ул.Ленина» и «и т.д.» тоже выглядят как
- * домен, а принятый за адрес обрывок текста — это купленный трафик в никуда.
- * Адрес в незнакомой зоне всё равно опознаётся — по схеме, `www.` или пути.
+ * «ivan.petrov@mail.ru» содержит и `mail.ru`, и — до собаки — `ivan.petrov`, и оба
+ * выглядят как домен. Пока почта оставалась в тексте, она подтверждала выдумку
+ * модели: и по вхождению строки, и как «единственный адрес в последнем ответе».
+ * Клиент, у которого сайта нет, покупал клики на почтовый сервис. Убираем адрес
+ * почты целиком — вместе с именем ящика, домен сайта от этого не страдает: он в
+ * тексте назван отдельно, если назван вообще.
  */
-const COMMON_TLDS: ReadonlySet<string> = new Set([
-  'ru',
+function withoutEmails(text: string): string {
+  return text.replace(EMAIL_RE, ' ');
+}
+
+/**
+ * Зоны кириллических доменов — закрытый список, который не растёт.
+ *
+ * Список нужен ради обратной стороны разбора: «ул.Ленина» и «г.Москва» выглядят как
+ * домен, а принятый за адрес обрывок текста — это купленный трафик в никуда.
+ * Латинские зоны так не отсечь: их тысячи, `.ws` у тильды не хуже `.ru`, и список
+ * тут был бы гонкой, из-за которой клиент со ссылкой на тильду не мог выйти из паузы.
+ * Кириллических зон полтора десятка, и новые появляются раз в несколько лет.
+ */
+const CYRILLIC_TLDS: ReadonlySet<string> = new Set([
   'рф',
-  'su',
-  'com',
-  'net',
-  'org',
-  'by',
-  'kz',
-  'ua',
-  'am',
-  'ge',
-  'io',
-  'me',
-  'biz',
-  'info',
-  'online',
-  'site',
-  'store',
-  'shop',
-  'pro',
-  'tech',
-  'app',
-  'dev',
-  'ai',
-  'tv',
-  'cc',
-  'moscow',
-  'xyz',
-  'club',
-  'life',
-  'digital',
-  'agency',
-  'studio',
+  'рус',
+  'москва',
+  'дети',
+  'онлайн',
+  'сайт',
+  'укр',
+  'срб',
+  'мкд',
+  'бг',
+  'ею',
+  'қаз',
+  'мон',
 ]);
 
 const WEB_ADDRESS_RE =
@@ -238,22 +238,27 @@ function looksLikeWebAddress(token: string): boolean {
   if (/^https?:\/\//iu.test(token)) return true;
   const bare = token.replace(/^https?:\/\//iu, '');
   if (/^www\./iu.test(bare)) return true;
-  const host = bare.split('/')[0] ?? '';
   if (bare.includes('/')) return true;
-  return COMMON_TLDS.has((host.split('.').at(-1) ?? '').toLowerCase());
+  const tld = (bare.split('.').at(-1) ?? '').toLowerCase();
+  // Латинская зона — почти всегда домен, кириллическая — почти всегда сокращение.
+  return /^[a-z]{2,24}$/u.test(tld) || CYRILLIC_TLDS.has(tld);
 }
 
 /** Адреса, названные в тексте: то, что клиент действительно написал. */
 export function extractWebAddresses(text: string): string[] {
-  return [...text.matchAll(WEB_ADDRESS_RE)].map((m) => m[0]).filter(looksLikeWebAddress);
+  return [...withoutEmails(text).matchAll(WEB_ADDRESS_RE)]
+    .map((match) => match[0])
+    .filter(looksLikeWebAddress);
 }
 
 /**
  * Есть ли в тексте адрес сайта.
  *
- * Отдельно от разбора обновлений: по этому же признаку интервью решает, можно ли
- * говорить клиенту «сайта у тебя нет». Клиенту, который прислал адрес, — нельзя,
- * даже если записать этот адрес мы не смогли.
+ * По этому признаку интервью решает, можно ли говорить клиенту «сайта у тебя нет»
+ * и снимать ли паузу. Разметка та же, что у разбора обновлений, и это важно: пока
+ * «названа ли ссылка» считалось здесь строже, чем при записи в бриф, клиент,
+ * приславший `mysite.tilda.ws` — ровно то, о чём его попросили, — оставался в паузе
+ * навсегда, хотя такой же адрес в обычном ходе интервью записался бы.
  */
 export function mentionsWebAddress(text: string): boolean {
   return extractWebAddresses(text).length > 0;
@@ -277,6 +282,118 @@ function sameHost(left: URL, right: URL): boolean {
   return hostForms(right.hostname).some((form) => forms.has(form));
 }
 
+/**
+ * Кириллица латиницей — так, как её пишут в доменах.
+ *
+ * Нужна ровно для одного вопроса: про этот ли адрес писала модель. «Окна-спб.рф» и
+ * `okna-spb.ru` — один сайт, и отличаются они целиком, буква в букву.
+ */
+const TRANSLIT: ReadonlyMap<string, string> = new Map(
+  Object.entries({
+    а: 'a',
+    б: 'b',
+    в: 'v',
+    г: 'g',
+    д: 'd',
+    е: 'e',
+    ё: 'e',
+    ж: 'zh',
+    з: 'z',
+    и: 'i',
+    й: 'y',
+    к: 'k',
+    л: 'l',
+    м: 'm',
+    н: 'n',
+    о: 'o',
+    п: 'p',
+    р: 'r',
+    с: 's',
+    т: 't',
+    у: 'u',
+    ф: 'f',
+    х: 'h',
+    ц: 'c',
+    ч: 'ch',
+    ш: 'sh',
+    щ: 'sh',
+    ъ: '',
+    ы: 'y',
+    ь: '',
+    э: 'e',
+    ю: 'yu',
+    я: 'ya',
+    і: 'i',
+    ї: 'yi',
+    є: 'e',
+    ў: 'u',
+    ғ: 'g',
+    қ: 'k',
+    ң: 'n',
+    ә: 'a',
+    ө: 'o',
+    ұ: 'u',
+    ү: 'u',
+    һ: 'h',
+  }),
+);
+
+function comparableHost(host: string): string {
+  const lower = host.toLowerCase().replace(/^www\./u, '');
+  const unicode = domainToUnicode(lower) === '' ? lower : domainToUnicode(lower);
+  const latin = [...unicode].map((ch) => TRANSLIT.get(ch) ?? ch).join('');
+
+  // Транслит у человека и у модели разный: «ц» пишут и `c`, и `ts`, «х» — и `h`, и
+  // `kh`. Обе стороны сравнения проходят через одно и то же сведение, поэтому
+  // испорченные заодно настоящие `ts` и `kh` сравнению не мешают.
+  return latin
+    .replace(/shch|sch/gu, 'sh')
+    .replace(/kh/gu, 'h')
+    .replace(/ts/gu, 'c')
+    .replace(/[^a-z0-9]+/gu, '');
+}
+
+/**
+ * Расстояние правки с перестановкой соседних букв.
+ *
+ * Перестановка считается одним шагом, а не двумя: «okna-sbp.ru» — самая обычная
+ * опечатка клиента, и модель, поправившая её, должна остаться узнанной.
+ */
+function editDistance(a: string, b: string): number {
+  let beforePrev: number[] = [];
+  let prev: number[] = Array.from({ length: b.length + 1 }, (_, j) => j);
+
+  for (let i = 1; i <= a.length; i += 1) {
+    const row: number[] = [i];
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let best = Math.min((prev[j] ?? 0) + 1, (row[j - 1] ?? 0) + 1, (prev[j - 1] ?? 0) + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        best = Math.min(best, (beforePrev[j - 2] ?? 0) + 1);
+      }
+      row[j] = best;
+    }
+    beforePrev = prev;
+    prev = row;
+  }
+
+  return prev[b.length] ?? 0;
+}
+
+/**
+ * Настолько ли похожи хосты, чтобы считать, что модель писала про этот адрес.
+ *
+ * Порог — шаг правки на каждые пять букв, но не больше двух: транслит и опечатка в
+ * него укладываются, а `gmail.com` и `okna-vsem.ru` не сближает ничто.
+ */
+function hostsLookAlike(left: URL, right: URL): boolean {
+  const a = comparableHost(left.hostname);
+  const b = comparableHost(right.hostname);
+  if (a === '' || b === '') return false;
+  const limit = Math.min(2, Math.max(1, Math.floor(Math.min(a.length, b.length) / 5)));
+  return editDistance(a, b) <= limit;
+}
+
 export type LandingVerdict =
   { ok: true; url: string; corrected: boolean } | { ok: false; reason: RejectedUpdate['reason'] };
 
@@ -292,7 +409,13 @@ export type LandingVerdict =
  *     называл, — берём адрес из ответа клиента: он-то точно его;
  *  3. модель прочитала последний ответ как ссылку, а записала по-своему (транслит
  *     кириллического домена, «исправленная» опечатка) — берём адрес оттуда, и
- *     только если он там ровно один: угадывать из двух дороже, чем переспросить.
+ *     только если он там ровно один похож на записанный моделью.
+ *
+ * Похожесть в третьем пункте — не украшение. Без неё туда попадал любой адрес из
+ * последнего ответа: домен из почты, ссылка на счётчик Метрики, группа в ВК — то
+ * есть ровно тот случай, ради которого проверка и писалась. Домен, названный
+ * моделью, к этому моменту уже отвергнут двумя проверками выше, поэтому связь с
+ * ним — единственное, что отличает исправленную опечатку от выдумки.
  */
 export function proveLandingUrl(value: string, messages: readonly string[]): LandingVerdict {
   if (urlMentioned(value, messages)) return { ok: true, url: value, corrected: false };
@@ -304,14 +427,15 @@ export function proveLandingUrl(value: string, messages: readonly string[]): Lan
   const sameDomain = named.find((url) => sameHost(url, proposed));
   if (sameDomain !== undefined) return { ok: true, url: sameDomain.href, corrected: true };
 
-  const inLast = unique(
+  const alike = unique(
     extractWebAddresses(messages.at(-1) ?? '')
       .map(toUrl)
       .filter(isUrl)
+      .filter((url) => hostsLookAlike(url, proposed))
       .map((url) => url.href),
   );
-  const single = inLast[0];
-  if (inLast.length === 1 && single !== undefined) {
+  const single = alike[0];
+  if (alike.length === 1 && single !== undefined) {
     return { ok: true, url: single, corrected: true };
   }
 

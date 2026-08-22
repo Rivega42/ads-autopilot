@@ -530,6 +530,61 @@ describe('handleAnswer', () => {
       }
     });
 
+    it('клиенту, назвавшему только почту, говорит правду про сайт', async () => {
+      // Почта — не ссылка. Пока домен из неё считался адресом, клиент без сайта
+      // слышал «адрес ушёл на проверку человеку» вместо «Директ так не умеет».
+      const { run } = runner([
+        { reply: 'Что продаём?' },
+        {
+          reply: 'А сайт какой?',
+          updates: BRIEF_WITHOUT_SITE,
+          evidence: QUOTED_EVIDENCE,
+          asking: 'landingUrl',
+        },
+        { reply: 'Пришли ссылку, пожалуйста.', asking: 'landingUrl' },
+        { reply: 'Всё-таки нужна ссылка.', asking: 'landingUrl' },
+        { reply: 'И ещё раз про ссылку.', asking: 'landingUrl' },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+      await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
+      await handleAnswer(CLIENT, 'нет, пиши на ivan@mail.ru', { db: store.db, run });
+      const step = await handleAnswer(CLIENT, 'нет и не будет', { db: store.db, run });
+
+      expect(step.kind).toBe('needs_human');
+      expect(step.text).toBe(NO_LANDING_REPLY);
+      expect(parseTranscript(store.get(CLIENT)?.transcript).halted?.reason).toBe('no-landing');
+    });
+
+    it('останавливается на done без ссылки, а не досиживает до потолка вопросов', async () => {
+      // Модель, упорно возвращающая done при пустой ссылке, не заполнит и `asking`:
+      // без остановки интервью дойдёт до MAX_QUESTIONS, двадцать раз повторив
+      // клиенту «бриф собран» и столько же раз сходив в модель за деньги.
+      const { run, calls } = runner([
+        { reply: 'Что продаём?' },
+        {
+          reply: 'А сайт какой?',
+          updates: BRIEF_WITHOUT_SITE,
+          evidence: QUOTED_EVIDENCE,
+          asking: 'landingUrl',
+        },
+        { reply: 'Пришли ссылку, пожалуйста.', asking: 'landingUrl' },
+        { reply: 'Всё-таки нужна ссылка.', asking: 'landingUrl' },
+        { reply: 'Бриф собран, стартуем!', done: true },
+      ]);
+
+      await startInterview(CLIENT, { db: store.db, run });
+      await handleAnswer(CLIENT, ANSWER_WITHOUT_SITE, { db: store.db, run });
+      await handleAnswer(CLIENT, 'сайта нет', { db: store.db, run });
+      await handleAnswer(CLIENT, 'нет', { db: store.db, run });
+      const step = await handleAnswer(CLIENT, 'нет и не будет', { db: store.db, run });
+
+      expect(step.kind).toBe('needs_human');
+      expect(step.text).toBe(NO_LANDING_REPLY);
+      expect(calls).toHaveLength(5);
+    });
+
     it('после перезапуска повторяет тот же ответ, а не последний вопрос модели', async () => {
       const { run } = runner([
         { reply: 'Что продаём?' },
@@ -803,6 +858,47 @@ describe('после остановки интервью не платит за 
     }
 
     expect(calls).toHaveLength(paidTurns);
+  });
+
+  it('повтор почты не снимает паузу и не оплачивается моделью', async () => {
+    // «Пиши на почту» — не присланная ссылка: иначе отказ платить за модель
+    // обходит любой клиент, который повторяет свой e-mail.
+    const { run, calls } = await stopped();
+    const paidTurns = calls.length;
+
+    const step = await handleAnswer(CLIENT, 'ну пиши на ivan@mail.ru', { db: store.db, run });
+
+    expect(step.kind).toBe('needs_human');
+    expect(calls).toHaveLength(paidTurns);
+  });
+
+  it('сообщение в паузу не стирает дату готовности брифа', async () => {
+    // Строка с остановкой и статусом COMPLETE сегодня не собирается, но обнулять
+    // чужую колонку «на всякий случай» — это тихая порча данных завтра.
+    const completedAt = new Date('2026-07-01T10:00:00.000Z');
+    const halted = createMemoryBriefStore([
+      {
+        id: 'brief_halted',
+        clientId: CLIENT,
+        status: BriefStatus.COMPLETE,
+        data: JSON.parse(JSON.stringify(BRIEF_WITHOUT_SITE)) as MemoryBriefRow['data'],
+        transcript: {
+          version: 1,
+          askedCount: 4,
+          turns: [{ role: 'assistant', text: NO_LANDING_REPLY, at: completedAt.toISOString() }],
+          halted: { reason: 'no-landing', at: completedAt.toISOString() },
+        } as MemoryBriefRow['transcript'],
+        completedAt,
+        updatedAt: completedAt,
+      },
+    ]);
+    const { run, calls } = runner([{ reply: 'Этого хода быть не должно.' }]);
+
+    const step = await handleAnswer(CLIENT, 'ладно', { db: halted.db, run });
+
+    expect(step.kind).toBe('needs_human');
+    expect(calls).toHaveLength(0);
+    expect(halted.get(CLIENT)?.completedAt).toEqual(completedAt);
   });
 
   it('записывает эти сообщения — человеку разбирать по расшифровке, а не по логу', async () => {

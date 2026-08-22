@@ -177,7 +177,9 @@ describe('клиент без сайта: пауза переживает пер
 
     await startInterview(clientId, { run: script.run });
     await handleAnswer(clientId, 'сайта нет', { run: script.run });
-    await handleAnswer(clientId, 'нет, только группа в ВК', { run: script.run });
+    // Почта — не ссылка: клиент без сайта обязан услышать про Директ, а не про
+    // «адрес ушёл на проверку человеку».
+    await handleAnswer(clientId, 'нет, пиши на ivan@gmail.com', { run: script.run });
     stopped = await handleAnswer(clientId, 'нет и не будет', { run: script.run });
     paidTurns = script.calls;
   });
@@ -188,7 +190,7 @@ describe('клиент без сайта: пауза переживает пер
   });
 
   it('следующие сообщения клиента не оплачиваются моделью', async () => {
-    for (const text of ['ладно', 'а без сайта никак?', 'спасибо']) {
+    for (const text of ['ладно', 'а без сайта никак?', 'пиши на ivan@gmail.com', 'спасибо']) {
       const step = await handleAnswer(clientId, text, { run: script.run });
       expect(step.kind).toBe('needs_human');
     }
@@ -230,5 +232,92 @@ describe('клиент без сайта: пауза переживает пер
     });
     expect(row?.status).toBe(BriefStatus.COMPLETE);
     expect(row?.data).toMatchObject({ landingUrl: MODEL_URL });
+  });
+});
+
+/**
+ * Домен из почты клиента.
+ *
+ * Здесь видно всю цену ошибки, которую юнит-тест показывает только наполовину:
+ * бриф помечается COMPLETE, вход в кампанию открывается, и следующий шаг —
+ * `Ads.add` с `Href = https://gmail.com/`, то есть купленные клиенту клики на
+ * почтовый сервис. Поэтому проверяется не разбор ответа, а строка в Postgres и
+ * вход в кампанию.
+ */
+describe('домен из почты клиента не становится посадочной страницей', () => {
+  let clientId: string;
+  let step: InterviewStep;
+
+  beforeAll(async () => {
+    clientId = await seedLegacyClient();
+    const script = runner([
+      { reply: 'Куда вести людей — какой сайт?', asking: 'landingUrl' },
+      // Адрес модель выдумала: в ответе клиента его нет, а есть его почта.
+      {
+        reply: 'Записал, бриф собран.',
+        updates: { landingUrl: 'https://okna-vsem.ru' },
+        done: true,
+      },
+    ]);
+
+    await startInterview(clientId, { run: script.run });
+    step = await handleAnswer(clientId, 'Сайта нет, пиши на ivan@gmail.com', { run: script.run });
+  });
+
+  it('интервью не объявляет бриф собранным', () => {
+    expect(step.kind).not.toBe('complete');
+  });
+
+  it('в строку брифа не уезжает ни выдумка модели, ни домен почты', async () => {
+    const row = await prisma.clientBrief.findUnique({
+      where: { clientId },
+      select: { status: true, data: true },
+    });
+    expect(row?.status).toBe(BriefStatus.IN_PROGRESS);
+    expect(row?.data).not.toHaveProperty('landingUrl');
+  });
+
+  it('вход в кампанию по-прежнему упирается в ссылку', async () => {
+    expect((await checkCampaignEntry(clientId)).kind).toBe('landing_missing');
+  });
+});
+
+/**
+ * Группа в ВК — это адрес, и разбираться с ним человеку.
+ *
+ * Обратная сторона предыдущего сценария: клиенту, который назвал ссылку, нельзя
+ * говорить «Директ не примет объявление» — группа в ВК как посадочная страница
+ * Директу подходит, а решает это человек, а не наша проверка.
+ */
+describe('клиент с группой в ВК вместо сайта', () => {
+  let stopped: InterviewStep;
+  let clientId: string;
+
+  beforeAll(async () => {
+    clientId = await seedLegacyClient();
+    const script = runner([
+      { reply: 'Какой у вас сайт?', asking: 'landingUrl' },
+      { reply: 'Пришлите ссылку, пожалуйста.', asking: 'landingUrl' },
+      { reply: 'Без ссылки Директ не примет объявление.', asking: 'landingUrl' },
+      { reply: 'Последний раз: есть страница?', asking: 'landingUrl' },
+    ]);
+
+    await startInterview(clientId, { run: script.run });
+    await handleAnswer(clientId, 'сайта нет', { run: script.run });
+    await handleAnswer(clientId, 'только группа vk.com/okna_spb', { run: script.run });
+    stopped = await handleAnswer(clientId, 'ну нет сайта', { run: script.run });
+  });
+
+  it('не говорит клиенту, что сайта у него нет', () => {
+    expect(stopped.kind).toBe('needs_human');
+    expect(stopped.text).not.toBe(NO_LANDING_REPLY);
+  });
+
+  it('пауза записана как «разберётся человек»', async () => {
+    const row = await prisma.clientBrief.findUnique({
+      where: { clientId },
+      select: { transcript: true },
+    });
+    expect(parseTranscript(row?.transcript).halted?.reason).toBe('unconfirmed-landing');
   });
 });

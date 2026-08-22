@@ -428,10 +428,16 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
   // спрашивал каждый ход, там уже записано. Текущий вопрос не в счёт — на него
   // клиент ещё не отвечал.
   const landingAsks = countAsks(transcript, 'landingUrl');
+
+  // Ход, объявленный законченным при незаполненной ссылке, — это тоже «спрашивать
+  // больше нечем»: `asking` в нём пуст (см. `inferredAsking`), и без этой ветки
+  // модель, упрямо возвращающая done, досидела бы до MAX_QUESTIONS, повторяя
+  // клиенту «бриф собран» два десятка платных раз.
+  const aboutLanding = asking === 'landingUrl' || turn.done === true;
   const outOfLandingAttempts =
     parsed?.ok !== true &&
     missing.includes('landingUrl') &&
-    asking === 'landingUrl' &&
+    aboutLanding &&
     landingAsks >= LANDING_URL_ATTEMPTS;
 
   // Клиент, назвавший адрес, сайт имеет — даже если записать этот адрес не вышло.
@@ -547,7 +553,8 @@ interface BriefPatch {
   data: Prisma.InputJsonValue;
   transcript: Prisma.InputJsonValue;
   status: BriefStatus;
-  completedAt: Date | null;
+  /** `undefined` — не трогать колонку: у Prisma это пропуск поля, а не запись null. */
+  completedAt: Date | null | undefined;
 }
 
 /**
@@ -649,7 +656,9 @@ async function haltedRepeat(ctx: HaltContext, reason: HaltReason): Promise<Inter
     data: toJsonValue(parseDraft(ctx.row.data)),
     transcript: toJsonValue(ctx.transcript),
     status: ctx.row.status,
-    completedAt: null,
+    // Статус тут сохраняется как есть, значит и дату готовности трогать нечем:
+    // `null` затёр бы её у строки, которая осталась COMPLETE.
+    completedAt: ctx.row.status === BriefStatus.COMPLETE ? undefined : null,
   });
 
   log.info({ clientId: ctx.clientId, reason }, 'onboarding: message into a halted interview');

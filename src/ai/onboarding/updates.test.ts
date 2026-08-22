@@ -328,6 +328,68 @@ describe('applyTurnUpdates', () => {
     expect(result.draft.landingUrl).toBeUndefined();
   });
 
+  /**
+   * Домен из почты — не сайт клиента.
+   *
+   * Ветка «модель прочитала последний ответ как ссылку» брала оттуда единственный
+   * похожий на адрес токен и писала его в бриф, ни с чем не сверяя. Бриф уезжал
+   * COMPLETE, план строился за два платных вызова, а `Ads.add` получал
+   * `Href = https://gmail.com/` — клиент платил за клики на почтовый сервис.
+   */
+  it('не принимает домен из почты клиента за его сайт', () => {
+    const result = applyTurnUpdates({}, turn({ updates: { landingUrl: 'https://okna-vsem.ru' } }), [
+      'Продаём окна',
+      'Сайта нет, пиши на ivan@gmail.com',
+    ]);
+    expect(result.draft.landingUrl).toBeUndefined();
+    expect(result.rejected[0]).toMatchObject({ field: 'landingUrl', reason: 'url-not-mentioned' });
+  });
+
+  it('не принимает за сайт чужой адрес из последнего ответа клиента', () => {
+    // Ни счётчик Метрики, ни группа в ВК не имеют отношения к тому, что записала
+    // модель: одинокий адрес в ответе — ещё не подтверждение её выдумки.
+    const said = [
+      'Метрика вот https://metrika.yandex.ru/dashboard?id=12345',
+      'Сайта нет, только группа vk.com/okna_spb',
+      'Пиши на ivan.petrov@okna.ru',
+    ];
+    for (const message of said) {
+      const result = applyTurnUpdates(
+        {},
+        turn({ updates: { landingUrl: 'https://okna-vsem.ru' } }),
+        ['Продаём окна', message],
+      );
+      expect(result.draft.landingUrl).toBeUndefined();
+      expect(result.rejected[0]).toMatchObject({
+        field: 'landingUrl',
+        reason: 'url-not-mentioned',
+      });
+    }
+  });
+
+  it('не принимает домен почты, даже когда модель записала его буква в букву', () => {
+    // Совпадение строк тут ничего не доказывает: `okna.ru` есть в тексте только
+    // внутри «ivan@okna.ru». Клиент назвал почту, а не сайт, — и спросить про сайт
+    // ещё раз дешевле, чем купить ему трафик на угаданный домен.
+    const result = applyTurnUpdates({}, turn({ updates: { landingUrl: 'https://okna.ru' } }), [
+      ...CLIENT_SAID,
+      'сайта нет, пиши на ivan@okna.ru',
+    ]);
+    expect(result.draft.landingUrl).toBeUndefined();
+    expect(result.rejected[0]).toMatchObject({ field: 'landingUrl', reason: 'url-not-mentioned' });
+  });
+
+  it('принимает адрес клиента, в котором модель исправила опечатку', () => {
+    // Ради этого случая ветка и писалась: модель поправила переставленные буквы,
+    // а в бриф уезжает то, что написал клиент.
+    const result = applyTurnUpdates({}, turn({ updates: { landingUrl: 'https://okna-spb.ru' } }), [
+      ...CLIENT_SAID,
+      'сайт okna-sbp.ru',
+    ]);
+    expect(result.draft.landingUrl).toBe('https://okna-sbp.ru/');
+    expect(result.corrected[0]).toMatchObject({ field: 'landingUrl' });
+  });
+
   it('не трогает исходный черновик', () => {
     const draft = { product: 'Пылесосы' };
     applyTurnUpdates(draft, turn({ updates: { product: 'Не пылесосы' } }), []);
@@ -348,5 +410,24 @@ describe('mentionsWebAddress', () => {
     expect(mentionsWebAddress('офис на ул.Ленина')).toBe(false);
     expect(mentionsWebAddress('бюджет 12.500 в сутки')).toBe(false);
     expect(mentionsWebAddress('импланты, виниры и т.д.')).toBe(false);
+  });
+
+  it('видит адрес в незнакомой зоне', () => {
+    // Клиента в паузе просят прислать ссылку текстом. Если этот текст не опознан,
+    // он остаётся в паузе навсегда, делая ровно то, о чём его попросили.
+    expect(mentionsWebAddress('Сайт на тильде: mysite.tilda.ws')).toBe(true);
+    expect(mentionsWebAddress('okna.moscow')).toBe(true);
+  });
+
+  it('не считает адресом сайта почту клиента', () => {
+    // «Сайта нет, пиши на почту» — это ответ «сайта нет», а не присланная ссылка:
+    // иначе клиент услышит про «разберётся человек» и снимет паузу повтором почты.
+    expect(mentionsWebAddress('сайта нет, пиши на ivan@mail.ru')).toBe(false);
+    expect(mentionsWebAddress('почта ivan.petrov@mail.ru')).toBe(false);
+    expect(mentionsWebAddress('пиши на ivan@gmail.com, сайта нет')).toBe(false);
+  });
+
+  it('видит сайт рядом с почтой', () => {
+    expect(mentionsWebAddress('сайт okna-spb.ru, почта ivan@gmail.com')).toBe(true);
   });
 });
