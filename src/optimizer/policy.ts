@@ -1,21 +1,21 @@
 import { formatMoney, formatPercent } from './money.js';
 import type { ApprovalKindName, Decision, HandoverModeName } from './types.js';
 
-import { env } from '@/env.js';
+import { BUDGET_CHANGE_APPROVAL_THRESHOLD } from '@/approval/policy.js';
 
 /**
  * TZ §3.5 / E11 T11.06: изменение бюджета или ставки > 20% уходит на апрув.
  *
- * Значение приезжает из окружения, а не стоит здесь литералом: пока рядом жили
- * переменная `BUDGET_CHANGE_THRESHOLD_PCT` и константа 0.2, человек, выставивший
- * переменную в проде, считал порог настроенным — а решения считались по константе,
- * и разъезд был молчаливым. Тот же случай уже был с `MAX_BID_CHANGE_PCT`.
+ * Не собственное чтение окружения, а перенос значения из `src/approval/policy.ts`:
+ * порог обязан быть один на оба гейта. Раньше здесь читалась переменная
+ * `BUDGET_CHANGE_THRESHOLD_PCT`, а в approval-политике рядом стоял литерал 0.2 —
+ * и решал литерал, потому что через `matchApprovalRule` проходит `createApproval`
+ * и по нему же пишется текст карточки. Тот же случай уже был с `MAX_BID_CHANGE_PCT`.
  *
- * Переменная — доля (0.2 = 20%): в процентах её прочитать нельзя, `src/env.ts`
- * роняет старт на любом значении больше единицы. Имя переменной говорит только про
- * бюджет по историческим причинам, но порог здесь общий для бюджета и ставки.
+ * Имя переменной окружения говорит только про бюджет по историческим причинам,
+ * но порог здесь общий для бюджета и ставки.
  */
-export const APPROVAL_CHANGE_THRESHOLD_PCT = env.BUDGET_CHANGE_THRESHOLD_PCT;
+export const APPROVAL_CHANGE_THRESHOLD_PCT = BUDGET_CHANGE_APPROVAL_THRESHOLD;
 
 /** TZ §3.5 / E11 T11.07: массовое отключение (> 10 сущностей) — всегда на апрув. */
 export const MASS_PAUSE_THRESHOLD = 10;

@@ -1,4 +1,5 @@
 import type { ApprovalAction } from '@/approval/types.js';
+import { env } from '@/env.js';
 
 /**
  * Политика «что нельзя делать без человека» (TZ §3.5).
@@ -8,18 +9,24 @@ import type { ApprovalAction } from '@/approval/types.js';
  * его должно быть можно прогнать таблицей кейсов за миллисекунды.
  */
 
-/** Изменение дневного бюджета более чем на столько — к человеку. */
-export const BUDGET_CHANGE_APPROVAL_THRESHOLD = 0.2;
+/**
+ * Изменение дневного бюджета более чем на столько — к человеку.
+ *
+ * Значение приезжает из окружения, а не стоит здесь литералом. Пока литерал был
+ * тут, а `src/optimizer/policy.ts` читал `BUDGET_CHANGE_THRESHOLD_PCT`, решал
+ * именно литерал: `matchApprovalRule` — гейт `requestApprovalIfNeeded`, и по нему
+ * же пишется текст карточки. Человек, выставивший переменную в проде, считал порог
+ * настроенным. Тот же случай уже был с `MAX_BID_CHANGE_PCT`.
+ *
+ * Переменная — доля (0.2 = 20%): `src/env.ts` роняет старт на значении больше
+ * единицы, чтобы «20» не превратилось в 2000%.
+ */
+export const BUDGET_CHANGE_APPROVAL_THRESHOLD = env.BUDGET_CHANGE_THRESHOLD_PCT;
 
 /** Отключение большего числа сущностей за раз считается массовым. */
 export const MASS_PAUSE_ENTITY_THRESHOLD = 10;
 
-export type ApprovalRuleCode =
-  | 'new_campaign'
-  | 'budget_change_over_threshold'
-  | 'mass_pause'
-  | 'strategy_change'
-  | 'llm_creatives';
+export type ApprovalRuleCode = 'new_campaign' | 'budget_change_over_threshold' | 'mass_pause';
 
 export interface ApprovalRule {
   code: ApprovalRuleCode;
@@ -39,8 +46,6 @@ const RULES: Record<ApprovalRuleCode, ApprovalRule> = {
     code: 'mass_pause',
     title: `массовое отключение (более ${MASS_PAUSE_ENTITY_THRESHOLD} сущностей)`,
   },
-  strategy_change: { code: 'strategy_change', title: 'смена стратегии кампании' },
-  llm_creatives: { code: 'llm_creatives', title: 'загрузка креативов, сгенерированных LLM' },
 };
 
 /**
@@ -69,14 +74,8 @@ export function matchApprovalRule(action: ApprovalAction): ApprovalRule | null {
         ? RULES.budget_change_over_threshold
         : null;
 
-    case 'strategy_change':
-      return RULES.strategy_change;
-
     case 'pause_entities':
       return action.externalIds.length > MASS_PAUSE_ENTITY_THRESHOLD ? RULES.mass_pause : null;
-
-    case 'upload_creatives':
-      return action.llmGenerated ? RULES.llm_creatives : null;
 
     // Возобновление, ставки и минус-слова в списке TZ §3.5 не значатся: они
     // обратимы и уже ограничены предохранителями оптимизатора (MAX_BID_CHANGE_PCT).

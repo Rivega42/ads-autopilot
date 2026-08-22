@@ -37,15 +37,6 @@ export const budgetChangeActionSchema = z.object({
   after: z.number().nonnegative(),
 });
 
-export const strategyChangeActionSchema = z.object({
-  ...baseAction,
-  kind: z.literal('strategy_change'),
-  campaignExternalId: z.string().min(1),
-  campaignName: z.string().min(1),
-  before: z.record(z.unknown()),
-  after: z.record(z.unknown()),
-});
-
 export const pauseEntitiesActionSchema = z.object({
   ...baseAction,
   kind: z.literal('pause_entities'),
@@ -82,29 +73,28 @@ export const addNegativesActionSchema = z.object({
   phrases: z.array(z.string().min(1)).min(1),
 });
 
-export const uploadCreativesActionSchema = z.object({
-  ...baseAction,
-  kind: z.literal('upload_creatives'),
-  adGroupExternalId: z.string().min(1),
-  creativeIds: z.array(z.string().min(1)).min(1),
-  /**
-   * Сгенерированы моделью или загружены человеком. Апрува по TZ §3.5 требуют
-   * только LLM-креативы: за руками человека уже стоит человек.
-   */
-  llmGenerated: z.boolean().default(true),
-  /** Короткий предпросмотр для карточки: до 3 заголовков. */
-  preview: z.array(z.string()).default([]),
-});
-
+/**
+ * Виды действий, которые система умеет довести до кабинета.
+ *
+ * Список закрыт исполнимостью, а не пожеланиями ТЗ. TZ §3.5 называет апрувом ещё
+ * смену стратегии кампании и заливку LLM-креативов; здесь их нет намеренно.
+ * `ChannelAdapter` не описывает ни ту, ни другую операцию, исполнителя у них тоже
+ * не было — заявка такого вида доходила до человека, а на нажатие ✅ отвечала
+ * «действие не поддерживается». Обещание в публичной схеме, которое ломается уже
+ * после согласия человека, хуже отсутствующей функции: её хотя бы видно в
+ * `docs/READINESS.md`. Появится исполнитель — член союза вернётся вместе с ним,
+ * и `src/approval/execute.test.ts` не даст вернуть его отдельно.
+ *
+ * Заливка креативов сегодня доезжает до кабинета единственным путём — вместе с
+ * планом новой кампании, а тот уже стоит за апрувом `create_campaign`.
+ */
 export const approvalActionSchema = z.discriminatedUnion('kind', [
   createCampaignActionSchema,
   budgetChangeActionSchema,
-  strategyChangeActionSchema,
   pauseEntitiesActionSchema,
   resumeEntitiesActionSchema,
   bidChangeActionSchema,
   addNegativesActionSchema,
-  uploadCreativesActionSchema,
 ]);
 
 export type ApprovalAction = z.infer<typeof approvalActionSchema>;
@@ -113,7 +103,6 @@ export type ApprovalActionInput = z.input<typeof approvalActionSchema>;
 
 export type BudgetChangeAction = z.infer<typeof budgetChangeActionSchema>;
 export type PauseEntitiesAction = z.infer<typeof pauseEntitiesActionSchema>;
-export type UploadCreativesAction = z.infer<typeof uploadCreativesActionSchema>;
 
 /** Нормализует произвольный вход в дескриптор (проставляет дефолты, режет лишнее). */
 export function parseAction(input: unknown): ApprovalAction {
@@ -123,19 +112,17 @@ export function parseAction(input: unknown): ApprovalAction {
 /**
  * Вид заявки для колонки `PendingApproval.kind`.
  *
- * У возобновления, минус-слов и креативов своего члена в `ApprovalKind` нет, поэтому
- * они едут на ближайшем по смыслу — так же, как ставки в `src/optimizer/policy.ts`.
+ * У возобновления и минус-слов своего члена в `ApprovalKind` нет, поэтому они едут
+ * на ближайшем по смыслу — так же, как ставки в `src/optimizer/policy.ts`.
  * Авторитетный вид действия всегда лежит в `payload.kind`; колонка нужна для выборок.
  */
 const APPROVAL_KIND_BY_ACTION: Record<ApprovalActionKind, ApprovalKind> = {
   create_campaign: ApprovalKind.NEW_CAMPAIGN,
   budget_change: ApprovalKind.BUDGET_CHANGE,
-  strategy_change: ApprovalKind.STRATEGY_CHANGE,
   pause_entities: ApprovalKind.MASS_PAUSE,
   resume_entities: ApprovalKind.MASS_PAUSE,
   bid_change: ApprovalKind.BID_CHANGE,
   add_negatives: ApprovalKind.STRATEGY_CHANGE,
-  upload_creatives: ApprovalKind.STRATEGY_CHANGE,
 };
 
 export function approvalKindOf(action: ApprovalAction): ApprovalKind {

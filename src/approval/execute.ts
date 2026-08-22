@@ -6,11 +6,17 @@ import { AppError } from '@/lib/errors.js';
 /**
  * Исполнение одобренного действия.
  *
- * Часть видов действий (создание кампании, смена стратегии, заливка креативов)
- * пока не выражается через `ChannelAdapter` — контракт их не описывает, а лезть
- * в него из approval-модуля нельзя. Поэтому здесь есть точка расширения:
- * эпики, которые эти операции реализуют, регистрируют исполнителя, а до тех пор
- * апрув честно падает в FAILED с внятным текстом вместо тихого «ничего не произошло».
+ * Создание кампании не выражается через `ChannelAdapter` — контракт его не
+ * описывает, а лезть в контракт из approval-модуля нельзя. Поэтому здесь есть
+ * точка расширения: эпик, который операцию реализует, регистрирует исполнителя
+ * (`registerCampaignApprovalExecutor`), и `bootstrapChannels()` зовёт его рядом с
+ * регистрацией адаптеров.
+ *
+ * `notSupported` остаётся не «на будущее», а на случай забытой регистрации: точка
+ * входа, не позвавшая `bootstrapChannels()`, обязана уронить заявку в FAILED с
+ * внятным текстом, а не сделать вид, что применила. Виды действий, у которых
+ * исполнителя нет вовсе, в `approvalActionSchema` не объявляются — карточка,
+ * падающая после нажатия ✅, хуже отсутствующей функции.
  */
 
 export type ActionExecutor = (ctx: ChannelContext, action: ApprovalAction) => Promise<WriteResult>;
@@ -74,8 +80,6 @@ export async function executeAction(
     }
 
     case 'create_campaign':
-    case 'strategy_change':
-    case 'upload_creatives':
       return notSupported(action.kind);
 
     default: {
@@ -121,15 +125,6 @@ export function changeSnapshot(action: ApprovalAction): {
         campaignExternalId: action.campaignExternalId,
       };
 
-    case 'strategy_change':
-      return {
-        before: { strategy: action.before },
-        after: { strategy: action.after },
-        entityType: 'campaign',
-        entityId: action.campaignExternalId,
-        campaignExternalId: action.campaignExternalId,
-      };
-
     case 'pause_entities':
       return {
         before: { status: 'ACTIVE', externalIds: action.externalIds },
@@ -167,15 +162,6 @@ export function changeSnapshot(action: ApprovalAction): {
         entityType: 'campaign',
         entityId: action.campaignExternalId,
         campaignExternalId: action.campaignExternalId,
-      };
-
-    case 'upload_creatives':
-      return {
-        before: null,
-        after: { creativeIds: action.creativeIds, llmGenerated: action.llmGenerated },
-        entityType: 'adgroup',
-        entityId: action.adGroupExternalId,
-        campaignExternalId: null,
       };
 
     default: {

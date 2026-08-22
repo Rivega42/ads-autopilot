@@ -70,11 +70,9 @@ export async function syncLocalEntities(action: ApprovalAction): Promise<LocalSt
     }
 
     // Минус-слова отражает `markNegatedQueries` во флаге `SearchQueryStat.negated`;
-    // у создания кампании и заливки креативов своей строки ещё нет вовсе.
+    // у создаваемой кампании своей строки ещё нет вовсе.
     case 'add_negatives':
     case 'create_campaign':
-    case 'strategy_change':
-    case 'upload_creatives':
       return { requested: 0, updated: 0 };
 
     default: {

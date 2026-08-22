@@ -48,9 +48,6 @@ export function describeAction(action: ApprovalAction): string {
       )} до ${formatAmount(action.after)} ₽/сут`;
     }
 
-    case 'strategy_change':
-      return `Сменить стратегию кампании «${action.campaignName}»`;
-
     case 'pause_entities':
       return `Отключить ${action.externalIds.length} ${levelName(action.level)}`;
 
@@ -62,12 +59,6 @@ export function describeAction(action: ApprovalAction): string {
 
     case 'add_negatives':
       return `Добавить ${action.phrases.length} минус-слов в кампанию ${action.campaignExternalId}`;
-
-    case 'upload_creatives': {
-      const preview = action.preview.slice(0, 3).join(' · ');
-      const tail = preview ? `: ${preview}` : '';
-      return `Загрузить ${action.creativeIds.length} креативов в группу ${action.adGroupExternalId}${tail}`;
-    }
 
     default: {
       const exhaustive: never = action;
@@ -163,10 +154,6 @@ export function renderDetails(action: ApprovalAction): string {
       return `Кампания ${action.campaignExternalId}: ${formatAmount(
         action.before,
       )} → ${formatAmount(action.after)} ₽/сут`;
-    case 'strategy_change':
-      return `Кампания ${action.campaignExternalId}\nБыло: ${JSON.stringify(
-        action.before,
-      )}\nСтанет: ${JSON.stringify(action.after)}`;
     case 'pause_entities':
     case 'resume_entities':
       return `${levelName(action.level)}: ${action.externalIds.join(', ')}`;
@@ -178,8 +165,6 @@ export function renderDetails(action: ApprovalAction): string {
       return action.phrases.join(', ');
     case 'create_campaign':
       return `Стратегия: ${JSON.stringify(action.strategy)}`;
-    case 'upload_creatives':
-      return `Креативы: ${action.creativeIds.join(', ')}`;
     default: {
       const exhaustive: never = action;
       return exhaustive;

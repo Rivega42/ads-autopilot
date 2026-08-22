@@ -184,12 +184,10 @@ export const APPLIED_ACTIONS: Record<DecisionAction, string> = {
 export const DECISION_ACTIONS: Record<string, string> = {
   create_campaign: 'Решение: создать кампанию',
   budget_change: 'Решение: изменить бюджет',
-  strategy_change: 'Решение: сменить стратегию',
   pause_entities: 'Решение: остановить',
   resume_entities: 'Решение: возобновить',
   bid_change: 'Решение: изменить ставки',
   add_negatives: 'Решение: добавить минус-слова',
-  upload_creatives: 'Решение: загрузить креативы',
 };
 
 export const SERVICE_ACTIONS: Record<string, string> = {

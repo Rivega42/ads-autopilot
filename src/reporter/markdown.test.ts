@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
-import { md, mdBold, mdEscape, mdItalic, mdJoin, mdLink, mdRaw } from '@/reporter/markdown.js';
+import {
+  md,
+  mdBold,
+  mdEscape,
+  mdItalic,
+  mdJoin,
+  mdLink,
+  mdRaw,
+  mdTruncate,
+} from '@/reporter/markdown.js';
 
 describe('экранирование MarkdownV2', () => {
   it('экранирует ровно те символы, которые перечислены в Bot API', () => {
@@ -44,5 +53,41 @@ describe('шаблон md', () => {
 
   it('склеивает строки, пропуская пустые места', () => {
     expect(mdJoin([mdRaw('раз'), null, mdRaw('два'), undefined])).toBe('раз\nдва');
+  });
+});
+
+/**
+ * Обрезка готовой разметки.
+ *
+ * Проверяется не длина, а разбираемость результата: прямой `slice` укладывался в
+ * лимит и при этом оставлял висящий `\` или незакрытое `*жирное*` — Telegram
+ * отвечает на это `can't parse entities`, то есть отчёт не доставлен вовсе.
+ * Что площадка такой текст действительно отвергает, показывает
+ * `tests/e2e/reporter-telegram.e2e.ts`; здесь — сама резка.
+ */
+describe('mdTruncate', () => {
+  it('короткий текст возвращает как есть', () => {
+    expect(mdTruncate(mdEscape('Расход 100 ₽'), 100)).toBe('Расход 100 ₽');
+  });
+
+  it('закрывает жирное, оборванное лимитом', () => {
+    expect(mdTruncate(mdBold('аааааааааа'), 6)).toBe('*аааа*');
+  });
+
+  it('не режет пару «слэш плюс символ» пополам', () => {
+    // 'a\.b\.c': резать можно только по границам токенов, поэтому на лимите 4
+    // остаётся 'a\.b', а не 'a\.b\' с висящим слэшем.
+    expect(mdTruncate(mdEscape('a.b.c'), 4)).toBe('a\\.b');
+    expect(mdTruncate(mdEscape('a.b.c'), 2)).toBe('a');
+  });
+
+  it('ссылка либо влезает целиком, либо не попадает вовсе', () => {
+    const text = mdJoin([mdEscape('Отчёт: '), mdLink('График', 'https://quickchart.io/c')], '');
+    expect(mdTruncate(text, text.length - 1)).toBe('Отчёт: ');
+    expect(mdTruncate(text, text.length)).toBe(text);
+  });
+
+  it('нулевой лимит даёт пустую строку, а не обломок разметки', () => {
+    expect(mdTruncate(mdBold('ааа'), 0)).toBe('');
   });
 });

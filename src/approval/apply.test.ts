@@ -331,7 +331,11 @@ describe('applyApproval', () => {
     expect(cardText()).toContain('применить не удалось');
   });
 
-  it('нереализованное действие тоже FAILED, а не молчаливый успех', async () => {
+  // Строка, написанная версией кода, где вид действия ещё был в схеме
+  // (`strategy_change` сняли вместе с несуществующим исполнителем). Заявка висит
+  // в БД до APPROVAL_TTL_MINUTES и переживает выкат — читать её обязано в FAILED,
+  // а не «применить» неизвестно что.
+  it('заявка со снятым видом действия — FAILED, а не молчаливый успех', async () => {
     seed({
       payload: {
         ...action,
@@ -346,6 +350,7 @@ describe('applyApproval', () => {
 
     expect(out.status).toBe('FAILED');
     expect(h.state.row?.decision).toBe(ApprovalDecision.FAILED);
+    expect(h.setBudgets).not.toHaveBeenCalled();
   });
 
   it('битый payload не применяется', async () => {

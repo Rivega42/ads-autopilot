@@ -4,7 +4,7 @@ import { Api } from 'grammy';
 import { env } from '@/env.js';
 import { AppError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
-import type { Markdown } from '@/reporter/markdown.js';
+import { mdTruncate, type Markdown } from '@/reporter/markdown.js';
 
 /**
  * Транспорт отчётов.
@@ -71,8 +71,11 @@ export function getReportMessenger(): ReportMessenger {
  * Обрезает текст по лимиту Telegram.
  *
  * Режем по границе строки: MarkdownV2 не переживёт разрыв посреди `*жирного*`,
- * а строки отчёта самодостаточны. Если не влезла даже первая строка — отдаём
- * усечённый префикс, это уже аварийный случай.
+ * а строки отчёта самодостаточны. Если не влезла даже первая строка — режет
+ * `mdTruncate`, по границе токенов и с закрытием оставшихся сущностей. Прямой
+ * `slice`, стоявший здесь раньше, в этой ветке отдавал текст, который площадка
+ * не принимает вовсе: «can't parse entities», то есть отчёт не доставлен ни в
+ * каком виде вместо усечённого.
  */
 export function clampMarkdown(text: Markdown, limit = TELEGRAM_MESSAGE_LIMIT): Markdown {
   if (text.length <= limit) return text;
@@ -88,7 +91,7 @@ export function clampMarkdown(text: Markdown, limit = TELEGRAM_MESSAGE_LIMIT): M
   }
   if (kept.length === 0) {
     log.warn({ length: text.length }, 'report does not fit a single Telegram message');
-    return text.slice(0, limit - tail.length) as Markdown;
+    return `${mdTruncate(text, limit - tail.length)}${tail}` as Markdown;
   }
   return `${kept.join('\n')}${tail}` as Markdown;
 }

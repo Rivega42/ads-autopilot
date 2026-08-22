@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   BUDGET_CHANGE_APPROVAL_THRESHOLD,
@@ -99,18 +99,6 @@ const cases: Array<{ name: string; action: ApprovalActionInput; rule: ApprovalRu
     rule: null,
   },
   {
-    name: 'смена стратегии — всегда человеку',
-    action: {
-      ...base,
-      kind: 'strategy_change',
-      campaignExternalId: '1',
-      campaignName: 'SEO',
-      before: { type: 'MANUAL' },
-      after: { type: 'AVERAGE_CPA' },
-    },
-    rule: 'strategy_change',
-  },
-  {
     name: 'пауза ровно 10 сущностей — автомат',
     action: { ...base, kind: 'pause_entities', level: 'keyword', externalIds: ids(10) },
     rule: null,
@@ -139,28 +127,6 @@ const cases: Array<{ name: string; action: ApprovalActionInput; rule: ApprovalRu
     action: { ...base, kind: 'add_negatives', campaignExternalId: '1', phrases: ['бесплатно'] },
     rule: null,
   },
-  {
-    name: 'LLM-креативы — человеку',
-    action: {
-      ...base,
-      kind: 'upload_creatives',
-      adGroupExternalId: 'g1',
-      creativeIds: ['c1'],
-      llmGenerated: true,
-    },
-    rule: 'llm_creatives',
-  },
-  {
-    name: 'креативы человека — автомат',
-    action: {
-      ...base,
-      kind: 'upload_creatives',
-      adGroupExternalId: 'g1',
-      creativeIds: ['c1'],
-      llmGenerated: false,
-    },
-    rule: null,
-  },
 ];
 
 describe('matchApprovalRule', () => {
@@ -172,14 +138,31 @@ describe('matchApprovalRule', () => {
     });
   }
 
-  it('дефолт llmGenerated = true: неявные креативы считаем машинными', () => {
-    const action = parseAction({
-      ...base,
-      kind: 'upload_creatives',
-      adGroupExternalId: 'g1',
-      creativeIds: ['c1'],
-    });
-    expect(requiresApproval(action)).toBe(true);
+  /**
+   * TZ §3.5 называет апрувом ещё смену стратегии и заливку LLM-креативов, но
+   * исполнителя ни у той, ни у другой операции нет: карточка падала бы уже после
+   * нажатия ✅. Виды действий сняты из схемы целиком (см. `approvalActionSchema`),
+   * и политике их предъявить нельзя — здесь это фиксируется по факту.
+   */
+  it('снятые виды действий политике даже не предъявить', () => {
+    expect(() =>
+      parseAction({
+        ...base,
+        kind: 'strategy_change',
+        campaignExternalId: '1',
+        campaignName: 'SEO',
+        before: { type: 'MANUAL' },
+        after: { type: 'AVERAGE_CPA' },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseAction({
+        ...base,
+        kind: 'upload_creatives',
+        adGroupExternalId: 'g1',
+        creativeIds: ['c1'],
+      }),
+    ).toThrow();
   });
 });
 
@@ -194,8 +177,94 @@ describe('budgetChangeRatio', () => {
     expect(budgetChangeRatio(0, 0)).toBe(0);
   });
 
-  it('пороги совпадают с TZ §3.5', () => {
+  it('умолчание окружения даёт пороги TZ §3.5', () => {
     expect(BUDGET_CHANGE_APPROVAL_THRESHOLD).toBe(0.2);
     expect(MASS_PAUSE_ENTITY_THRESHOLD).toBe(10);
+  });
+});
+
+/**
+ * Порог апрува задаётся `BUDGET_CHANGE_THRESHOLD_PCT` и больше нигде.
+ *
+ * Проверка идёт не по значению константы (литерал 0.2 в коде проходит её при
+ * любой настройке окружения), а по решению гейта: `matchApprovalRule` — та самая
+ * развилка, через которую `requestApprovalIfNeeded` пропускает изменение денег.
+ * Пока порог жил здесь литералом, а в `src/optimizer/policy.ts` читался из
+ * окружения, человек, выставивший переменную в проде, считал порог настроенным —
+ * а карточка и гейт мерили по константе.
+ */
+describe('порог апрува приезжает из окружения', () => {
+  /** Изменение бюджета на `pct` от базы 5000. */
+  function budgetChange(pct: number): ApprovalActionInput {
+    return {
+      ...base,
+      kind: 'budget_change',
+      campaignExternalId: '1',
+      campaignName: 'SEO',
+      before: 5000,
+      after: 5000 * (1 + pct),
+    };
+  }
+
+  async function withThreshold<T>(value: string, run: () => Promise<T>): Promise<T> {
+    vi.resetModules();
+    vi.stubEnv('BUDGET_CHANGE_THRESHOLD_PCT', value);
+    try {
+      return await run();
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    }
+  }
+
+  it('порог 40%: изменение на 30% уходит автоматом, на 50% — человеку', async () => {
+    await withThreshold('0.4', async () => {
+      const policy = await import('./policy.js');
+      const { parseAction: parse } = await import('./types.js');
+
+      expect(policy.matchApprovalRule(parse(budgetChange(0.3)))).toBeNull();
+      expect(policy.matchApprovalRule(parse(budgetChange(0.5)))?.code).toBe(
+        'budget_change_over_threshold',
+      );
+    });
+  });
+
+  it('карточка называет человеку тот порог, по которому её позвали', async () => {
+    await withThreshold('0.4', async () => {
+      const policy = await import('./policy.js');
+      const { parseAction: parse } = await import('./types.js');
+
+      const rule = policy.matchApprovalRule(parse(budgetChange(0.5)));
+      expect(rule?.title).toContain('40%');
+    });
+  });
+
+  it('оптимизатор и апрув меряют деньги одним порогом', async () => {
+    await withThreshold('0.4', async () => {
+      const approval = await import('./policy.js');
+      const optimizer = await import('@/optimizer/policy.js');
+      const { parseAction: parse } = await import('./types.js');
+
+      // Одно и то же изменение бюджета, поданное в оба гейта: 30% при пороге 40%.
+      expect(approval.matchApprovalRule(parse(budgetChange(0.3)))).toBeNull();
+      expect(
+        optimizer.approvalKindFor(
+          {
+            action: 'BUDGET_CHANGE',
+            entityType: 'CAMPAIGN',
+            entityId: 'c1',
+            prevValue: { kind: 'budget', amount: 5000 },
+            nextValue: { kind: 'budget', amount: 6500 },
+            reason: 'тест',
+            requiresApproval: false,
+            layer: 'rule',
+            ruleId: 'test',
+            approvalKind: null,
+          },
+          { handoverMode: 'FULL' },
+          false,
+        ),
+      ).toBeNull();
+    });
   });
 });
