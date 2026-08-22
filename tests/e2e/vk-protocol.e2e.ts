@@ -311,6 +311,14 @@ describe('VK: края протокола', () => {
     const ads = await adapter.listAds(await ctx(), groupIds);
     expect(ads.every((ad) => ad.title === '' && ad.text === '')).toBe(true);
 
+    // Ставка группы под тем же урезанием — `undefined`, а не `null`: «поля не
+    // прислали» и «ручной ставки нет» это разные утверждения, и загрузка на первом
+    // обязана колонку не трогать. Схлопни их в одно — и урезанный ответ стирал бы
+    // живую цену у всех групп кабинета разом.
+    const groups = await adapter.listAdGroups(await ctx(), []);
+    expect(groups).not.toHaveLength(0);
+    expect(groups.every((g) => g.bid === undefined)).toBe(true);
+
     // Ни один запрос листинга поля не перечислил — в этом и суть.
     expect(
       vk.calls.filter((c) => c.method === 'GET').every((c) => c.query['fields'] === undefined),

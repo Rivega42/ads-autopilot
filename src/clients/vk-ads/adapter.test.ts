@@ -205,6 +205,36 @@ describe('VkAdsAdapter reads', () => {
     });
   });
 
+  it('читает ставку группы из того же поля, в которое её пишет', async () => {
+    const { adapter } = harness(() => ({
+      count: 3,
+      items: [
+        { id: 1, ad_plan_id: 55, name: 'Москва', status: 'active', max_price: '120.00' },
+        // Автостратегия: ручной ставки нет. Это не ставка величиной ноль.
+        { id: 2, ad_plan_id: 55, name: 'Регионы', status: 'active', max_price: null },
+        { id: 3, ad_plan_id: 55, name: 'Ноль', status: 'active', max_price: '0' },
+      ],
+    }));
+
+    const groups = await adapter.listAdGroups(ctx(false), []);
+
+    expect(groups.map((g) => g.bid)).toEqual([120, null, null]);
+  });
+
+  it('молчание кабинета про ставку — не то же самое, что её отсутствие', async () => {
+    // Ответ без `max_price` вообще: так выглядит проекция `fields` и урезанная выдача.
+    // Загрузка обязана отличить это от «ставки нет» и колонку не трогать.
+    const { adapter } = harness(() => ({
+      count: 1,
+      items: [{ id: 1, ad_plan_id: 55, name: 'Москва', status: 'active' }],
+    }));
+
+    const [group] = await adapter.listAdGroups(ctx(false), []);
+
+    expect(group?.bid).toBeUndefined();
+    expect(group).toMatchObject({ externalId: '1', campaignExternalId: '55' });
+  });
+
   it('reads banner texts out of textblocks', async () => {
     const { adapter } = harness(() => ({
       count: 1,

@@ -2,6 +2,7 @@ import type { Provider } from '@prisma/client';
 
 import type { ApprovalAction } from '@/approval/types.js';
 import type { StatLevel } from '@/channels/types.js';
+import { keepsBidOnAdGroup, syncVkAdGroupBids } from '@/clients/vk-ads/local-state.js';
 import { prisma } from '@/db/prisma.js';
 
 export interface LocalStateResult {
@@ -48,7 +49,17 @@ export async function syncLocalEntities(action: ApprovalAction): Promise<LocalSt
       return setStatus(owner, action.level, action.externalIds, 'ACTIVE');
 
     case 'bid_change':
-      return setBids(owner, action.changes);
+      // Ставка живёт не на одном и том же уровне у всех каналов: у Директа это
+      // фраза, у VK — группа объявлений, и `keywordExternalId` карточки там на
+      // самом деле id группы (`VkAdsAdapter.setBids`). Пока ветки не было, ставку
+      // VK писать было некуда: фраз у канала ноль, `updateMany` находил ноль строк,
+      // и каждая карточка ставки заканчивалась «обновлено частично (0 из 1)».
+      return keepsBidOnAdGroup(owner.provider)
+        ? syncVkAdGroupBids(
+            owner.clientId,
+            action.changes.map((c) => ({ adGroupExternalId: c.keywordExternalId, bid: c.bid })),
+          )
+        : setBids(owner, action.changes);
 
     case 'budget_change': {
       const updated = await prisma.campaign.updateMany({

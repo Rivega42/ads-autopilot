@@ -8,7 +8,13 @@ import {
   type Provider,
 } from '@prisma/client';
 
-import type { ChannelAdapter, ChannelContext, RemoteAd, RemoteKeyword } from '@/channels/types.js';
+import type {
+  ChannelAdapter,
+  ChannelContext,
+  RemoteAd,
+  RemoteAdGroup,
+  RemoteKeyword,
+} from '@/channels/types.js';
 import type { IngestionDeps } from '@/ingestion/deps.js';
 import { resolveDeps } from '@/ingestion/deps.js';
 import {
@@ -178,6 +184,7 @@ async function syncAdGroups(
       count.orphaned += 1;
       continue;
     }
+    const bid = adGroupBid(group);
     const row = await db.adGroup.upsert({
       where: { campaignId_externalId: { campaignId, externalId: group.externalId } },
       create: {
@@ -186,11 +193,13 @@ async function syncAdGroups(
         name: group.name,
         status: toAdGroupStatus(group.status),
         targetings: toJsonObject(group.targeting),
+        ...bid,
       },
       update: {
         name: group.name,
         status: toAdGroupStatus(group.status),
         targetings: toJsonObject(group.targeting),
+        ...bid,
       },
       select: { id: true },
     });
@@ -221,6 +230,21 @@ async function syncAdGroups(
   }
 
   return { count, byExternalId };
+}
+
+/**
+ * Ставка группы для записи — либо пустая правка.
+ *
+ * Ставка есть не у всех каналов: у Директа торг идёт по фразам, и `RemoteAdGroup.bid`
+ * там не заполняется вовсе. Молчание канала обязано оставить колонку как есть — тот же
+ * принцип, что и у дневного бюджета кампании выше. Разница в том, что колонка здесь
+ * nullable, и потому канал может сказать не только «не знаю» (`undefined`), но и «ручной
+ * ставки нет» (`null`) — второе записывается, иначе группа, переведённая в кабинете на
+ * автостратегию, вечно носила бы у нас последнюю ручную цену.
+ */
+function adGroupBid(group: RemoteAdGroup): { bid?: ReturnType<typeof toDecimal> | null } {
+  if (group.bid === undefined) return {};
+  return { bid: group.bid === null ? null : toDecimal(group.bid, MONEY_SCALE) };
 }
 
 /** Ключ объявления: `externalId` уникален только внутри своей группы. */

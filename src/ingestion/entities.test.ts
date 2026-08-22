@@ -94,6 +94,62 @@ describe('syncEntities', () => {
     expect(db.store.campaign[0]?.['name']).toBe('SEO услуги (новое имя)');
   });
 
+  it('кладёт ставку группы в колонку — уровень, на котором её держит VK', async () => {
+    const adapter = fakeAdapter('VK_ADS', {
+      campaigns: [remoteCampaign()],
+      adGroups: [remoteAdGroup({ bid: 120 })],
+    });
+
+    await syncEntities(CLIENT, 'VK_ADS', deps(adapter));
+
+    expect(Number(db.store.adGroup[0]?.['bid'])).toBe(120);
+  });
+
+  it('молчание канала про ставку группы не затирает известное значение', async () => {
+    await syncEntities(
+      CLIENT,
+      'VK_ADS',
+      deps(
+        fakeAdapter('VK_ADS', {
+          campaigns: [remoteCampaign()],
+          adGroups: [remoteAdGroup({ bid: 120 })],
+        }),
+      ),
+    );
+
+    // Директ ставку группы не отдаёт вовсе, а у VK поле может не приехать под
+    // проекцией `fields`. И то и другое — «не знаю», а не «ставки нет».
+    const silent = fakeAdapter('VK_ADS', {
+      campaigns: [remoteCampaign()],
+      adGroups: [remoteAdGroup()],
+    });
+    await syncEntities(CLIENT, 'VK_ADS', deps(silent));
+
+    expect(Number(db.store.adGroup[0]?.['bid'])).toBe(120);
+  });
+
+  it('явное «ручной ставки нет» колонку обнуляет', async () => {
+    await syncEntities(
+      CLIENT,
+      'VK_ADS',
+      deps(
+        fakeAdapter('VK_ADS', {
+          campaigns: [remoteCampaign()],
+          adGroups: [remoteAdGroup({ bid: 120 })],
+        }),
+      ),
+    );
+
+    // Группу перевели на автостратегию: иначе она вечно носила бы последнюю ручную цену.
+    const auto = fakeAdapter('VK_ADS', {
+      campaigns: [remoteCampaign()],
+      adGroups: [remoteAdGroup({ bid: null })],
+    });
+    await syncEntities(CLIENT, 'VK_ADS', deps(auto));
+
+    expect(db.store.adGroup[0]?.['bid']).toBeNull();
+  });
+
   it('исчезнувшую из кабинета сущность архивирует, а не удаляет', async () => {
     const both = fakeAdapter('YANDEX_DIRECT', {
       campaigns: [remoteCampaign(), remoteCampaign({ externalId: '101', name: 'Контекст' })],

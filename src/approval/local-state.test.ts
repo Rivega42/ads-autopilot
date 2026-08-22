@@ -126,6 +126,27 @@ describe('syncLocalEntities', () => {
     expect(result.requested).toBe(3);
   });
 
+  it('ставку VK пишет в группу, а не в фразу: фраз у канала нет вовсе', async () => {
+    // `keywordExternalId` в карточке VK — это id группы объявлений: так его
+    // трактует и `VkAdsAdapter.setBids`, который применяет изменение в кабинете.
+    const result = await syncLocalEntities({
+      ...base,
+      channel: Provider.VK_ADS,
+      kind: 'bid_change',
+      changes: [{ keywordExternalId: '200', bid: 150 }],
+    });
+
+    expect(h.prisma.adGroup.updateMany).toHaveBeenCalledWith({
+      where: {
+        externalId: { in: ['200'] },
+        campaign: { clientId: 'cl1', provider: Provider.VK_ADS },
+      },
+      data: { bid: 150 },
+    });
+    expect(h.prisma.keyword.updateMany).not.toHaveBeenCalled();
+    expect(result).toEqual({ requested: 1, updated: 1 });
+  });
+
   it('меняет дневной бюджет кампании', async () => {
     await syncLocalEntities({
       ...base,

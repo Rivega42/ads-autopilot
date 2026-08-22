@@ -26,6 +26,7 @@ import {
   massUpdateEntities,
   toVkMoney,
   VK_BATCH_LIMIT,
+  VK_MIN_MONEY,
   VK_PATHS,
   VK_STATUS_ACTIVE,
   VK_STATUS_BLOCKED,
@@ -189,6 +190,12 @@ export class VkAdsAdapter implements ChannelAdapter {
       campaignExternalId: String(group.ad_plan_id),
       name: group.name,
       status: group.status,
+      // Ставка группы — то же поле, в которое пишет `setBids` ниже. Читать её из
+      // другого поля, чем то, в которое пишем, значило бы сверять запись с чужим
+      // числом: карточка «120 → 150» применилась бы, а загрузка вернула бы 120.
+      // `undefined` (поля нет в ответе) и `null` («ручной ставки нет») различаются
+      // намеренно — см. `RemoteAdGroup.bid`.
+      bid: toGroupBid(group.max_price),
       targeting: group.targetings ?? {},
       raw: group,
     }));
@@ -439,6 +446,30 @@ export class VkAdsAdapter implements ChannelAdapter {
     if (level === 'adgroup') return (await listAdGroups(http)).map((g) => String(g.id));
     return (await listBanners(http)).map((b) => String(b.id));
   }
+}
+
+/**
+ * Ставка группы из ответа кабинета.
+ *
+ * `undefined` — поля в ответе не было (проекция `fields`, урезанный ответ), и трогать
+ * нашу колонку нельзя. `null` и всё, что меньше копейки, — «ручной ставки нет»: цену
+ * назначает автостратегия. Ноль отдельным числом не сохраняем по той же причине, по
+ * которой `toVkMoney` отказывается его писать (`VK_MIN_MONEY`): у VK пустая цена — это
+ * снятый предохранитель, а не ставка величиной ноль, и хранить их одним числом значит
+ * позволить правилу однажды принять одно за другое.
+ *
+ * @needs-live-token: не подтверждено живым кабинетом ни одно из трёх допущений —
+ *  • что ставка группы приезжает именно в `max_price` (пишем мы туда же, поэтому
+ *    несовпадение чтения и записи выглядело бы как «карточка применилась, а загрузка
+ *    вернула прежнее число»);
+ *  • что число — рубли, а не копейки. Ошибка в единицах здесь ровно стократная и
+ *    симметричная: мы и пишем, и читаем одно поле, поэтому на сверке «записали →
+ *    прочитали» она не проявится вовсе, а увидит её только человек в кабинете;
+ *  • что у группы на автостратегии приезжает `null`, а не строка `"0"`.
+ */
+function toGroupBid(maxPrice: number | null | undefined): number | null | undefined {
+  if (maxPrice === undefined) return undefined;
+  return maxPrice === null || maxPrice < VK_MIN_MONEY ? null : maxPrice;
 }
 
 function textOf(block: unknown): string {

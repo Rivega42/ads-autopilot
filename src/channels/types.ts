@@ -43,6 +43,15 @@ export interface RemoteAdGroup {
   campaignExternalId: string;
   name: string;
   status: string;
+  /**
+   * Ставка группы в рублях — там, где канал держит её на этом уровне (VK: `max_price`).
+   *
+   * Три значения, а не два: `undefined` — «кабинет про ставку не сказал» (у Директа
+   * торг идёт по фразам, и уровня группы нет вовсе; у VK поле может не приехать под
+   * проекцией `fields`), `null` — «ручной ставки нет», цену назначает автостратегия.
+   * Различать их обязательно: иначе молчание канала обнуляло бы живую ставку в базе.
+   */
+  bid?: number | null;
   targeting: Record<string, unknown>;
   raw: unknown;
 }

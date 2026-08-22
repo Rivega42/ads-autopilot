@@ -147,6 +147,10 @@ describe('канал VK: кабинет → база → решения → ка
     ]);
     expect(groups[0]?.targetings).toEqual({ geo: [1], interests: ['pets'] });
 
+    // Ставка приехала с уровня группы — у VK она живёт там, а не на фразе.
+    // До колонки `AdGroup.bid` цену кабинета класть было некуда вовсе.
+    expect(groups.map((g) => Number(g.bid))).toEqual([120, 90]);
+
     // Тексты приехали из `textblocks`, а не из имени баннера.
     const ads = await prisma.ad.findMany({ orderBy: { externalId: 'asc' } });
     expect(ads).toHaveLength(5);
@@ -330,20 +334,32 @@ describe('канал VK: кабинет → база → решения → ка
     const outcome = await applyApproval(approval.id, 'roman');
 
     /**
-     * ДЕФЕКТ (не чиним здесь, см. отчёт): у VK ставка живёт на группе, а
-     * `syncLocalEntities` (`src/approval/local-state.ts`) умеет писать её только в
-     * `Keyword.bid`. Колонки под ставку у `AdGroup` в схеме нет вовсе, поэтому новое
-     * значение остаётся только в кабинете, а предупреждение приходит на каждой
-     * ставке VK — не как сигнал о поломке, а как постоянный фон.
+     * Было сломано: ставку VK класть было некуда. `syncLocalEntities`
+     * (`src/approval/local-state.ts`) умел писать её только в `Keyword.bid`, а фраз у
+     * VK ноль — `updateMany` находил ноль строк, и на каждой ставке приходило
+     * «обновлено частично (0 из 1)»: не сигнал о поломке, а постоянный фон.
+     * Теперь ставка живёт в `AdGroup.bid`, и примечания быть не должно вовсе.
      */
-    expect(outcome).toMatchObject({ status: 'APPLIED', dryRun: false });
-    expect((outcome as { warning?: string }).warning).toContain('обновлено частично (0 из 1)');
+    expect(outcome).toEqual({ status: 'APPLIED', dryRun: false });
     // Квантование до копеек — иначе в кабинете висело бы 149.99900000000002.
     expect(vk.callsTo('ad_groups/mass_action.json').at(-1)?.body).toEqual([
       { id: VK_IDS.groupMoscow, max_price: 150 },
     ]);
     expect(vk.adGroupById(VK_IDS.groupMoscow)?.max_price).toBe('150.00');
     expect(vk.adGroupById(VK_IDS.groupMoscow)?.status).toBe('active');
+
+    // Главное: наша строка обновлена сразу, а не ждёт ближайшего синка. Пока она
+    // отстаёт, следующий прогон считает от прежней цены и предлагает то же самое.
+    const moscow = await prisma.adGroup.findFirstOrThrow({
+      where: { externalId: String(VK_IDS.groupMoscow) },
+    });
+    expect(Number(moscow.bid)).toBe(150);
+
+    // Соседняя группа не тронута: id уникален в кабинете, но не в нашей таблице.
+    const regions = await prisma.adGroup.findFirstOrThrow({
+      where: { externalId: String(VK_IDS.groupRegions) },
+    });
+    expect(Number(regions.bid)).toBe(90);
   });
 
   it('одобренная карточка меняет дневной бюджет, сверив его с живым значением', async () => {
@@ -473,6 +489,16 @@ describe('канал VK: кабинет → база → решения → ка
       where: { externalId: String(VK_IDS.groupRegions) },
     });
     expect(group.status).toBe('PAUSED');
+
+    // Ставка, применённая карточкой, читается обратно тем же числом. Проверка не
+    // про идемпотентность: она ловит расхождение поля записи и поля чтения — если
+    // загрузка берёт цену не из того же `max_price`, куда пишет `setBids`, здесь
+    // вернулись бы прежние 120 при живых 150 в кабинете.
+    const moscow = await prisma.adGroup.findFirstOrThrow({
+      where: { externalId: String(VK_IDS.groupMoscow) },
+    });
+    expect(Number(moscow.bid)).toBe(150);
+    expect(vk.adGroupById(VK_IDS.groupMoscow)?.max_price).toBe('150.00');
   });
 
   it('целевой CPA брифа — единственный источник цели для кампании из кабинета', async () => {

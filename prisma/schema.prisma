@@ -220,6 +220,16 @@ model AdGroup {
   externalId String
   name       String
   status     AdGroupStatus @default(ACTIVE)
+  /// Ставка группы в рублях. Есть не у всех каналов: у Директа торг идёт по фразам
+  /// (`Keyword.bid`), а у VK ключевых слов нет вовсе — показы покупаются аудиториями,
+  /// и цена задаётся на группе (`max_price`). Без этой колонки применённая ставка VK
+  /// оставалась только в кабинете: `approval/local-state.ts` писал её в `Keyword`,
+  /// которых у VK ноль, и каждая карточка ставки заканчивалась «обновлено частично».
+  ///
+  /// NULL — не ноль, а «ручной ставки нет»: у автостратегии цену назначает площадка.
+  /// Отсюда же правило записи в `ingestion/entities.ts`: молчание кабинета (поля нет
+  /// в ответе) колонку не трогает, а явный null — обнуляет.
+  bid        Decimal?      @db.Decimal(12, 2)
   targetings Json?
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
