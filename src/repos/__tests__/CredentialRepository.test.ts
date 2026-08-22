@@ -1,5 +1,6 @@
 import 'dotenv/config';
 
+import type { PrismaClient } from '@prisma/client';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { prisma } from '../../db/prisma.js';
@@ -36,6 +37,39 @@ async function auditRows() {
     orderBy: { id: 'asc' },
     select: { actor: true, action: true, resource: true, metadata: true },
   });
+}
+
+/**
+ * Клиент, у которого журнал недоступен, а всё остальное работает.
+ *
+ * Через `Proxy`, а не подставным объектом: репозиторию нужен настоящий Postgres
+ * для `credential` и настоящая транзакция, и подмена должна касаться ровно
+ * `auditLog` — включая тот клиент, который приходит внутрь `$transaction`.
+ */
+function brokenAudit(): PrismaClient {
+  const boom = new Error('audit log down');
+  const failing = { create: () => Promise.reject(boom) };
+  return new Proxy(prisma, {
+    get(target, prop, receiver) {
+      if (prop === 'auditLog') return failing;
+      if (prop === '$transaction') {
+        return (fn: (tx: PrismaClient) => Promise<unknown>) =>
+          typeof fn === 'function'
+            ? prisma.$transaction((tx) => fn(wrap(tx as PrismaClient)))
+            : (Reflect.get(target, prop, receiver) as unknown);
+      }
+      return Reflect.get(target, prop, receiver) as unknown;
+    },
+  });
+
+  function wrap(tx: PrismaClient): PrismaClient {
+    return new Proxy(tx, {
+      get(target, prop, receiver) {
+        if (prop === 'auditLog') return failing;
+        return Reflect.get(target, prop, receiver) as unknown;
+      },
+    });
+  }
 }
 
 describe('CredentialRepository: журнал доступа', () => {
@@ -128,6 +162,26 @@ describe('CredentialRepository: журнал доступа', () => {
     expect(dump).not.toContain(YANDEX.refreshToken);
   });
 
+  it('несохранённый журнал не оставляет записанный секрет без следа', async () => {
+    // То же правило, что и на чтении, но на мутации оно требует транзакции:
+    // `upsert` уже прошёл бы, а строки в журнале не появилось бы — секрет в базе,
+    // и никаких следов, кто его туда положил.
+    const clientId = await newClient();
+    const repo = new CredentialRepository(brokenAudit());
+
+    await expect(repo.save(clientId, 'YANDEX_DIRECT', YANDEX)).rejects.toThrow('audit log down');
+    expect(await prisma.credential.count({ where: { clientId } })).toBe(0);
+  });
+
+  it('несохранённый журнал не даёт отозвать секрет молча', async () => {
+    const clientId = await newClient();
+    await credentials.save(clientId, 'YANDEX_DIRECT', YANDEX);
+    const repo = new CredentialRepository(brokenAudit());
+
+    await expect(repo.deactivate(clientId, 'YANDEX_DIRECT')).rejects.toThrow('audit log down');
+    expect(await prisma.credential.count({ where: { clientId } })).toBe(1);
+  });
+
   it('несохранённый журнал не отдаёт секрет наружу', async () => {
     // Отказ закрытый, а не тихий: если записать факт выдачи не удалось,
     // выдавать нечего. `AuditLog` лежит в той же базе, что и `Credential`,
@@ -136,19 +190,7 @@ describe('CredentialRepository: журнал доступа', () => {
     const clientId = await newClient();
     await credentials.save(clientId, 'YANDEX_DIRECT', YANDEX);
 
-    const boom = new Error('audit log down');
-    const broken = new Proxy(prisma, {
-      get(target, prop, receiver) {
-        if (prop === 'auditLog') {
-          return {
-            create: () => Promise.reject(boom),
-          };
-        }
-        return Reflect.get(target, prop, receiver) as unknown;
-      },
-    });
-
-    const repo = new CredentialRepository(broken);
+    const repo = new CredentialRepository(brokenAudit());
     await expect(repo.getPayload(clientId, 'YANDEX_DIRECT')).rejects.toThrow('audit log down');
   });
 });

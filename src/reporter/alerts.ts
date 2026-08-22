@@ -49,6 +49,15 @@ export interface Alert {
   provider: Provider | null;
   title: string;
   lines: string[];
+  /**
+   * Ключ тревоги, в тексте которой этот повод уже рассказан строкой.
+   *
+   * Свернуть — не то же самое, что подавить: свёрнутый повод считается
+   * доставленным только вместе с родителем. Если родитель промолчал (тишина по
+   * его ключу), повод уходит сам по себе — иначе всплеск у нового кабинета
+   * ждал бы конца чужой тишины.
+   */
+  foldedInto?: string;
 }
 
 /** ТЗ §3.6: больше 10 ошибок за 5 минут — алерт. */
@@ -162,6 +171,10 @@ export const PROVIDER_BURST_THRESHOLD = ERROR_BURST_THRESHOLD;
  * Ошибки одного кабинета — это его кабинет, а не площадка: такую тревогу
  * поднимает порог по бакету, и она называет кабинет, с которым человеку
  * предстоит что-то делать.
+ *
+ * Одного этого условия мало: см. `isWidespread` — считать площадкой всё, где
+ * задето два кабинета, значит называть площадкой один сломанный кабинет плюс
+ * случайную соседнюю ошибку.
  */
 export const PROVIDER_BURST_MIN_CLIENTS = 2;
 
@@ -185,6 +198,13 @@ export interface AlertRunSummary {
   sent: number;
   /** Подавлено ограничителем повторов. */
   suppressed: number;
+  /**
+   * Рассказано строкой внутри другой тревоги (см. `Alert.foldedInto`).
+   *
+   * Отдельно от `suppressed`: свёрнутый повод человек увидел, подавленный — нет,
+   * и по логам это должно различаться.
+   */
+  folded: number;
   /** Не влезло в лимит одного прогона; тишину не жжёт и уйдёт следующим тиком. */
   truncated: number;
   alerts: Alert[];
@@ -251,7 +271,10 @@ export async function detectAlerts(options: AlertOptions = {}): Promise<Alert[]>
   // Поломки площадки ищем до кабинетных: если сыплется вся площадка, разговор
   // идёт о ней, а не о каждом задетом кабинете по отдельности.
   const providerAlerts = providerBursts(rows, burstSince, windowMinutes, threshold, capped);
-  const widespread = new Set(providerAlerts.map((alert) => alert.provider));
+  const widespread = new Map<Provider, string>();
+  for (const alert of providerAlerts) {
+    if (alert.provider !== null) widespread.set(alert.provider, alert.key);
+  }
   alerts.push(...providerAlerts);
 
   for (const [key, bucket] of buckets) {
@@ -261,11 +284,16 @@ export async function detectAlerts(options: AlertOptions = {}): Promise<Alert[]>
     // Порог из ТЗ задан на окно — считаем строго по нему, хотя выбрали шире.
     const inWindow = bucket.filter((row) => row.createdAt >= burstSince);
     const burstFirst = inWindow[0] ?? first;
-    if (inWindow.length > threshold && !widespread.has(first.provider)) {
+    if (inWindow.length > threshold) {
+      // Тревога по площадке уже назовёт этот кабинет строкой — второе сообщение
+      // об одной поломке лишнее. Но именно свёрнута, а не выброшена: если
+      // родитель промолчит, этот повод уйдёт сам.
+      const parent = first.provider === null ? undefined : widespread.get(first.provider);
       alerts.push({
         kind: 'error_burst',
         severity: 'critical',
         key: `error_burst:${key}`,
+        foldedInto: parent,
         clientId: burstFirst.clientId,
         provider: burstFirst.provider,
         title: `${capped ? 'больше ' : ''}${inWindow.length} ошибок за ${windowMinutes} мин`,
@@ -412,17 +440,47 @@ function reportStage(scope: string): string {
 }
 
 /**
+ * Распределена ли поломка по кабинетам настолько, чтобы звать её площадкой.
+ *
+ * Одного «задето ≥ 2 кабинетов» мало, и это была дыра: 50 ошибок протухшего
+ * токена у `cl1` плюс одна посторонняя у `cl2` давали тревогу «51 ошибка
+ * площадки, кабинетов задето 2» с `clientId: null`. Чинить надо было один
+ * кабинет, а сообщение звало разбираться с площадкой — и заодно глушило
+ * кабинетную тревогу, которая назвала бы виновника.
+ *
+ * Площадка — это одна из двух картин, и обе описываются тем же порогом, что и
+ * кабинетный всплеск, без новых подобранных чисел:
+ *
+ *  • порог перебирают сразу несколько кабинетов — сыплется у всех;
+ *  • порог вместе перебирают те, кто поодиночке до него не дотягивает, — ровно
+ *    тот случай, ради которого счёт по площадке и заводился (6 + 6).
+ *
+ * Промежуток между ними — один громкий кабинет плюс фоновая мелочь у соседей —
+ * остаётся кабинетным: у него есть виновник, и тревога обязана его назвать.
+ */
+function isWidespread(clients: ReadonlyArray<[string, number]>, threshold: number): boolean {
+  const loud = clients.filter(([, count]) => count > threshold);
+  if (loud.length >= PROVIDER_BURST_MIN_CLIENTS) return true;
+
+  const quiet = clients.filter(([, count]) => count <= threshold);
+  const quietTotal = quiet.reduce((total, [, count]) => total + count, 0);
+  return quiet.length >= PROVIDER_BURST_MIN_CLIENTS && quietTotal > threshold;
+}
+
+/**
  * Всплеск по площадке целиком.
  *
  * Считается по тем же строкам и тому же окну, что и всплеск по бакету, но без
- * разбиения по клиентам. Поднимается, только когда ошибки размазаны минимум по
- * двум кабинетам: один кабинет — это работа порога по бакету.
+ * разбиения по клиентам. Поднимается, только когда ошибки действительно
+ * размазаны по кабинетам (`isWidespread`), а не просто попали в два бакета.
  *
- * Найденная поломка площадки отменяет кабинетные всплески по ней (см. вызов):
- * иначе отвалившаяся у полусотни клиентов площадка вместо одного внятного
- * сообщения давала бы полсотни почти одинаковых, растянутых лимитом прогона на
- * час. Кабинетные поводы, у которых есть своё действие — переавторизация,
- * кончившиеся units, неушедший отчёт, — остаются: они про конкретного клиента.
+ * Найденная поломка площадки сворачивает кабинетные всплески по ней в свою
+ * строку (см. вызов): иначе отвалившаяся у полусотни клиентов площадка вместо
+ * одного внятного сообщения давала бы полсотни почти одинаковых, растянутых
+ * лимитом прогона на час. Свёрнутые кабинеты названы поимённо — «похоже на
+ * площадку» не должно означать «с кем разбираться, догадайся сам». Кабинетные
+ * поводы со своим действием — переавторизация, кончившиеся units, неушедший
+ * отчёт — остаются отдельными: они про конкретного клиента.
  */
 function providerBursts(
   rows: readonly ErrorRow[],
@@ -444,7 +502,9 @@ function providerBursts(
     if (inWindow.length <= threshold) continue;
     const clients = countBy(inWindow, (row) => row.clientId ?? 'без клиента');
     if (clients.length < PROVIDER_BURST_MIN_CLIENTS) continue;
+    if (!isWidespread(clients, threshold)) continue;
 
+    const loud = clients.filter(([, count]) => count > threshold);
     const first = inWindow[0] as ErrorRow;
     alerts.push({
       kind: 'provider_burst',
@@ -457,6 +517,7 @@ function providerBursts(
       lines: [
         `Кабинетов задето: ${clients.length} — похоже на площадку, а не на один кабинет.`,
         ...clients.slice(0, 3).map(([clientId, count]) => `${clientId}: ${count}`),
+        ...(loud.length > 0 ? [`Сверх кабинетного порога: ${listClients(loud)}.`] : []),
         `Первая: ${formatMsk(first.createdAt, 'HH:mm')} — ${truncate(first.message, 160)}`,
         ...topCodes(inWindow).map(([code, count]) => `${code}: ${count}`),
       ],
@@ -464,6 +525,13 @@ function providerBursts(
   }
 
   return alerts;
+}
+
+/** Кабинеты с числами в одну строку: три поимённо, остальные счётом. */
+function listClients(clients: ReadonlyArray<[string, number]>): string {
+  const named = clients.slice(0, 3).map(([clientId, count]) => `${clientId} (${count})`);
+  const rest = clients.length - named.length;
+  return rest > 0 ? `${named.join(', ')} и ещё ${rest}` : named.join(', ');
 }
 
 function describeScope(row: ErrorRow): string {

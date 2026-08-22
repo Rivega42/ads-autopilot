@@ -30,8 +30,13 @@ export class CredentialRepository {
    * недоступна», и отказ закрытым почти ничего не стоит. Проглоченная же
    * ошибка означала бы выдачу секрета, о которой не осталось следа, — то есть
    * ровно ту дыру, ради которой журнал и заводился.
+   *
+   * На чтении этого достаточно: расшифровка произошла в памяти, но наружу
+   * ничего не ушло. На мутациях — нет: `upsert` уже прошёл бы. Поэтому запись и
+   * отзыв идут одной транзакцией с журналом.
    */
   private async audit(
+    db: Pick<PrismaClient, 'auditLog'>,
     action: string,
     clientId: string,
     provider: Provider,
@@ -44,7 +49,7 @@ export class CredentialRepository {
       ...extra,
       ...(access.reason === undefined ? {} : { reason: access.reason }),
     };
-    await this.db.auditLog.create({
+    await db.auditLog.create({
       data: {
         actor: access.actor ?? SYSTEM_ACTOR,
         action,
@@ -68,26 +73,31 @@ export class CredentialRepository {
       const ab = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
       return new Uint8Array(ab);
     };
-    const saved = await this.db.credential.upsert({
-      where: { clientId_provider: { clientId, provider } },
-      create: {
-        clientId,
-        provider,
-        encryptedPayload: toUint8(ciphertext),
-        iv: toUint8(iv),
-        tag: toUint8(tag),
-        rotatedAt: new Date(),
-      },
-      update: {
-        encryptedPayload: toUint8(ciphertext),
-        iv: toUint8(iv),
-        tag: toUint8(tag),
-        rotatedAt: new Date(),
-        expiresAt: null,
-      },
+    // Одной транзакцией: журнал — часть операции, а не приписка после неё.
+    // Иначе упавшая запись в `AuditLog` оставляла бы секрет в базе без единого
+    // следа о том, кто его туда положил, — а наверх при этом уходила ошибка.
+    return this.db.$transaction(async (tx) => {
+      const saved = await tx.credential.upsert({
+        where: { clientId_provider: { clientId, provider } },
+        create: {
+          clientId,
+          provider,
+          encryptedPayload: toUint8(ciphertext),
+          iv: toUint8(iv),
+          tag: toUint8(tag),
+          rotatedAt: new Date(),
+        },
+        update: {
+          encryptedPayload: toUint8(ciphertext),
+          iv: toUint8(iv),
+          tag: toUint8(tag),
+          rotatedAt: new Date(),
+          expiresAt: null,
+        },
+      });
+      await this.audit(tx, 'credential.save', clientId, provider, access);
+      return saved;
     });
-    await this.audit('credential.save', clientId, provider, access);
-    return saved;
   }
 
   /**
@@ -104,7 +114,7 @@ export class CredentialRepository {
       where: { clientId_provider: { clientId, provider } },
     });
     if (!cred) {
-      await this.audit('credential.read', clientId, provider, access, { found: false });
+      await this.audit(this.db, 'credential.read', clientId, provider, access, { found: false });
       return null;
     }
     const key = getEncryptionKey();
@@ -116,7 +126,7 @@ export class CredentialRepository {
       },
       key,
     );
-    await this.audit('credential.read', clientId, provider, access, { found: true });
+    await this.audit(this.db, 'credential.read', clientId, provider, access, { found: true });
     return JSON.parse(json) as unknown;
   }
 
@@ -125,8 +135,10 @@ export class CredentialRepository {
     provider: Provider,
     access: CredentialAccess = {},
   ): Promise<void> {
-    await this.db.credential.deleteMany({ where: { clientId, provider } });
-    await this.audit('credential.revoke', clientId, provider, access);
+    await this.db.$transaction(async (tx) => {
+      await tx.credential.deleteMany({ where: { clientId, provider } });
+      await this.audit(tx, 'credential.revoke', clientId, provider, access);
+    });
   }
 
   async listForClient(
