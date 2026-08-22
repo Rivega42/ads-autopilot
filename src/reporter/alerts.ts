@@ -6,7 +6,12 @@ import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 import { detectSpendOutlier } from '@/reporter/anomalies.js';
 import { resolveDeps, type ReporterDeps } from '@/reporter/deps.js';
-import { describeFailure, recordFailure } from '@/reporter/errors.js';
+import {
+  describeFailure,
+  recordFailure,
+  REPORT_FAILURE_CODE_VALUES,
+  REPORT_FAILURE_CODES,
+} from '@/reporter/errors.js';
 import { formatMoney, formatPctMagnitude, truncate } from '@/reporter/format.js';
 import { md, mdBold, mdEscape, mdJoin, type Markdown } from '@/reporter/markdown.js';
 import { collectPeriodMetrics } from '@/reporter/metrics.js';
@@ -49,6 +54,15 @@ export interface Alert {
   provider: Provider | null;
   title: string;
   lines: string[];
+  /**
+   * Ключ тревоги, в тексте которой этот повод уже рассказан строкой.
+   *
+   * Свернуть — не то же самое, что подавить: свёрнутый повод считается
+   * доставленным только вместе с родителем. Если родитель промолчал (тишина по
+   * его ключу), повод уходит сам по себе — иначе всплеск у нового кабинета
+   * ждал бы конца чужой тишины.
+   */
+  foldedInto?: string;
 }
 
 /** ТЗ §3.6: больше 10 ошибок за 5 минут — алерт. */
@@ -136,17 +150,6 @@ const AUTH_CODES = new Set(['AUTH_FAILED', 'UNAUTHORIZED', '401']);
 const UNITS_CODES = new Set(['OUT_OF_UNITS', '52']);
 
 /**
- * Коды, которым порог не нужен: одна такая строка — уже инцидент.
- *
- * Недоставленный отчёт пишется в `ErrorLog` кодом `REPORT_FAILED`, и до этого
- * набора не поднимал ничего: до порога всплеска одной записи не хватает, а в
- * наборы 401 и units код не входит. Клиент при этом остался без отчёта —
- * единственного канала, по которому он вообще узнаёт, что происходит с
- * деньгами. «Записали в журнал» и «сообщили человеку» — разные вещи.
- */
-const REPORT_FAILURE_CODES = new Set(['REPORT_FAILED', 'REPORT_DELIVERY_FAILED']);
-
-/**
  * Порог по площадке целиком — на поломку, размазанную по кабинетам.
  *
  * Порог всплеска считается по бакету «клиент + площадка»: это защищает от
@@ -162,6 +165,10 @@ export const PROVIDER_BURST_THRESHOLD = ERROR_BURST_THRESHOLD;
  * Ошибки одного кабинета — это его кабинет, а не площадка: такую тревогу
  * поднимает порог по бакету, и она называет кабинет, с которым человеку
  * предстоит что-то делать.
+ *
+ * Одного этого условия мало: см. `isWidespread` — считать площадкой всё, где
+ * задето два кабинета, значит называть площадкой один сломанный кабинет плюс
+ * случайную соседнюю ошибку.
  */
 export const PROVIDER_BURST_MIN_CLIENTS = 2;
 
@@ -185,6 +192,13 @@ export interface AlertRunSummary {
   sent: number;
   /** Подавлено ограничителем повторов. */
   suppressed: number;
+  /**
+   * Рассказано строкой внутри другой тревоги (см. `Alert.foldedInto`).
+   *
+   * Отдельно от `suppressed`: свёрнутый повод человек увидел, подавленный — нет,
+   * и по логам это должно различаться.
+   */
+  folded: number;
   /** Не влезло в лимит одного прогона; тишину не жжёт и уйдёт следующим тиком. */
   truncated: number;
   alerts: Alert[];
@@ -251,7 +265,10 @@ export async function detectAlerts(options: AlertOptions = {}): Promise<Alert[]>
   // Поломки площадки ищем до кабинетных: если сыплется вся площадка, разговор
   // идёт о ней, а не о каждом задетом кабинете по отдельности.
   const providerAlerts = providerBursts(rows, burstSince, windowMinutes, threshold, capped);
-  const widespread = new Set(providerAlerts.map((alert) => alert.provider));
+  const widespread = new Map<Provider, string>();
+  for (const alert of providerAlerts) {
+    if (alert.provider !== null) widespread.set(alert.provider, alert.key);
+  }
   alerts.push(...providerAlerts);
 
   for (const [key, bucket] of buckets) {
@@ -261,11 +278,16 @@ export async function detectAlerts(options: AlertOptions = {}): Promise<Alert[]>
     // Порог из ТЗ задан на окно — считаем строго по нему, хотя выбрали шире.
     const inWindow = bucket.filter((row) => row.createdAt >= burstSince);
     const burstFirst = inWindow[0] ?? first;
-    if (inWindow.length > threshold && !widespread.has(first.provider)) {
+    if (inWindow.length > threshold) {
+      // Тревога по площадке уже назовёт этот кабинет строкой — второе сообщение
+      // об одной поломке лишнее. Но именно свёрнута, а не выброшена: если
+      // родитель промолчит, этот повод уйдёт сам.
+      const parent = first.provider === null ? undefined : widespread.get(first.provider);
       alerts.push({
         kind: 'error_burst',
         severity: 'critical',
         key: `error_burst:${key}`,
+        foldedInto: parent,
         clientId: burstFirst.clientId,
         provider: burstFirst.provider,
         title: `${capped ? 'больше ' : ''}${inWindow.length} ошибок за ${windowMinutes} мин`,
@@ -370,29 +392,37 @@ async function detectSpendAlerts(options: AlertOptions): Promise<Alert[]> {
 }
 
 /**
- * Отказы отчётности в бакете — по одному поводу на этап.
+ * Отказы отчётности в бакете — по одному поводу на этап и вид отказа.
  *
  * Этап (`daily`, `weekly`, `alerts`) входит в ключ подавления: недоставленный
  * дневной отчёт и упавший недельный разбор — разные поломки, и вторая не должна
- * молчать полчаса из-за первой.
+ * молчать полчаса из-за первой. Вид отказа входит туда же и по той же причине:
+ * несобравшийся отчёт и неушедший — разные поломки с разным действием.
+ *
+ * Вид берётся из кода записи, а не угадывается по этапу. Угадывание было
+ * ровно тем, чем выглядело: дневной отчёт, упавший на расчёте, объявлялся
+ * неушедшим клиенту, потому что этап называется `daily`.
  */
 function reportFailures(bucket: readonly ErrorRow[]): Alert[] {
-  const byStage = new Map<string, ErrorRow[]>();
+  const groups = new Map<string, ErrorRow[]>();
   for (const row of bucket) {
-    if (row.code === null || !REPORT_FAILURE_CODES.has(row.code)) continue;
-    const stage = reportStage(row.scope);
-    const rows = byStage.get(stage);
+    if (row.code === null || !REPORT_FAILURE_CODE_VALUES.has(row.code)) continue;
+    const key = `${reportStage(row.scope)}\u0000${row.code}`;
+    const rows = groups.get(key);
     if (rows) rows.push(row);
-    else byStage.set(stage, [row]);
+    else groups.set(key, [row]);
   }
 
-  return [...byStage].map(([stage, rows]) => {
+  return [...groups.values()].map((rows) => {
     const first = rows[0] as ErrorRow;
-    const delivery = stage === 'daily' || stage === 'weekly';
+    const stage = reportStage(first.scope);
+    const delivery = first.code === REPORT_FAILURE_CODES.delivery;
+    // У `alerts` клиента-получателя нет: этап служебный, отчёта клиенту он не шлёт.
+    const clientFacing = stage === 'daily' || stage === 'weekly';
     return {
       kind: 'report_failed' as const,
       severity: 'critical' as const,
-      key: `report_failed:${bucketKey(first)}:${stage}`,
+      key: `report_failed:${bucketKey(first)}:${stage}:${first.code ?? ''}`,
       clientId: first.clientId,
       provider: first.provider,
       title: delivery ? `Отчёт не ушёл клиенту (${stage})` : `Сбой отчётности (${stage})`,
@@ -400,7 +430,14 @@ function reportFailures(bucket: readonly ErrorRow[]): Alert[] {
         `Кабинет: ${describeScope(first)}`,
         truncate(first.message, 200),
         ...(rows.length > 1 ? [`Отказов за выборку: ${rows.length}`] : []),
-        ...(delivery ? ['Клиент за этот период отчёта не получил.'] : []),
+        ...(clientFacing
+          ? [
+              'Клиент за этот период отчёта не получил.',
+              delivery
+                ? 'Текст уже в БД: следующий прогон отправит его без пересчёта.'
+                : 'Отчёт не собрался — повтор упрётся в ту же причину, пока её не разобрать.',
+            ]
+          : []),
       ],
     };
   });
@@ -412,17 +449,47 @@ function reportStage(scope: string): string {
 }
 
 /**
+ * Распределена ли поломка по кабинетам настолько, чтобы звать её площадкой.
+ *
+ * Одного «задето ≥ 2 кабинетов» мало, и это была дыра: 50 ошибок протухшего
+ * токена у `cl1` плюс одна посторонняя у `cl2` давали тревогу «51 ошибка
+ * площадки, кабинетов задето 2» с `clientId: null`. Чинить надо было один
+ * кабинет, а сообщение звало разбираться с площадкой — и заодно глушило
+ * кабинетную тревогу, которая назвала бы виновника.
+ *
+ * Площадка — это одна из двух картин, и обе описываются тем же порогом, что и
+ * кабинетный всплеск, без новых подобранных чисел:
+ *
+ *  • порог перебирают сразу несколько кабинетов — сыплется у всех;
+ *  • порог вместе перебирают те, кто поодиночке до него не дотягивает, — ровно
+ *    тот случай, ради которого счёт по площадке и заводился (6 + 6).
+ *
+ * Промежуток между ними — один громкий кабинет плюс фоновая мелочь у соседей —
+ * остаётся кабинетным: у него есть виновник, и тревога обязана его назвать.
+ */
+function isWidespread(clients: ReadonlyArray<[string, number]>, threshold: number): boolean {
+  const loud = clients.filter(([, count]) => count > threshold);
+  if (loud.length >= PROVIDER_BURST_MIN_CLIENTS) return true;
+
+  const quiet = clients.filter(([, count]) => count <= threshold);
+  const quietTotal = quiet.reduce((total, [, count]) => total + count, 0);
+  return quiet.length >= PROVIDER_BURST_MIN_CLIENTS && quietTotal > threshold;
+}
+
+/**
  * Всплеск по площадке целиком.
  *
  * Считается по тем же строкам и тому же окну, что и всплеск по бакету, но без
- * разбиения по клиентам. Поднимается, только когда ошибки размазаны минимум по
- * двум кабинетам: один кабинет — это работа порога по бакету.
+ * разбиения по клиентам. Поднимается, только когда ошибки действительно
+ * размазаны по кабинетам (`isWidespread`), а не просто попали в два бакета.
  *
- * Найденная поломка площадки отменяет кабинетные всплески по ней (см. вызов):
- * иначе отвалившаяся у полусотни клиентов площадка вместо одного внятного
- * сообщения давала бы полсотни почти одинаковых, растянутых лимитом прогона на
- * час. Кабинетные поводы, у которых есть своё действие — переавторизация,
- * кончившиеся units, неушедший отчёт, — остаются: они про конкретного клиента.
+ * Найденная поломка площадки сворачивает кабинетные всплески по ней в свою
+ * строку (см. вызов): иначе отвалившаяся у полусотни клиентов площадка вместо
+ * одного внятного сообщения давала бы полсотни почти одинаковых, растянутых
+ * лимитом прогона на час. Свёрнутые кабинеты названы поимённо — «похоже на
+ * площадку» не должно означать «с кем разбираться, догадайся сам». Кабинетные
+ * поводы со своим действием — переавторизация, кончившиеся units, неушедший
+ * отчёт — остаются отдельными: они про конкретного клиента.
  */
 function providerBursts(
   rows: readonly ErrorRow[],
@@ -444,7 +511,9 @@ function providerBursts(
     if (inWindow.length <= threshold) continue;
     const clients = countBy(inWindow, (row) => row.clientId ?? 'без клиента');
     if (clients.length < PROVIDER_BURST_MIN_CLIENTS) continue;
+    if (!isWidespread(clients, threshold)) continue;
 
+    const loud = clients.filter(([, count]) => count > threshold);
     const first = inWindow[0] as ErrorRow;
     alerts.push({
       kind: 'provider_burst',
@@ -457,6 +526,7 @@ function providerBursts(
       lines: [
         `Кабинетов задето: ${clients.length} — похоже на площадку, а не на один кабинет.`,
         ...clients.slice(0, 3).map(([clientId, count]) => `${clientId}: ${count}`),
+        ...(loud.length > 0 ? [`Сверх кабинетного порога: ${listClients(loud)}.`] : []),
         `Первая: ${formatMsk(first.createdAt, 'HH:mm')} — ${truncate(first.message, 160)}`,
         ...topCodes(inWindow).map(([code, count]) => `${code}: ${count}`),
       ],
@@ -464,6 +534,13 @@ function providerBursts(
   }
 
   return alerts;
+}
+
+/** Кабинеты с числами в одну строку: три поимённо, остальные счётом. */
+function listClients(clients: ReadonlyArray<[string, number]>): string {
+  const named = clients.slice(0, 3).map(([clientId, count]) => `${clientId} (${count})`);
+  const rest = clients.length - named.length;
+  return rest > 0 ? `${named.join(', ')} и ещё ${rest}` : named.join(', ');
 }
 
 function describeScope(row: ErrorRow): string {
@@ -518,6 +595,7 @@ export async function runAlertScan(options: AlertOptions = {}): Promise<AlertRun
     detected: alerts.length,
     sent: 0,
     suppressed: 0,
+    folded: 0,
     truncated: 0,
     alerts,
   };
@@ -531,12 +609,36 @@ export async function runAlertScan(options: AlertOptions = {}): Promise<AlertRun
   }
 
   // Проверяем, но не отмечаем: отметку ставит только состоявшаяся отправка.
-  const passing = alerts
-    .filter((alert) => limiter.isAllowed(alert.key, now))
-    // Резать хвост придётся по лимиту прогона — пусть под нож идёт warning,
-    // а не 401, который дороже всех остальных вместе взятых.
-    .sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
-  summary.suppressed = alerts.length - passing.length;
+  const allowed = alerts.filter((alert) => limiter.isAllowed(alert.key, now));
+  summary.suppressed = alerts.length - allowed.length;
+
+  /**
+   * Свёрнутые поводы — только под родителя, который сегодня заговорит.
+   *
+   * Родитель в тишине не имеет права уносить их с собой: тогда полчаса тишины
+   * по площадке съедали бы и всплеск у кабинета, сломавшегося уже после того,
+   * как тревога по площадке ушла. Своя тишина у свёрнутого повода тоже есть —
+   * её ставит доставка родителя (`markSent` ниже), потому что внутри его текста
+   * повод человеку рассказан.
+   */
+  const speaking = new Set(allowed.map((alert) => alert.key));
+  const foldedUnder = new Map<string, Alert[]>();
+  const passing: Alert[] = [];
+  for (const alert of allowed) {
+    const parent = alert.foldedInto;
+    if (parent !== undefined && parent !== alert.key && speaking.has(parent)) {
+      const siblings = foldedUnder.get(parent);
+      if (siblings) siblings.push(alert);
+      else foldedUnder.set(parent, [alert]);
+      summary.folded += 1;
+      continue;
+    }
+    passing.push(alert);
+  }
+
+  // Резать хвост придётся по лимиту прогона — пусть под нож идёт warning,
+  // а не 401, который дороже всех остальных вместе взятых.
+  passing.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
 
   const toSend = passing.slice(0, MAX_ALERTS_PER_RUN);
   summary.truncated = passing.length - toSend.length;
@@ -547,6 +649,9 @@ export async function runAlertScan(options: AlertOptions = {}): Promise<AlertRun
       // Только здесь: недоставленный алерт обязан пробиться на следующем тике,
       // а не молчать полчаса, ни разу никому не показавшись.
       limiter.markSent(alert.key, now, alert.cooldownMs);
+      for (const folded of foldedUnder.get(alert.key) ?? []) {
+        limiter.markSent(folded.key, now, folded.cooldownMs);
+      }
       summary.sent += 1;
     } catch (err) {
       // Алерт об упавшей отправке алерта отправить некуда — остаётся лог.
@@ -568,7 +673,12 @@ export async function runAlertScan(options: AlertOptions = {}): Promise<AlertRun
   }
 
   log.info(
-    { detected: summary.detected, sent: summary.sent, suppressed: summary.suppressed },
+    {
+      detected: summary.detected,
+      sent: summary.sent,
+      suppressed: summary.suppressed,
+      folded: summary.folded,
+    },
     'alert scan finished',
   );
   return summary;

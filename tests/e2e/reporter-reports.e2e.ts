@@ -40,6 +40,7 @@ import {
   CooldownLimiter,
   NO_DATA_NOTE,
   PROVISIONAL_NOTE,
+  REPORT_FAILURE_CODES,
   runAlertScan,
   runDailyReports,
   runWeeklyReports,
@@ -371,17 +372,26 @@ describe('отчёты клиенту: дневной и недельный', ()
     });
 
     /**
-     * Было сломано: отказ доставки писался в `ErrorLog` кодом `REPORT_FAILED`, и
-     * на эту строку не поднималось ничего. Порог всплеска — больше 10 ошибок за
-     * 5 минут в одном бакете, а кода не было ни в наборе авторизационных, ни в
-     * наборе units: недоставленный отчёт не будил никого никогда, и человек
-     * узнавал о нём, только если сам лез в журнал. «Записали в журнал» и
-     * «сообщили человеку» — разные вещи, и первое регулярно принимают за второе.
+     * Было сломано дважды. Сначала — отказ доставки писался в `ErrorLog`, и на
+     * эту строку не поднималось ничего: порог всплеска до одной записи не
+     * дотягивается, а кода не было ни в наборе авторизационных, ни в наборе
+     * units. Человек узнавал о неушедшем отчёте, только если сам лез в журнал.
+     *
+     * Второе: `recordFailure` писала всем отказам один код `REPORT_FAILED`, а
+     * тревоги ждали ещё и `REPORT_DELIVERY_FAILED`, которого не писал никто, —
+     * мёртвая ветка, выглядевшая работающей защитой. Отличить неушедший отчёт
+     * от несобравшегося было не по чему, и вид отказа угадывался по имени этапа.
+     * Здесь проверяется, что в журнал попадает именно код недоставки: это
+     * единственное место, где путь «Telegram упал → строка в журнале → тревога»
+     * проходится целиком, а не собирается из фикстур.
      */
-    it('отказ записан в ErrorLog — и одной записи хватает на тревогу', async () => {
+    it('отказ записан в ErrorLog кодом недоставки — и одной записи хватает на тревогу', async () => {
       const failures = await prisma.errorLog.findMany({ where: { scope: 'reporter:daily' } });
       expect(failures).toHaveLength(1);
-      expect(failures[0]).toMatchObject({ clientId: flaky.clientId, code: 'REPORT_FAILED' });
+      expect(failures[0]).toMatchObject({
+        clientId: flaky.clientId,
+        code: REPORT_FAILURE_CODES.delivery,
+      });
       expect(failures[0]?.message).toContain('Failed to deliver report');
 
       const sentBefore = tg.sent.length;
@@ -407,6 +417,9 @@ describe('отчёты клиенту: дневной и недельный', ()
       const text = plain(tg.last().text);
       expect(text).toContain('Отчёт не ушёл клиенту (daily)');
       expect(text).toContain(flaky.clientId);
+      // Отчёт лежит в БД целиком — человеку важно, что чинить надо канал, а не
+      // расчёт, и что текст уйдёт сам.
+      expect(text).toContain('Текст уже в БД');
 
       // И не спамит: следующий тик крона видит ту же строку и молчит.
       const repeat = await runAlertScan({ ...alertOptions, now: () => new Date() });

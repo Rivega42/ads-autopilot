@@ -67,7 +67,10 @@ export {
   describeFailure,
   recordFailure,
   ReportDeliveryError,
+  REPORT_FAILURE_CODE_VALUES,
+  REPORT_FAILURE_CODES,
   type ReportFailure,
+  type ReportFailureCode,
 } from '@/reporter/errors.js';
 export {
   activeCampaigns,

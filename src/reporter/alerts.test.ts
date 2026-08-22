@@ -16,6 +16,7 @@ import {
   MAX_ERROR_ROWS,
   PROVIDER_BURST_THRESHOLD,
 } from '@/reporter/alerts.js';
+import { REPORT_FAILURE_CODES } from '@/reporter/errors.js';
 import { CooldownLimiter } from '@/reporter/rate-limit.js';
 
 const NOW = new Date('2026-08-08T09:00:00Z');
@@ -59,9 +60,20 @@ function seedReportFailures(count: number, patch: Partial<FakeErrorRow> = {}): v
       clientId: 'cl1',
       provider: null,
       scope: 'reporter:daily',
-      code: 'REPORT_FAILED',
+      code: REPORT_FAILURE_CODES.delivery,
       message: 'Failed to deliver report r1 for client cl1',
       ...patch,
+    });
+  }
+}
+
+/** Отказ площадки: `clients` кабинетов, каждый сам по себе за порогом всплеска. */
+function seedOutage(clients: number, createdAt: Date = new Date(NOW.getTime() - 60_000)): void {
+  for (let i = 0; i < clients; i += 1) {
+    seedBurst(ERROR_BURST_THRESHOLD + 1, {
+      clientId: `cl-${i}`,
+      provider: 'VK_ADS',
+      createdAt,
     });
   }
 }
@@ -219,6 +231,27 @@ describe('detectAlerts', () => {
     expect(new Set(alerts.map((a) => a.key)).size).toBe(2);
   });
 
+  it('несобравшийся отчёт и неушедший — разные поводы с разными заголовками', async () => {
+    seedReportFailures(1);
+    seedReportFailures(1, {
+      code: REPORT_FAILURE_CODES.build,
+      message: 'Error: metrics query exploded',
+    });
+
+    const alerts = await detectAlerts(deps());
+
+    // Этап один — `daily`, а поломки разные: одна лечится повтором, вторая
+    // требует разбора причины. Раньше вид отказа угадывался по имени этапа, и
+    // упавший расчёт объявлялся неушедшим клиенту отчётом.
+    expect(alerts.map((a) => a.title)).toEqual([
+      'Отчёт не ушёл клиенту (daily)',
+      'Сбой отчётности (daily)',
+    ]);
+    expect(new Set(alerts.map((a) => a.key)).size).toBe(2);
+    expect(alerts[0]?.lines.join(' ')).toContain('Текст уже в БД');
+    expect(alerts[1]?.lines.join(' ')).toContain('Отчёт не собрался');
+  });
+
   it('пачка отказов одного клиента остаётся одним поводом', async () => {
     // Три попытки доставки за окно — одна поломка и одно сообщение, а не три.
     seedReportFailures(3);
@@ -252,16 +285,63 @@ describe('detectAlerts', () => {
     expect(PROVIDER_BURST_THRESHOLD).toBe(ERROR_BURST_THRESHOLD);
   });
 
-  it('поломка площадки отменяет кабинетные всплески по ней, а не добавляется к ним', async () => {
-    seedBurst(ERROR_BURST_THRESHOLD + 1, { clientId: 'cl1' });
-    seedBurst(3, { clientId: 'cl2' });
+  it('один сломанный кабинет и посторонняя ошибка соседа — это кабинет, а не площадка', async () => {
+    seedBurst(50, { clientId: 'cl1' });
+    seedBurst(1, { clientId: 'cl2' });
 
     const alerts = await detectAlerts(deps());
 
-    // Громкий кабинет сам по себе перебирает порог, но разговор идёт о площадке:
-    // два сообщения об одной поломке — начало флуда, а не полнота картины.
-    expect(alerts.map((a) => a.kind)).toEqual(['provider_burst']);
-    expect(alerts[0]?.lines.join(' ')).toContain('cl1: 11');
+    // Раньше «задето два кабинета» само по себе объявляло поломку площадкой:
+    // приходило «51 ошибка YANDEX_DIRECT, кабинетов задето 2» без клиента, а
+    // кабинетная тревога, которая назвала бы `cl1`, глушилась. Чинить надо было
+    // один кабинет, а сообщение звало разбираться с площадкой.
+    expect(alerts.map((a) => a.kind)).toEqual(['error_burst']);
+    expect(alerts[0]).toMatchObject({ clientId: 'cl1', provider: 'YANDEX_DIRECT' });
+    expect(alerts[0]?.foldedInto).toBeUndefined();
+  });
+
+  it('громкий кабинет на фоне мелочи у соседей не становится площадкой', async () => {
+    seedBurst(ERROR_BURST_THRESHOLD + 1, { clientId: 'cl1' });
+    seedBurst(3, { clientId: 'cl2' });
+    seedBurst(3, { clientId: 'cl3' });
+
+    const alerts = await detectAlerts(deps());
+
+    // Поодиночке соседи до порога не дотягивают и вместе тоже (3 + 3 ≤ 10):
+    // это фон, а не площадка. Виновник один, и тревога его называет.
+    expect(alerts.map((a) => a.kind)).toEqual(['error_burst']);
+    expect(alerts[0]?.clientId).toBe('cl1');
+  });
+
+  it('громкий кабинет вместе с настоящей поломкой площадки — площадка, но кабинет назван', async () => {
+    seedBurst(100, { clientId: 'cl1' });
+    seedBurst(6, { clientId: 'cl2' });
+    seedBurst(6, { clientId: 'cl3' });
+
+    const alerts = await detectAlerts(deps());
+
+    // `cl2` и `cl3` поодиночке до порога не дотягивают, вместе — перебирают:
+    // это площадка. Но `cl1` сыплется сверх неё, и тревога обязана это сказать,
+    // иначе «похоже на площадку» означает «с кем разбираться, догадайся сам».
+    expect(alerts.map((a) => a.kind)).toEqual(['provider_burst', 'error_burst']);
+    expect(alerts[0]?.lines.join(' ')).toContain('Сверх кабинетного порога: cl1 (100)');
+    expect(alerts[1]).toMatchObject({
+      clientId: 'cl1',
+      foldedInto: 'provider_burst:YANDEX_DIRECT',
+    });
+  });
+
+  it('несколько кабинетов, каждый за порогом, — площадка, а их всплески свёрнуты', async () => {
+    seedBurst(ERROR_BURST_THRESHOLD + 1, { clientId: 'cl1' });
+    seedBurst(ERROR_BURST_THRESHOLD + 2, { clientId: 'cl2' });
+
+    const alerts = await detectAlerts(deps());
+
+    expect(alerts.map((a) => a.kind)).toEqual(['provider_burst', 'error_burst', 'error_burst']);
+    expect(alerts.slice(1).every((a) => a.foldedInto === 'provider_burst:YANDEX_DIRECT')).toBe(
+      true,
+    );
+    expect(alerts[0]?.lines.join(' ')).toContain('Сверх кабинетного порога: cl2 (12), cl1 (11)');
   });
 
   it('всплеск одного кабинета остаётся кабинетным', async () => {
@@ -370,6 +450,58 @@ describe('runAlertScan', () => {
 
     expect(afterFirst).toBeGreaterThan(0);
     expect(db.statQueries).toBe(afterFirst);
+  });
+
+  it('отвалившаяся площадка даёт одно сообщение, а не по одному на кабинет', async () => {
+    seedOutage(12);
+
+    const summary = await runAlertScan(deps());
+
+    // Двенадцать сломанных кабинетов — двенадцать поводов, но одна поломка.
+    // Свёрнуты, а не выброшены: в тексте они названы.
+    expect(summary).toMatchObject({ detected: 13, sent: 1, folded: 12, truncated: 0 });
+    expect(messenger.sent).toHaveLength(1);
+    expect(messenger.sent[0]?.text).toContain('Кабинетов задето: 12');
+  });
+
+  it('свёрнутый кабинет не выстреливает вторым прогоном, когда площадка молчит', async () => {
+    seedOutage(12);
+    await runAlertScan(deps());
+
+    // Следующий тик: площадка всё так же сыплется, тишина по её ключу ещё идёт.
+    const later = new Date(NOW.getTime() + 5 * 60_000);
+    seedOutage(12, later);
+    const second = await runAlertScan(deps(later));
+
+    // Свёрнутый повод человек уже видел строкой — значит его тишина идёт вместе
+    // с родительской. Иначе прогон, следующий за поломкой площадки, вываливал бы
+    // в чат те самые двенадцать сообщений, от которых свёртка и защищает.
+    expect(second).toMatchObject({ sent: 0, folded: 0 });
+    expect(second.suppressed).toBe(second.detected);
+    expect(messenger.sent).toHaveLength(1);
+  });
+
+  it('всплеск у нового кабинета пробивается сквозь тишину по площадке', async () => {
+    seedOutage(12);
+    await runAlertScan(deps());
+
+    // Через пять минут сломался ещё один кабинет — своя поломка, о которой ещё
+    // никто не рассказывал. Раньше кабинетные всплески по «площадочному»
+    // провайдеру подавлялись безусловно, и все полчаса тишины по площадке этот
+    // кабинет оставался неизвестным.
+    const later = new Date(NOW.getTime() + 5 * 60_000);
+    seedOutage(12, later);
+    seedBurst(ERROR_BURST_THRESHOLD + 1, {
+      clientId: 'cl-new',
+      provider: 'VK_ADS',
+      createdAt: later,
+    });
+
+    const second = await runAlertScan(deps(later));
+
+    expect(second.sent).toBe(1);
+    expect(messenger.sent).toHaveLength(2);
+    expect(messenger.sent[1]?.text).toContain('cl\\-new');
   });
 
   it('лишние поводы схлопываются в одну строку', async () => {

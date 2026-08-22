@@ -29,6 +29,7 @@ import {
   ERROR_WINDOW_MINUTES,
   MAX_ALERTS_PER_RUN,
   PROVIDER_BURST_THRESHOLD,
+  REPORT_FAILURE_CODES,
   runAlertScan,
   setReportMessenger,
   SPEND_ALERT_COOLDOWN_MS,
@@ -217,20 +218,96 @@ describe('тревоги администратору', () => {
       expect(PROVIDER_BURST_THRESHOLD).toBe(ERROR_BURST_THRESHOLD);
     });
 
-    it('поломка площадки отменяет кабинетные всплески, а не добавляется к ним', async () => {
+    /**
+     * Было сломано: единственным условием «это площадка, а не кабинет» было
+     * «ошибки хотя бы у двух клиентов». Распределение не проверялось, и один
+     * протухший токен у `alpha` плюс посторонняя ошибка у `beta` давали тревогу
+     * «51 ошибка VK_ADS, кабинетов задето 2» с `clientId: null`. Кабинетная
+     * тревога, которая назвала бы `alpha`, при этом глушилась: человеку
+     * сообщали, что чинить надо площадку, тогда как чинить надо было один
+     * кабинет. Тревога, зовущая не туда, хуже её отсутствия — на неё тратят
+     * время, а потом перестают верить остальным.
+     */
+    it('сломанный кабинет и посторонняя ошибка соседа — это кабинет, а не площадка', async () => {
       await seedErrors([
-        { clientId: alpha.clientId, provider: 'VK_ADS', minutes: -3, count: 11 },
-        { clientId: beta.clientId, provider: 'VK_ADS', minutes: -3, count: 4 },
+        { clientId: alpha.clientId, provider: 'VK_ADS', minutes: -3, count: 50 },
+        { clientId: beta.clientId, provider: 'VK_ADS', minutes: -3, count: 1 },
       ]);
 
       const summary = await scan();
 
-      // Громкий кабинет сам перебирает порог, но разговор идёт о площадке: два
-      // сообщения об одной поломке — начало флуда, а не полнота картины. Именно
-      // это удерживает от спама отвалившуюся площадку с полусотней клиентов.
-      expect(kindsOf(summary)).toEqual(['provider_burst']);
+      expect(kindsOf(summary)).toEqual(['error_burst']);
+      expect(summary.alerts[0]).toMatchObject({ clientId: alpha.clientId, provider: 'VK_ADS' });
+      const text = plain(tg.last().text);
+      expect(text).toContain('50 ошибок за 5 мин');
+      expect(text).toContain(alpha.clientId);
+      expect(text).not.toContain('похоже на площадку');
+    });
+
+    it('громкий кабинет поверх настоящей поломки площадки назван в её тексте', async () => {
+      await seedErrors([
+        { clientId: alpha.clientId, provider: 'VK_ADS', minutes: -3, count: 30 },
+        { clientId: beta.clientId, provider: 'VK_ADS', minutes: -3, count: 6 },
+        { clientId: spike.clientId, provider: 'VK_ADS', minutes: -3, count: 6 },
+      ]);
+
+      const summary = await scan();
+
+      // `beta` и `spike` поодиночке порога не берут, вместе — берут: площадка.
+      // Но `alpha` сыплется сверх неё, и его всплеск не выброшен, а свёрнут в
+      // строку: одно сообщение, в котором виновник назван поимённо.
+      expect(kindsOf(summary)).toEqual(['error_burst', 'provider_burst']);
+      expect(summary).toMatchObject({ sent: 1, folded: 1, suppressed: 0 });
       expect(tg.sent).toHaveLength(1);
-      expect(plain(tg.last().text)).toContain(`${alpha.clientId}: 11`);
+      const text = plain(tg.last().text);
+      expect(text).toContain('42 ошибок VK_ADS за 5 мин');
+      expect(text).toContain(`Сверх кабинетного порога: ${alpha.clientId} (30)`);
+    });
+
+    /**
+     * Второе следствие безусловного подавления: ключ `provider_burst` остывает
+     * полчаса, а кабинетные всплески по этой площадке гасились независимо от
+     * того, заговорила тревога по площадке или молчит. Значит все полчаса по
+     * площадке не приходило вообще ничего — включая всплеск у кабинета,
+     * сломавшегося уже после того, как тревога ушла.
+     */
+    it('всплеск у нового кабинета пробивается сквозь тишину по площадке', async () => {
+      const outage = [alpha, beta, spike, collapse].map((client) => ({
+        clientId: client.clientId,
+        provider: 'VK_ADS' as const,
+        minutes: -3,
+        count: ERROR_BURST_THRESHOLD + 1,
+      }));
+      await seedErrors(outage);
+
+      const first = await scan();
+
+      // Четыре сломанных кабинета — одно сообщение, а не четыре.
+      expect(first).toMatchObject({ sent: 1, folded: 4 });
+      expect(tg.sent).toHaveLength(1);
+
+      // Пять минут спустя: площадка всё так же сыплется, и вдобавок сломался
+      // ещё один кабинет.
+      const later = 5;
+      await seedErrors([
+        ...outage.map((row) => ({ ...row, minutes: later - 3 })),
+        {
+          clientId: steady.clientId,
+          provider: 'VK_ADS' as const,
+          minutes: later - 3,
+          count: ERROR_BURST_THRESHOLD + 1,
+        },
+      ]);
+
+      const second = await scan({ now: () => at(later) });
+
+      // Ровно одно новое сообщение — про новый кабинет. Старые свёрнутые поводы
+      // молчат: их человек уже видел строкой внутри тревоги по площадке.
+      expect(second.sent).toBe(1);
+      expect(tg.sent).toHaveLength(2);
+      const text = plain(tg.last().text);
+      expect(text).toContain(steady.clientId);
+      expect(text).not.toContain('похоже на площадку');
     });
 
     it('всплеск одного кабинета остаётся кабинетным и называет кабинет', async () => {
@@ -348,11 +425,11 @@ describe('тревоги администратору', () => {
     });
 
     /**
-     * Было сломано: недоставленный отчёт писал в `ErrorLog` строку с кодом
-     * `REPORT_FAILED`, и на неё не поднималось ничего — кода нет ни в наборе
-     * авторизационных, ни в наборе units, а до порога всплеска одной записи не
-     * хватает. Человек узнавал о неушедшем отчёте, только если сам лез в
-     * журнал. Теперь такой код кричит поштучно.
+     * Было сломано: недоставленный отчёт писал в `ErrorLog` строку, и на неё не
+     * поднималось ничего — кода нет ни в наборе авторизационных, ни в наборе
+     * units, а до порога всплеска одной записи не хватает. Человек узнавал о
+     * неушедшем отчёте, только если сам лез в журнал. Теперь такой код кричит
+     * поштучно.
      */
     it('недоставленный отчёт поднимает тревогу с первой записи', async () => {
       await seedErrors([
@@ -360,7 +437,7 @@ describe('тревоги администратору', () => {
           clientId: alpha.clientId,
           provider: null,
           scope: 'reporter:daily',
-          code: 'REPORT_FAILED',
+          code: REPORT_FAILURE_CODES.delivery,
           message: 'Failed to deliver report rep-1 for client alpha',
           minutes: -1,
         },
@@ -385,19 +462,56 @@ describe('тревоги администратору', () => {
       expect(tg.sent).toHaveLength(1);
     });
 
+    /**
+     * Было сломано: `recordFailure` писала обоим видам отказа один код, а вид
+     * угадывался по имени этапа — `daily` и `weekly` считались недоставкой
+     * всегда. Дневной отчёт, упавший на расчёте, объявлялся неушедшим клиенту:
+     * человек шёл проверять Telegram, тогда как отчёта не существовало вовсе.
+     */
+    it('несобравшийся отчёт и неушедший — разные тревоги, а не один заголовок', async () => {
+      await seedErrors([
+        {
+          clientId: alpha.clientId,
+          scope: 'reporter:daily',
+          code: REPORT_FAILURE_CODES.delivery,
+          message: 'Failed to deliver report rep-1 for client alpha',
+          minutes: -2,
+        },
+        {
+          clientId: alpha.clientId,
+          scope: 'reporter:daily',
+          code: REPORT_FAILURE_CODES.build,
+          message: 'Error: metrics query exploded',
+          minutes: -1,
+        },
+      ]);
+
+      const summary = await scan();
+
+      // Один кабинет и один этап, но поломки разные: у первой действие —
+      // разобраться с каналом (текст уйдёт сам), у второй — с причиной расчёта.
+      expect(kindsOf(summary)).toEqual(['report_failed', 'report_failed']);
+      expect(summary.sent).toBe(2);
+      const texts = tg.plainTexts();
+      expect(texts.some((text) => text.includes('🚨 *Отчёт не ушёл клиенту (daily)*'))).toBe(true);
+      expect(texts.some((text) => text.includes('🚨 *Сбой отчётности (daily)*'))).toBe(true);
+      expect(texts.some((text) => text.includes('Текст уже в БД'))).toBe(true);
+      expect(texts.some((text) => text.includes('Отчёт не собрался'))).toBe(true);
+    });
+
     it('отказ дневного отчёта и отказ недельного — разные поводы', async () => {
       await seedErrors([
         {
           clientId: alpha.clientId,
           scope: 'reporter:daily',
-          code: 'REPORT_FAILED',
+          code: REPORT_FAILURE_CODES.delivery,
           message: 'Failed to deliver report rep-1 for client alpha',
           minutes: -2,
         },
         {
           clientId: alpha.clientId,
           scope: 'reporter:weekly',
-          code: 'REPORT_FAILED',
+          code: REPORT_FAILURE_CODES.delivery,
           message: 'Failed to deliver report rep-2 for client alpha',
           minutes: -1,
         },
@@ -419,7 +533,7 @@ describe('тревоги администратору', () => {
           {
             clientId,
             scope: 'reporter:daily',
-            code: 'REPORT_FAILED',
+            code: REPORT_FAILURE_CODES.delivery,
             message: `Failed to deliver report for client ${clientId}`,
             minutes: -2,
           },
@@ -427,7 +541,7 @@ describe('тревоги администратору', () => {
           {
             clientId,
             scope: 'reporter:daily',
-            code: 'REPORT_FAILED',
+            code: REPORT_FAILURE_CODES.delivery,
             message: `Failed to deliver report for client ${clientId}`,
             minutes: -1,
           },
