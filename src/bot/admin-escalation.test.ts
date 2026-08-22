@@ -31,7 +31,10 @@ interface LoggedError {
  * строки, что подошли под `where`. Заглушка, всегда отвечающая «создал», показала бы
  * дедупликацию работающей ровно там, где её нет.
  */
-function fakeStore(rows: Row[] = []): {
+function fakeStore(
+  rows: Row[] = [],
+  opts: { loseCreateAnswer?: boolean } = {},
+): {
   db: EscalationStore;
   rows: Row[];
   errors: LoggedError[];
@@ -84,6 +87,12 @@ function fakeStore(rows: Row[] = []): {
         }
         const row = { key: data.key, expiresAt: data.expiresAt };
         store.push(row);
+        // Оборванный ответ: INSERT закоммичен, а вызывающий видит ошибку. Так
+        // выглядит потеря соединения с Postgres, и заглушка обязана уметь именно
+        // это — «упало» и «не записалось» здесь разные вещи.
+        if (opts.loseCreateAnswer) {
+          return Promise.reject(new Error('Connection terminated unexpectedly'));
+        }
         return Promise.resolve(row);
       },
     },
@@ -167,8 +176,10 @@ describe('claimEscalation', () => {
     const claim = await claimEscalation('cl1', 'landingUrl', { db: brokenStore, now: now(T0) });
 
     expect(claim).not.toBeNull();
-    // Строки за таким захватом нет — и отпускать ему нечего.
-    expect(claimed(claim).heldUntil).toBeNull();
+    // Срок захват несёт в любом случае: упавший вызов не доказывает, что строки
+    // нет, — INSERT мог закоммититься, а ответ не доехать. Отпускать такому
+    // захвату есть что.
+    expect(claimed(claim).heldUntil.getTime()).toBe(T0.getTime() + ESCALATION_WINDOW_MS);
   });
 });
 
@@ -191,17 +202,21 @@ describe('releaseEscalation', () => {
     ).not.toBeNull();
   });
 
-  it('захват без строки не сносит чужой живой захват', async () => {
-    // Сбой хранилища у соседнего хода — это fail-open: письмо уходит, строки за ним
-    // нет. Если такой ход не доставит письмо и отпустит захват по одному ключу, он
-    // сотрёт живую строку другого хода — и следующее сообщение клиента принесёт
-    // Роману второе письмо про ту же самую ситуацию.
+  it('захват со сбоем не сносит чужой живой захват', async () => {
+    // Сбой хранилища у соседнего хода — это fail-open: письмо уходит, а есть ли за
+    // ним строка, неизвестно. Если такой ход не доставит письмо и отпустит захват
+    // по одному ключу, он сотрёт живую строку другого хода — и следующее сообщение
+    // клиента принесёт Роману второе письмо про ту же самую ситуацию. Отпускается
+    // поэтому не ключ, а строка со своим сроком: у соседнего хода он другой.
     const { db, rows } = fakeStore();
     const owner = claimed(
       await claimEscalation('cl1', 'no-landing:landingUrl', { db, now: now(T0) }),
     );
     const failOpen = claimed(
-      await claimEscalation('cl1', 'no-landing:landingUrl', { db: brokenStore, now: now(T0) }),
+      await claimEscalation('cl1', 'no-landing:landingUrl', {
+        db: brokenStore,
+        now: now(new Date(T0.getTime() + 17)),
+      }),
     );
 
     await releaseEscalation(failOpen, { db });
@@ -215,6 +230,33 @@ describe('releaseEscalation', () => {
     // А владелец свой захват отпускает по-прежнему.
     await releaseEscalation(owner, { db });
     expect(rows).toHaveLength(0);
+  });
+
+  /**
+   * Блокер: fail-open, у которого строка всё-таки записалась.
+   *
+   * `claimEscalation` возвращает захват и при сбое хранилища — иначе клиент, о
+   * котором никто не узнал, останется без человека. Но «клиент упал» и «строки
+   * нет» — разные вещи: INSERT мог закоммититься, а ответ не доехать. Пока такой
+   * захват считался пустым, недоставленное письмо оставляло строку на сутки —
+   * и все следующие поводы по этому клиенту гасли молча, хотя ему только что
+   * пообещали человека.
+   */
+  it('отпускает строку, которая записалась, хотя ответа хранилища не было', async () => {
+    const { db, rows } = fakeStore([], { loseCreateAnswer: true });
+    const claim = claimed(
+      await claimEscalation('cl1', 'no-landing:landingUrl', { db, now: now(T0) }),
+    );
+    expect(rows).toHaveLength(1);
+
+    // Письмо не ушло — захват возвращается.
+    await releaseEscalation(claim, { db });
+
+    expect(rows).toHaveLength(0);
+    const later = new Date(T0.getTime() + 60_000);
+    expect(
+      await claimEscalation('cl1', 'no-landing:landingUrl', { db, now: now(later) }),
+    ).not.toBeNull();
   });
 
   it('не трогает захват по другому основанию и по другому клиенту', async () => {

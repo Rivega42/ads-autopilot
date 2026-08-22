@@ -1,7 +1,7 @@
 import { BriefStatus } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { seedCampaignClient } from './support/campaign-create-seed.js';
+import { plannerStubs, seedCampaignClient, structureOf } from './support/campaign-create-seed.js';
 import { resetDatabase } from './support/database.js';
 
 import type { ClientBriefData } from '@/ai/onboarding/brief.schema.js';
@@ -16,6 +16,7 @@ import {
 } from '@/ai/onboarding/index.js';
 import { interviewTurnSchema } from '@/ai/onboarding/turn.schema.js';
 import { checkCampaignEntry } from '@/campaigns/entry.js';
+import { EmptyPlanError, planCampaigns } from '@/campaigns/planner.js';
 import { prisma } from '@/db/prisma.js';
 
 /**
@@ -323,6 +324,67 @@ describe('клиент с группой в ВК вместо сайта', () =>
 });
 
 /**
+ * Имя файла вместо сайта: цена ошибки видна в `href`, а не в разборе.
+ *
+ * Строгая половина разбора («можно ли это записать») к записи подключена не была:
+ * `proveLandingUrl` спрашивала только «есть ли эта строка в переписке», и
+ * `https://каталог.pdf` от модели проходил как названный клиентом. Дальше — бриф
+ * COMPLETE, вход в кампанию открыт, `Ads.add` с `Href = https://каталог.pdf`, и
+ * клиент платит за клики в никуда.
+ *
+ * Поэтому проверяется не вердикт функции, а судьба объявления: план до `href`
+ * доходить не должен вовсе.
+ */
+describe('файл вместо сайта не становится целью показа объявления', () => {
+  let clientId: string;
+  let step: InterviewStep;
+
+  beforeAll(async () => {
+    clientId = await seedLegacyClient();
+    const script = runner([
+      { reply: 'Куда вести людей — какой сайт?', asking: 'landingUrl' },
+      // Модель обернула имя файла в схему и объявила бриф собранным.
+      {
+        reply: 'Записал, бриф собран.',
+        updates: { landingUrl: 'https://каталог.pdf' },
+        done: true,
+      },
+    ]);
+
+    await startInterview(clientId, { run: script.run });
+    step = await handleAnswer(clientId, 'сайта у нас нет, есть только каталог.pdf', {
+      run: script.run,
+    });
+  });
+
+  it('интервью не объявляет бриф собранным', () => {
+    expect(step.kind).not.toBe('complete');
+  });
+
+  it('в строку брифа имя файла не уезжает', async () => {
+    const row = await prisma.clientBrief.findUnique({
+      where: { clientId },
+      select: { status: true, data: true },
+    });
+    expect(row?.status).toBe(BriefStatus.IN_PROGRESS);
+    expect(row?.data).not.toHaveProperty('landingUrl');
+  });
+
+  it('план объявления не строится: ставить в href нечего', async () => {
+    const stubs = plannerStubs(structureOf(1, 5));
+    await expect(
+      planCampaigns(clientId, { runStructure: stubs.runStructure, runTexts: stubs.runTexts }),
+    ).rejects.toBeInstanceOf(EmptyPlanError);
+    // До модели дело не дошло — платить за план без цели показа не за что.
+    expect(stubs.structureCalls).toBe(0);
+  });
+
+  it('вход в кампанию по-прежнему упирается в ссылку', async () => {
+    expect((await checkCampaignEntry(clientId)).kind).toBe('landing_missing');
+  });
+});
+
+/**
  * Сайт в зоне-слове: `школа.москва`.
  *
  * Зоны `москва`, `дети`, `онлайн`, `сайт`, `рус` сами по себе адрес не доказывают —
@@ -380,5 +442,21 @@ describe('сайт в зоне-слове доводит интервью до �
 
   it('вход в кампанию после этого открыт', async () => {
     expect((await checkCampaignEntry(clientId)).kind).toBe('ready');
+  });
+
+  it('этот адрес и уезжает в href объявления', async () => {
+    // Вторая половина той же проверки: сайт, названный клиентом, обязан доехать
+    // до цели показа целиком — иначе «строгая половина» защищала бы клиента,
+    // отбирая у него кампанию.
+    const stubs = plannerStubs(structureOf(1, 5));
+    const plan = await planCampaigns(clientId, {
+      runStructure: stubs.runStructure,
+      runTexts: stubs.runTexts,
+    });
+    const hrefs = plan.campaigns.flatMap((c) =>
+      c.adGroups.flatMap((g) => g.ads.map((ad) => ad.href)),
+    );
+    expect(hrefs.length).toBeGreaterThan(0);
+    expect([...new Set(hrefs)]).toEqual([MODEL_SITE_URL]);
   });
 });
