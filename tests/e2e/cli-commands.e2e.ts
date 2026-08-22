@@ -1,0 +1,141 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { seedCampaignClient } from './support/campaign-create-seed.js';
+import { runCli } from './support/cli-process.js';
+import { resetDatabase } from './support/database.js';
+
+import type { ClientBriefData } from '@/ai/onboarding/brief.schema.js';
+import { prisma } from '@/db/prisma.js';
+
+/**
+ * Остальные печатающие пути CLI.
+ *
+ * Ни один из них не запускал ни один тест: единственной командой, проверенной
+ * настоящим процессом, была `campaign`. «Завершилась нулём» здесь ничего не
+ * значит — сверяется то, что человек должен прочитать.
+ *
+ * Все команды взяты без `--apply`, поэтому наружу не уходит ни одного запроса:
+ * ни к площадкам, ни к модели.
+ */
+
+function briefOf(over: Partial<ClientBriefData> = {}): ClientBriefData {
+  return {
+    product: 'Курсы английского для программистов',
+    audience: { description: 'Разработчики 25-40 лет', ageFrom: 25, ageTo: 40 },
+    geo: ['Москва'],
+    negativeCities: [],
+    usp: ['IT-лексика'],
+    targetCpaRub: 2_000,
+    dailyBudgetRub: 5_000,
+    budgetScope: 'per_channel',
+    competitors: [{ name: 'Skyeng' }],
+    conversionGoals: [{ name: 'заявка с формы' }],
+    metrika: null,
+    landingUrl: 'https://example.com/kursy',
+    ...over,
+  };
+}
+
+let clientId = '';
+
+beforeAll(async () => {
+  await resetDatabase();
+  clientId = await seedCampaignClient({
+    tgUserId: 890000001n,
+    name: 'ООО «Английский»',
+    token: 'cli-commands-token',
+    brief: briefOf(),
+  });
+});
+
+afterAll(async () => {
+  await prisma.$disconnect();
+});
+
+describe('channels', () => {
+  it('перечисляет зарегистрированные адаптеры поимённо', async () => {
+    const result = await runCli(['channels']);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Зарегистрировано адаптеров:');
+    expect(result.stdout).toContain('YANDEX_DIRECT');
+    expect(result.stdout).toContain('VK_ADS');
+  });
+});
+
+describe('creatives', () => {
+  it('без --client не гадает, чей бриф брать', async () => {
+    const result = await runCli(['creatives']);
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toContain('--client');
+  });
+
+  it('говорит, что бриф готов, и что генерация платная — но не тратит денег', async () => {
+    const result = await runCli(['creatives', '--client', clientId]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Горячий спрос');
+    // Ровно то, ради чего команда требует --apply: DRY_RUN защищает кабинеты,
+    // а не кошелёк, и вызов модели платный при любом его значении.
+    expect(result.stdout).toContain('--apply');
+    expect(await prisma.creative.count()).toBe(0);
+  });
+
+  it('клиенту без брифа отказывает словами, а не исключением', async () => {
+    const bare = await prisma.client.create({
+      data: { tgUserId: 890000002n, name: 'Без брифа' },
+      select: { id: true },
+    });
+    const result = await runCli(['creatives', '--client', bare.id]);
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toContain('нет брифа');
+  });
+});
+
+describe('backfill-metrika', () => {
+  it('черновой прогон называет число просмотренных брифов и не пишет в БД', async () => {
+    const before = await prisma.client.findMany({
+      select: { metrikaCounterId: true, metrikaGoalId: true },
+    });
+
+    const result = await runCli(['backfill-metrika', '--dry-run']);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Черновой прогон');
+    expect(result.stdout).toContain('Просмотрено брифов:');
+
+    const after = await prisma.client.findMany({
+      select: { metrikaCounterId: true, metrikaGoalId: true },
+    });
+    expect(after).toEqual(before);
+  });
+});
+
+describe('ingest', () => {
+  it('печатает разбор по клиентам, а не молчит', async () => {
+    // У клиента заведён доступ, но кампаний нет и площадку никто не зовёт:
+    // загрузка отчитывается пустым результатом. Проверяется именно печать —
+    // до этого сценария вывод команды не сверялся ни с чем.
+    const result = await runCli(['ingest', '--client', 'нет-такого-клиента']);
+    expect(result.code).toBe(0);
+    expect(result.stdout.trim().startsWith('{')).toBe(true);
+    // Окно загрузки и число кабинетов — то, ради чего команду и запускают руками.
+    expect(result.stdout).toContain('"targets": 0');
+    expect(result.stdout).toContain('"from"');
+    expect(result.stdout).toContain('"failures"');
+  });
+});
+
+describe('разбор команды', () => {
+  it('неизвестная команда названа и показана справка', async () => {
+    const result = await runCli(['optimizee']);
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toContain('Неизвестная команда: optimizee');
+    expect(result.stdout).toContain('Команды:');
+  });
+
+  it('--dry-run понимают все команды, а не одна', async () => {
+    for (const command of ['clients', 'channels', 'backfill-metrika']) {
+      const result = await runCli([command, '--dry-run']);
+      expect(result.output).not.toContain('Unknown option');
+      expect(result.code).toBe(0);
+    }
+  });
+});

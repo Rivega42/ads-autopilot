@@ -236,7 +236,12 @@ docker compose -f docker-compose.prod.yml logs worker | grep 'worker started'
 docker compose -f docker-compose.prod.yml run --rm -e ROLE=cli api --help
 docker compose -f docker-compose.prod.yml run --rm -e ROLE=cli api clients
 docker compose -f docker-compose.prod.yml run --rm -e ROLE=cli api campaign --client <id>
+docker compose -f docker-compose.prod.yml run --rm -e ROLE=cli api optimize --dry-run
 ```
+
+Справка это знает сама: `printUsage` смотрит, чем запущен процесс, и в образе
+печатает `docker compose … -e ROLE=cli api …`, а в дереве исходников — `pnpm cli`.
+Раньше строка «Использование: pnpm cli …» врала ровно тому, кто читал её здесь.
 
 Сервис в команде — любой из тех, что собраны из бэкенд-образа (`api` подходит):
 `run` поднимает отдельный контейнер и в общую схему стека не вмешивается. Без

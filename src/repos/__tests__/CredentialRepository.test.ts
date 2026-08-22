@@ -34,6 +34,9 @@ async function newClient() {
 
 async function auditRows() {
   return prisma.auditLog.findMany({
+    // Только записи про секреты: заведение клиента с недавних пор тоже ложится
+    // в журнал, и общий список ловил бы чужую строку из `newClient()`.
+    where: { action: { startsWith: 'credential.' } },
     orderBy: { id: 'asc' },
     select: { actor: true, action: true, resource: true, metadata: true },
   });

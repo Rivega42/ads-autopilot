@@ -72,6 +72,30 @@ export function describeFields(payload: Record<string, unknown>): CredentialFiel
 }
 
 /**
+ * Объяснение неудачного разбора JSON — без единого символа разобранного текста.
+ *
+ * Текст ошибки от `JSON.parse` подставлять сюда нельзя: V8 в Node 22 вставляет в
+ * него окно вокруг места сбоя, и на самой обычной опечатке (забытые кавычки
+ * вокруг токена) наружу уезжает начало секрета — `Unexpected token 'y',
+ * ..."ssToken": y0_AgAAAAA"... is not valid JSON`. Дальше CLI кладёт это в лог
+ * целиком, а логировать от токена разрешено только последние четыре символа
+ * (CLAUDE.md §6).
+ *
+ * Позицию сбоя V8 сообщает в другой форме сообщений и содержимого в ней нет —
+ * её забираем: без неё человеку негде искать опечатку.
+ */
+export function describeJsonFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message : '';
+  const at = /at position (\d+)/.exec(message)?.[1];
+  return (
+    'Ввод похож на JSON, но не разбирается' +
+    (at === undefined ? '' : ` (позиция ${at})`) +
+    '. Чаще всего это забытая кавычка вокруг значения или лишняя запятая. ' +
+    'Сам ввод не показываем: в тексте ошибки разборщика видна часть секрета.'
+  );
+}
+
+/**
  * Разбирает ввод: либо JSON-объект, либо голая строка.
  * JSON узнаём по первому символу, а не попыткой распарсить: токен Директа —
  * тоже валидный JSON-скаляр в кавычках, и «попробуем разобрать» превратило бы
@@ -84,9 +108,7 @@ function parseInput(raw: string): Record<string, unknown> | string {
   try {
     parsed = JSON.parse(trimmed);
   } catch (err) {
-    throw new AppError(`Ввод похож на JSON, но не разбирается: ${(err as Error).message}`, {
-      code: 'CREDENTIAL_PAYLOAD_MALFORMED',
-    });
+    throw new AppError(describeJsonFailure(err), { code: 'CREDENTIAL_PAYLOAD_MALFORMED' });
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new AppError('Ожидался JSON-объект с полями секрета.', {

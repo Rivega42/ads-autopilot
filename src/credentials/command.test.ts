@@ -160,6 +160,35 @@ describe('credentials exchange', () => {
     expect(exchangeCode).toHaveBeenCalledWith(CODE, { clientLogin: 'romashka-ads' });
   });
 
+  it('сломанный JSON с кодом не выносит код в текст ошибки', async () => {
+    // Тот же путь утечки, что у `credentials set`: V8 вставляет в текст ошибки
+    // окно вокруг места сбоя, а CLI кладёт этот текст в лог целиком.
+    const secretCode = 'y0AgAAAAAcodesecretvalue';
+    const broken = `{"clientLogin":"ivan","code": ${secretCode}}`;
+
+    // Якорь: без него проверка перестанет что-либо значить, если V8 сменит формат.
+    let raw = '';
+    try {
+      JSON.parse(broken);
+    } catch (err) {
+      raw = (err as Error).message;
+    }
+    expect(raw).toContain('y0AgAAAAA');
+
+    let caught: unknown;
+    try {
+      await runCredentialsCommand(
+        { action: 'exchange', clientId: 'c1', provider: 'yandex', apply: true },
+        deps({ readSecret: async () => ({ kind: 'stdin', value: broken }) }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    const message = (caught as Error).message;
+    expect(message).toContain('JSON');
+    expect(message).not.toContain('y0AgAAAAA');
+  });
+
   it('у VK своего обмена кода нет — отказ, а не молчаливый Директ', async () => {
     await expect(
       runCredentialsCommand(

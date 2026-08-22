@@ -73,7 +73,10 @@ export interface ScheduledOptimizationSummary {
  * предохранители — наблюдения): берём группу с наибольшим расходом, при равенстве
  * меньший id, чтобы прогон был детерминированным.
  */
-async function loadSearchQueries(campaignId: string, now: Date): Promise<SearchQueryMetrics[]> {
+export async function loadSearchQueryMetrics(
+  campaignId: string,
+  now: Date,
+): Promise<SearchQueryMetrics[]> {
   const since = new Date(now.getTime() - SEARCH_QUERY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
   const rows = await prisma.searchQueryStat.findMany({
     where: { adGroup: { campaignId }, date: { gte: since }, negated: false },
@@ -209,7 +212,7 @@ export async function runScheduledOptimization(
         campaignId: campaign.id,
         dryRun: options.dryRun,
         now,
-        searchQueries: await loadSearchQueries(campaign.id, now),
+        searchQueries: await loadSearchQueryMetrics(campaign.id, now),
         fallbackTargetCpa: briefTargetCpa.get(campaign.clientId) ?? null,
       });
     } catch (err) {

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { buildCredentialPayload, maskSecret, parseProvider } from './providers.js';
 
 import { env } from '@/env.js';
+import type { AppError } from '@/lib/errors.js';
 
 const TOKEN = 'y0__xCq1234567890abcdef';
 
@@ -101,5 +102,53 @@ describe('buildCredentialPayload: VK Реклама', () => {
     expect(() =>
       buildCredentialPayload('VK_ADS', JSON.stringify({ agencyClientName: 'ромашка' })),
     ).toThrow();
+  });
+});
+
+describe('текст ошибки разбора JSON не выносит секрет наружу', () => {
+  /**
+   * Воспроизведение: забытые кавычки вокруг токена — самая обычная опечатка при
+   * вставке руками. V8 в Node 22 вставляет в текст ошибки окно вокруг места сбоя,
+   * и вместе с ним наружу уезжает начало токена. Дальше `src/apps/cli.ts` кладёт
+   * это в лог целиком, а CLAUDE.md §6 разрешает логировать от токена только
+   * последние четыре символа.
+   */
+  const LEAKY = '{"clientLogin":"ivan","accessToken": y0_AgAAAAAsecrettokenvalue123456}';
+
+  it('окно V8 действительно несёт часть токена — иначе проверять нечего', () => {
+    let raw = '';
+    try {
+      JSON.parse(LEAKY);
+    } catch (err) {
+      raw = (err as Error).message;
+    }
+    expect(raw).toContain('y0_AgAAAAA');
+  });
+
+  it('наша ошибка не содержит ни куска секрета', () => {
+    let caught: unknown;
+    try {
+      buildCredentialPayload('YANDEX_DIRECT', LEAKY);
+    } catch (err) {
+      caught = err;
+    }
+    const message = (caught as AppError).message;
+    expect((caught as AppError).code).toBe('CREDENTIAL_PAYLOAD_MALFORMED');
+    expect(message).not.toContain('y0_');
+    expect(message).not.toContain('AgAAAAA');
+    expect(message).not.toContain('accessToken');
+    expect(message).toContain('JSON');
+  });
+
+  it('позицию сбоя показать можно — она подсказывает, где искать опечатку', () => {
+    let caught: unknown;
+    try {
+      buildCredentialPayload('YANDEX_DIRECT', '{"accessToken":"y0_secret",}');
+    } catch (err) {
+      caught = err;
+    }
+    const message = (caught as AppError).message;
+    expect(message).toMatch(/позиция \d+/);
+    expect(message).not.toContain('y0_secret');
   });
 });

@@ -7,17 +7,23 @@ import {
   renderEntryBlock,
   renderPlanSummary,
   renderReadiness,
-  type CampaignEntryBlock,
   type CampaignLaunchOptions,
 } from '@/campaigns/index.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { registeredChannels } from '@/channels/registry.js';
+import {
+  cliInvocation,
+  clientsUsageLines,
+  needsHumanFix,
+  resolveApply,
+  runClientsCommand,
+  runOptimizeCommand,
+} from '@/cli/index.js';
 import { generateCreativeSetOnDemand } from '@/creatives/index.js';
 import { credentialsUsageLines, runCredentialsCommand } from '@/credentials/index.js';
 import { prisma } from '@/db/prisma.js';
-import { env } from '@/env.js';
 import { runIngestion, runSearchQueryIngestion } from '@/ingestion/index.js';
-import { describeError } from '@/lib/errors.js';
+import { AppError, describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
 
 /**
@@ -30,25 +36,30 @@ import { logger } from '@/logger.js';
 const log = logger.child({ scope: 'cli' });
 
 function printUsage(): void {
+  const cli = cliInvocation();
   process.stdout.write(
     [
-      'Использование: pnpm cli <команда> [опции]',
+      `Использование: ${cli} <команда> [опции]`,
       '',
       'Команды:',
       '  channels            показать зарегистрированные адаптеры',
-      '  clients             список клиентов и их каналов',
+      ...clientsUsageLines(),
       ...credentialsUsageLines(),
       '  ingest              загрузить сущности и статистику из кабинетов',
       '  search-queries      загрузить поисковые запросы',
       '  campaign            проверить готовность к запуску; с --apply — собрать план',
       '                      и отправить его на апрув в Telegram',
-      '  optimize            показать решения оптимизатора',
+      '  optimize            показать решения оптимизатора; с --apply — применить их',
       '  creatives           сгенерировать тексты объявлений (платно, нужен --apply)',
       '  backfill-metrika    проставить настройки Метрики из готовых брифов (нужен --apply)',
       '',
       'Опции:',
       '  --client <id>       ограничить одним клиентом',
       '  --apply             применить решения (по умолчанию — только показать)',
+      '  --dry-run           только показать; вместе с --apply — ошибка',
+      '  --name <имя>        clients add: имя клиента',
+      '  --tg-user-id <id>   clients add: Telegram-аккаунт клиента',
+      '  --status <статус>   clients add: ACTIVE (по умолчанию) | PAUSED | ARCHIVED',
       '  --segment <имя>     сегмент для creatives (по умолчанию — горячий спрос)',
       '  --new               campaign: собрать новый план, даже если кампании уже созданы',
       '  --chat <id>         campaign: куда слать карточки (по умолчанию — чат клиента)',
@@ -67,31 +78,6 @@ async function cmdChannels(): Promise<void> {
   for (const c of channels) process.stdout.write(`  • ${c}\n`);
 }
 
-async function cmdClients(): Promise<void> {
-  const clients = await prisma.client.findMany({
-    select: {
-      id: true,
-      name: true,
-      status: true,
-      credentials: { select: { provider: true, expiresAt: true } },
-      _count: { select: { campaigns: true } },
-    },
-    orderBy: { createdAt: 'asc' },
-  });
-
-  if (clients.length === 0) {
-    process.stdout.write('Клиентов нет. Заполните базу: pnpm db:seed\n');
-    return;
-  }
-
-  for (const c of clients) {
-    const channels = c.credentials.map((cr) => cr.provider).join(', ') || 'нет доступов';
-    process.stdout.write(
-      `${c.id}  ${c.name}  [${c.status}]  кампаний: ${c._count.campaigns}  каналы: ${channels}\n`,
-    );
-  }
-}
-
 async function cmdIngest(clientId?: string): Promise<void> {
   const result = await runIngestion(clientId ? { clientId } : undefined);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -100,111 +86,6 @@ async function cmdIngest(clientId?: string): Promise<void> {
 async function cmdSearchQueries(clientId?: string): Promise<void> {
   const result = await runSearchQueryIngestion(clientId ? { clientId } : undefined);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-}
-
-async function cmdOptimize(clientId: string | undefined, apply: boolean): Promise<void> {
-  // Импорт внутри команды: движок тянет Prisma и правила, а команде channels
-  // это не нужно — CLI должен отвечать мгновенно.
-  const { runOptimizer } = await import('@/optimizer/index.js');
-
-  const campaigns = await prisma.campaign.findMany({
-    where: clientId ? { clientId } : {},
-    select: { id: true, name: true, clientId: true },
-  });
-
-  if (campaigns.length === 0) {
-    process.stdout.write('Кампаний нет. Сначала выполните: pnpm cli ingest\n');
-    return;
-  }
-
-  // apply просят явно, но глобальный DRY_RUN всё равно старше: снять защиту
-  // можно только в двух местах сразу.
-  const dryRun = !apply || env.DRY_RUN;
-  if (apply && env.DRY_RUN) {
-    process.stdout.write('⚠️  --apply проигнорирован: DRY_RUN=true в окружении\n\n');
-  }
-
-  let total = 0;
-  const skipped: Record<string, number> = {};
-
-  for (const campaign of campaigns) {
-    const run = await runOptimizer(prisma, {
-      campaignId: campaign.id,
-      dryRun,
-      searchQueries: await loadSearchQueries(campaign.id),
-    });
-
-    if (run.skipped) {
-      skipped[run.skipped] = (skipped[run.skipped] ?? 0) + 1;
-      continue;
-    }
-
-    const decisions = [...run.autoApply, ...run.approvals.flatMap((a) => a.decisions)];
-    if (decisions.length === 0) continue;
-
-    total += decisions.length;
-    process.stdout.write(`\n▸ ${campaign.name} (${campaign.id})\n`);
-
-    for (const d of run.autoApply) {
-      process.stdout.write(`  [авто]  ${d.action}: ${d.reason}\n`);
-    }
-    for (const a of run.approvals) {
-      process.stdout.write(`  [апрув ${a.kind}] ${a.summary}\n`);
-    }
-    // Отклонённые важнее показать, чем скрыть: чаще всего это «данных мало»,
-    // и без этой строки непонятно, почему рекомендаций нет.
-    for (const r of run.rejected) {
-      process.stdout.write(`  [отклонено ${r.rail}] ${r.decision.action} — ${r.note}\n`);
-    }
-    for (const c of run.clamped) {
-      process.stdout.write(`  [ужато ${c.rail}] ${c.decision.action} — ${c.note}\n`);
-    }
-  }
-
-  for (const [reason, count] of Object.entries(skipped)) {
-    process.stdout.write(`Пропущено кампаний (${reason}): ${count}\n`);
-  }
-
-  process.stdout.write(
-    total === 0
-      ? '\nРекомендаций нет — либо данных мало, либо всё в пределах целей.\n'
-      : `\nВсего решений: ${total}${dryRun ? ' (ничего не применено)' : ''}\n`,
-  );
-}
-
-/** Сырьё для правила минус-слов. Окно то же, что у оптимизатора по умолчанию. */
-async function loadSearchQueries(campaignId: string) {
-  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const rows = await prisma.searchQueryStat.findMany({
-    where: { adGroup: { campaignId }, date: { gte: since }, negated: false },
-    select: {
-      adGroupId: true,
-      query: true,
-      impressions: true,
-      clicks: true,
-      spend: true,
-      conversions: true,
-      date: true,
-    },
-  });
-
-  // Строки лежат по дням, а правило смотрит на агрегат за окно.
-  const byKey = new Map<string, ReturnType<typeof emptyAggregate>>();
-  for (const row of rows) {
-    const key = `${row.adGroupId}\u0000${row.query}`;
-    const agg = byKey.get(key) ?? emptyAggregate(row.adGroupId, row.query);
-    agg.impressions += row.impressions;
-    agg.clicks += row.clicks;
-    agg.spend += Number(row.spend);
-    agg.conversions += row.conversions;
-    agg.days += 1;
-    byKey.set(key, agg);
-  }
-  return [...byKey.values()];
-}
-
-function emptyAggregate(adGroupId: string, query: string) {
-  return { adGroupId, query, impressions: 0, clicks: 0, spend: 0, conversions: 0, days: 0 };
 }
 
 /**
@@ -281,36 +162,6 @@ async function cmdCreatives(
 }
 
 /**
- * Штатные состояния клиента: команда ответила, чинить нечего.
- *
- * «Уже создано» — работа сделана; «карточка ждёт решения» — система дошла до
- * человека и ждёт нажатия. Ненулевой код на них означал бы поломку, а в скрипте,
- * обходящем клиентов, читался бы именно так — и разбудил бы дежурного из-за
- * кампании, которая исправно работает.
- */
-const SETTLED_BLOCKS: ReadonlySet<CampaignEntryBlock['kind']> = new Set([
-  'already_created',
-  'awaiting_decision',
-]);
-
-/**
- * Нужно ли вмешательство человека, чтобы запуск вообще стал возможен.
- *
- * Это и есть смысл ненулевого кода возврата: не «ответ отрицательный», а «без
- * тебя дальше не поедет» — дыра в брифе, отсутствующий токен, незавершённая
- * попытка создания, неизвестный клиент в аргументе.
- *
- * «Карточка ждёт решения» штатна ровно до тех пор, пока карточка есть в чате.
- * Заявка, которую Telegram не принял, нажимается некем: чинить нужно доставку,
- * и скрипт, обходящий клиентов, обязан увидеть это кодом возврата, а не строкой
- * «реши по карточкам» среди успешных.
- */
-function needsHumanFix(block: CampaignEntryBlock): boolean {
-  if (block.kind === 'awaiting_decision') return block.undelivered.length > 0;
-  return !SETTLED_BLOCKS.has(block.kind);
-}
-
-/**
  * Вход в создание кампании (пункт приёмки ТЗ §9.1).
  *
  * Без `--apply` не тратится ничего: команда только сверяет бриф, доступы, бюджет
@@ -344,11 +195,22 @@ async function cmdCampaign(
       return;
     }
     process.stdout.write(`${renderReadiness(check)}\n\n`);
+    if (check.undelivered.length > 0) {
+      // Заявки живы, а карточек в чате нет — нажать их некому, и запуск упрётся
+      // в ту же недоставку. Скрипт, обходящий клиентов, обязан увидеть это кодом
+      // возврата, а не строкой «готов к запуску» среди успешных.
+      process.stdout.write(
+        `⚠️  Карточек прошлого захода не доставлено: ${check.undelivered.length}. ` +
+          'Нажать их некому — проверьте TELEGRAM_BOT_TOKEN и чат клиента ' +
+          'до того, как выпускать новые.\n',
+      );
+    }
     process.stdout.write(
       'Ничего не сделано: команда без --apply только проверяет.\n' +
-        'Собрать план и отправить карточки: pnpm cli campaign --client ' +
+        `Собрать план и отправить карточки: ${cliInvocation()} campaign --client ` +
         `${clientId} --apply\n`,
     );
+    if (needsHumanFix(check)) process.exitCode = 1;
     return;
   }
 
@@ -437,25 +299,56 @@ async function cmdBackfillMetrika(apply: boolean): Promise<void> {
   }
 }
 
+/**
+ * Флаги команд. Таблица одна и та же для разбора и для вывода типов: вторая
+ * копия в виде интерфейса разъезжалась бы с первой на каждом новом флаге.
+ */
+const CLI_OPTIONS = {
+  client: { type: 'string' },
+  apply: { type: 'boolean', default: false },
+  'dry-run': { type: 'boolean', default: false },
+  name: { type: 'string' },
+  'tg-user-id': { type: 'string' },
+  status: { type: 'string' },
+  segment: { type: 'string' },
+  new: { type: 'boolean', default: false },
+  chat: { type: 'string' },
+  provider: { type: 'string' },
+  help: { type: 'boolean', default: false },
+} as const;
+
+/**
+ * Разбор аргументов.
+ *
+ * Ошибка `parseArgs` (опечатка во флаге) отдаётся человеку текстом и справкой:
+ * голый `TypeError: Unknown option` не подсказывает, какие опции существуют, — а
+ * именно так выглядел `--dry-run` из пункта приёмки ТЗ §9.3, пока флага не было.
+ */
+function parseCliArgs() {
+  try {
+    return parseArgs({ allowPositionals: true, options: CLI_OPTIONS });
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n`);
+    printUsage();
+    process.exitCode = 1;
+    return null;
+  }
+}
+
 async function main(): Promise<void> {
-  const { values, positionals } = parseArgs({
-    allowPositionals: true,
-    options: {
-      client: { type: 'string' },
-      apply: { type: 'boolean', default: false },
-      segment: { type: 'string' },
-      new: { type: 'boolean', default: false },
-      chat: { type: 'string' },
-      provider: { type: 'string' },
-      help: { type: 'boolean', default: false },
-    },
-  });
+  const parsed = parseCliArgs();
+  if (parsed === null) return;
+  const { values, positionals } = parsed;
 
   const command = positionals[0];
-  if (values.help || !command) {
+  if (values.help === true || !command) {
     printUsage();
     return;
   }
+
+  // Разбирается до диспетчера: противоречие флагов — ошибка ввода, а не
+  // особенность команды, и отвечать на неё все обязаны одинаково.
+  const apply = resolveApply({ apply: values.apply, dryRun: values['dry-run'] });
 
   bootstrapChannels();
 
@@ -464,7 +357,13 @@ async function main(): Promise<void> {
       await cmdChannels();
       break;
     case 'clients':
-      await cmdClients();
+      await runClientsCommand({
+        ...(positionals[1] === undefined ? {} : { action: positionals[1] }),
+        ...(values.name === undefined ? {} : { name: values.name }),
+        ...(values['tg-user-id'] === undefined ? {} : { tgUserId: values['tg-user-id'] }),
+        ...(values.status === undefined ? {} : { status: values.status }),
+        apply,
+      });
       break;
     case 'ingest':
       await cmdIngest(values.client);
@@ -474,27 +373,30 @@ async function main(): Promise<void> {
       break;
     case 'campaign':
       await cmdCampaign(values.client, {
-        apply: values.apply,
-        fresh: values.new,
+        apply,
+        fresh: values.new === true,
         ...(values.chat === undefined ? {} : { chatId: values.chat }),
       });
       break;
     case 'credentials':
       await runCredentialsCommand({
-        action: positionals[1],
-        clientId: values.client,
-        provider: values.provider,
-        apply: values.apply,
+        ...(positionals[1] === undefined ? {} : { action: positionals[1] }),
+        ...(values.client === undefined ? {} : { clientId: values.client }),
+        ...(values.provider === undefined ? {} : { provider: values.provider }),
+        apply,
       });
       break;
     case 'optimize':
-      await cmdOptimize(values.client, values.apply);
+      await runOptimizeCommand({
+        ...(values.client === undefined ? {} : { clientId: values.client }),
+        apply,
+      });
       break;
     case 'creatives':
-      await cmdCreatives(values.client, values.segment, values.apply);
+      await cmdCreatives(values.client, values.segment, apply);
       break;
     case 'backfill-metrika':
-      await cmdBackfillMetrika(values.apply);
+      await cmdBackfillMetrika(apply);
       break;
     default:
       process.stdout.write(`Неизвестная команда: ${command}\n\n`);
@@ -505,7 +407,14 @@ async function main(): Promise<void> {
 
 main()
   .catch((err) => {
-    log.error({ err: describeError(err) }, 'cli failed');
+    // Ошибку ввода человек обязан прочитать: при LOG_LEVEL=silent логгер молчит,
+    // и команда падала бы вообще без объяснения. Уровень предупреждения, а не
+    // ошибки, — опечатка во флаге не повод будить дежурного алертом (CLAUDE.md §9).
+    const known = err instanceof AppError;
+    const message = known ? err.message : describeError(err);
+    if (known) log.warn({ err: message }, 'cli rejected input');
+    else log.error({ err: message }, 'cli failed');
+    process.stderr.write(`Ошибка: ${message}\n`);
     process.exitCode = 1;
   })
   .finally(() => {

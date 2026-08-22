@@ -3,6 +3,7 @@ import type { ClientStatus, Provider } from '@prisma/client';
 import {
   buildCredentialPayload,
   describeFields,
+  describeJsonFailure,
   maskSecret,
   parseProvider,
   SUPPORTED_PROVIDERS,
@@ -11,6 +12,7 @@ import {
 } from './providers.js';
 import { readSecret, SECRET_ENV_VAR, type SecretSource } from './secret-input.js';
 
+import { cliInvocation } from '@/cli/invocation.js';
 import {
   buildAuthorizeUrl,
   exchangeCodeForToken,
@@ -106,7 +108,7 @@ function normalizeAction(raw: string | undefined): CredentialsAction {
 function requireClientId(options: CredentialsCommandOptions): string {
   const id = options.clientId?.trim();
   if (!id) {
-    throw new AppError('Не указан клиент: --client <id> (список: pnpm cli clients).', {
+    throw new AppError(`Не указан клиент: --client <id> (список: ${cliInvocation()} clients).`, {
       code: 'CREDENTIAL_CLIENT_MISSING',
     });
   }
@@ -133,7 +135,8 @@ async function requireClient(
   if (!client) {
     throw new AppError(
       `Клиент ${clientId} не найден. Секрет привязан к клиенту внешним ключом, ` +
-        'заводить его «впрок» некуда (список: pnpm cli clients).',
+        `заводить его «впрок» некуда (список: ${cliInvocation()} clients). ` +
+        `Завести: ${cliInvocation()} clients add --name "<имя>" --tg-user-id <id> --apply`,
       { code: 'CREDENTIAL_CLIENT_NOT_FOUND', context: { clientId } },
     );
   }
@@ -172,9 +175,8 @@ function parseExchangeInput(raw: string): { code: string; base: Partial<YandexCr
   try {
     parsed = JSON.parse(trimmed);
   } catch (err) {
-    throw new AppError(`Ввод похож на JSON, но не разбирается: ${(err as Error).message}`, {
-      code: 'CREDENTIAL_PAYLOAD_MALFORMED',
-    });
+    // Тот же путь утечки, что и у `credentials set`: код подтверждения — тоже секрет.
+    throw new AppError(describeJsonFailure(err), { code: 'CREDENTIAL_PAYLOAD_MALFORMED' });
   }
   const obj = parsed as Record<string, unknown>;
   const code = typeof obj['code'] === 'string' ? obj['code'].trim() : '';
@@ -257,7 +259,10 @@ async function actionList(
   const repo = deps.repo ?? (await defaultRepo());
   const rows = await repo.listForClient(clientId);
   if (rows.length === 0) {
-    out('Доступов нет. Завести: pnpm cli credentials set --client <id> --provider <канал> --apply');
+    out(
+      `Доступов нет. Завести: ${cliInvocation()} credentials set --client <id> ` +
+        '--provider <канал> --apply',
+    );
     return;
   }
   for (const row of rows) {
@@ -306,7 +311,7 @@ function actionLink(
   out(`  ${url}`);
   out('');
   out('Код — тоже секрет и живёт минуты. Дальше:');
-  out('  pnpm cli credentials exchange --client <id> --provider yandex_direct --apply');
+  out(`  ${cliInvocation()} credentials exchange --client <id> --provider yandex_direct --apply`);
 }
 
 /**
@@ -366,7 +371,7 @@ export async function runCredentialsCommand(
     'credentials stored from cli',
   );
   out(`Записано: ${provider} у клиента ${clientId} — AES-256-GCM, журнал: credential.save.`);
-  out(`Проверить: pnpm cli ingest --client ${clientId}`);
+  out(`Проверить: ${cliInvocation()} ingest --client ${clientId}`);
 }
 
 /** Строки для `printUsage` в `src/apps/cli.ts`. */

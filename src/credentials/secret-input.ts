@@ -1,5 +1,6 @@
 import type { Readable } from 'node:stream';
 
+import { cliInvocation } from '@/cli/invocation.js';
 import { AppError } from '@/lib/errors.js';
 
 /**
@@ -84,7 +85,7 @@ export async function readSecret(deps: ReadSecretDeps = {}): Promise<SecretSourc
   const value = chunks.join('').trim();
   if (value === '') {
     throw new AppError(
-      'Ввод пуст. Секрет передаётся трубой: `... | pnpm cli credentials set --client <id> ' +
+      `Ввод пуст. Секрет передаётся трубой: \`... | ${cliInvocation()} credentials set --client <id> ` +
         '--provider yandex_direct --apply`.',
       { code: 'CREDENTIAL_INPUT_EMPTY' },
     );
