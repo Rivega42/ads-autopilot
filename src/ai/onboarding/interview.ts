@@ -122,6 +122,20 @@ const HALT_REPLY: Readonly<Record<HaltReason, string>> = {
   'question-budget': QUESTION_BUDGET_REPLY,
 };
 
+/**
+ * Основание остановки по-русски — для письма человеку.
+ *
+ * Одного «не хватает ссылки» в письме мало: у клиента без сайта и у клиента,
+ * чей адрес мы не смогли записать, не хватает одного и того же поля, а делать
+ * с ними надо разное. Первое письмо про второй случай читалось как «сайта нет,
+ * рекламировать нечего» — при том, что сайт назван и лежит в расшифровке.
+ */
+export const HALT_REASON_LABELS: Readonly<Record<HaltReason, string>> = {
+  'no-landing': 'сайт не назван — Директ такую кампанию не примет',
+  'unconfirmed-landing': 'адрес назван, но записать не смогли — нужна сверка с перепиской',
+  'question-budget': 'вопросы кончились, бриф так и не сошёлся',
+};
+
 /** Ответ клиента длиннее этого обрезаем: в TG прилетают простыни, а transcript в Json. */
 const MAX_ANSWER_CHARS = 4_000;
 
@@ -167,6 +181,18 @@ export type InterviewStep =
       text: string;
       missing: BriefField[];
       askedCount: number;
+      /**
+       * Чем эта остановка отличается от вчерашней.
+       *
+       * Без неё «сайта нет» и «сайт назван, записать не смогли» приходят наружу
+       * одинаковыми: набор недостающих полей у них один и тот же, а разговор
+       * разный — `logHalt` разводит их даже по уровню записи. Telegram-слой зовёт
+       * человека по основанию, и без этого поля второй повод молчал.
+       *
+       * `null` — единственный случай не из `HaltReason`: строка помечена COMPLETE,
+       * но схему не проходит, и паузы в расшифровке за ней не стоит.
+       */
+      reason: HaltReason | null;
     };
 
 export interface InterviewSnapshot {
@@ -526,6 +552,7 @@ async function advance(ctx: AdvanceContext): Promise<InterviewStep> {
       text: HALT_REPLY[halt],
       missing,
       askedCount: transcript.askedCount,
+      reason: halt,
     };
   }
 
@@ -675,6 +702,7 @@ function haltedStep(
     text: HALT_REPLY[reason],
     missing: missingBriefFields(parseDraft(row.data)),
     askedCount: transcript.askedCount,
+    reason,
   };
 }
 
@@ -711,6 +739,7 @@ async function haltedRepeat(ctx: HaltContext, reason: HaltReason): Promise<Inter
     text,
     missing: missingBriefFields(parseDraft(ctx.row.data)),
     askedCount: ctx.transcript.askedCount,
+    reason,
   };
 }
 
@@ -734,6 +763,7 @@ function completedStep(row: BriefRow): InterviewStep {
     text: 'Бриф помечен как готовый, но не проходит проверку. Нужен человек.',
     missing,
     askedCount: 0,
+    reason: null,
   };
 }
 

@@ -5,10 +5,16 @@ import {
   handleAnswer,
   startInterview,
   BRIEF_FIELD_LABELS,
+  HALT_REASON_LABELS,
   type InterviewDeps,
   type InterviewStep,
 } from '@/ai/onboarding/index.js';
-import { claimEscalation, type EscalationDeps } from '@/bot/admin-escalation.js';
+import {
+  claimEscalation,
+  recordEscalationFailure,
+  releaseEscalation,
+  type EscalationDeps,
+} from '@/bot/admin-escalation.js';
 import { findActiveClientId } from '@/bot/client-lookup.js';
 import { env } from '@/env.js';
 import { AppError, describeError } from '@/lib/errors.js';
@@ -53,6 +59,9 @@ export function adminNotice(clientId: string, step: InterviewStep): string | nul
   return [
     'Онбординг встал и ждёт человека.',
     `Клиент: ${clientId}`,
+    // Без этой строки два разных разговора выглядят одинаково: у клиента без сайта
+    // и у клиента, чей адрес мы не смогли записать, не хватает одного и того же поля.
+    `Причина: ${step.reason === null ? 'бриф помечен готовым, но не проходит проверку' : HALT_REASON_LABELS[step.reason]}`,
     `Вопросов задано: ${step.askedCount}`,
     step.missing.length > 0
       ? `Не хватает: ${step.missing.map((field) => BRIEF_FIELD_LABELS[field]).join('; ')}`
@@ -66,12 +75,18 @@ export function adminNotice(clientId: string, step: InterviewStep): string | nul
  * Основание позвать человека — то, чем ситуация отличается от вчерашней.
  *
  * Не текст письма и не число заданных вопросов: текст у первой остановки и у ответа
- * на «а почему?» разный, а ситуация одна и та же. Разный набор недостающих полей —
+ * на «а почему?» разный, а ситуация одна и та же. Другой набор недостающих полей —
  * это уже другой разговор, и о нём человеку стоит узнать сразу.
+ *
+ * Основания остановки тут мало не бывает: у клиента без сайта и у клиента, чей
+ * адрес мы не смогли записать, не хватает одного и того же поля. Пока в ключ шло
+ * только `missing`, второй случай молчал — единственное письмо про такого клиента
+ * оставалось первым, то есть «сайта нет», хотя сайт назван и лежит в расшифровке.
  */
 export function escalationReason(step: InterviewStep): string {
   if (step.kind !== 'needs_human') return 'none';
-  return step.missing.length > 0 ? [...step.missing].sort().join(',') : 'brief-complete';
+  const missing = step.missing.length > 0 ? [...step.missing].sort().join(',') : 'brief-complete';
+  return `${step.reason ?? 'brief-invalid'}:${missing}`;
 }
 
 async function reply(
@@ -88,13 +103,28 @@ async function reply(
   const chatId = deps.adminChatId ?? env.TELEGRAM_ADMIN_CHAT_ID;
   if (!chatId) {
     log.error({ clientId }, 'onboarding needs a human, but TELEGRAM_ADMIN_CHAT_ID is not set');
+    // Канала до человека нет вовсе — тем более нужен след в том единственном
+    // месте, которое читают не через Telegram.
+    await recordEscalationFailure(
+      {
+        clientId,
+        reason: escalationReason(step),
+        code: 'ESCALATION_NO_ADMIN_CHAT',
+        message: 'Онбординг требует человека, но TELEGRAM_ADMIN_CHAT_ID не задан',
+      },
+      deps.escalation,
+    );
     return;
   }
 
   // Интервью отвечает `needs_human` на каждое сообщение в остановленный бриф —
   // и на «ладно», и на «спасибо», и на завтрашний `/onboarding`. Письмо при этом
   // одно и то же, а поток одинаковых писем топит настоящие эскалации.
-  if (!(await claimEscalation(clientId, escalationReason(step), deps.escalation))) {
+  //
+  // Захват берётся до отправки, а не после: два сообщения клиента могут прийти
+  // одновременно, и «сначала отправить, потом захватить» даёт человеку два письма.
+  const reason = escalationReason(step);
+  if (!(await claimEscalation(clientId, reason, deps.escalation))) {
     log.info({ clientId }, 'onboarding escalation suppressed: human already called');
     return;
   }
@@ -106,6 +136,19 @@ async function reply(
   } catch (err) {
     // Клиенту ответ уже ушёл — ронять ход из-за недоставленного письма нельзя.
     log.error({ clientId, err: describeError(err) }, 'cannot deliver onboarding escalation');
+    // Но и молчать сутки нельзя: захват живёт день и гасит все следующие поводы,
+    // а клиенту только что обещали человека. Отпускаем — следующее сообщение
+    // клиента попробует снова; след остаётся там, где его видно без Telegram.
+    await releaseEscalation(clientId, reason, deps.escalation);
+    await recordEscalationFailure(
+      {
+        clientId,
+        reason,
+        code: 'ESCALATION_UNDELIVERED',
+        message: `Не удалось позвать человека в онбординге: ${describeError(err)}`,
+      },
+      deps.escalation,
+    );
   }
 }
 

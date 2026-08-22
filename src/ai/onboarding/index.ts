@@ -33,6 +33,7 @@ export {
   AGENT_NAME,
   InterviewConflictError,
   InterviewNotStartedError,
+  HALT_REASON_LABELS,
   LANDING_URL_ATTEMPTS,
   MAX_QUESTIONS,
   NO_LANDING_REPLY,

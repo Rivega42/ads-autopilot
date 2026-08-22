@@ -430,4 +430,23 @@ describe('mentionsWebAddress', () => {
   it('видит сайт рядом с почтой', () => {
     expect(mentionsWebAddress('сайт okna-spb.ru, почта ivan@gmail.com')).toBe(true);
   });
+
+  it('не считает адресом зону, которая одновременно обычное слово', () => {
+    // География в брифе обязательна, поэтому «г.Москва» приходит от каждого
+    // второго клиента. Пока это читалось как адрес, клиенту без сайта система
+    // отвечала «ссылку я вижу», в аудит это уезжало как error вместо warn, и
+    // каждое следующее название города снимало паузу и оплачивало ход модели.
+    expect(mentionsWebAddress('Мы в г.Москва работаем')).toBe(false);
+    expect(mentionsWebAddress('работаем по г.москва и области')).toBe(false);
+    expect(mentionsWebAddress('обучаем детей.Онлайн курсы тоже есть')).toBe(false);
+    expect(mentionsWebAddress('делаем ремонт.Сайт пока не сделали')).toBe(false);
+  });
+
+  it('ссылку в такой зоне видит по признаку адреса, а не по зоне', () => {
+    // Обратная сторона: клиента в паузе просят прислать ссылку — и то, что он
+    // пришлёт, обязано быть опознано.
+    expect(mentionsWebAddress('https://дети.онлайн')).toBe(true);
+    expect(mentionsWebAddress('www.дети.онлайн')).toBe(true);
+    expect(mentionsWebAddress('дети.онлайн/kursy')).toBe(true);
+  });
 });

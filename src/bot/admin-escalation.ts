@@ -33,12 +33,24 @@ const SCOPE = 'onboarding.escalation';
  */
 export const ESCALATION_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
-/** Только `idempotencyKey`: остальная БД дедупликации не нужна, а тестам — не нужен весь клиент. */
-export type EscalationStore = Pick<PrismaClient, 'idempotencyKey'>;
+/**
+ * `idempotencyKey` — дедупликация, `errorLog` — след несработавшего канала.
+ *
+ * Обе модели, и ни одной сверх: тестам не нужен весь клиент. `errorLog` появился
+ * здесь потому, что Telegram — единственная дорога до человека, и когда она не
+ * работает, о непозванном человеке не знает никто: тревоги Роману собираются
+ * из `ErrorLog` (`reporter/alerts.ts`), а строку pino не читает никто и никогда.
+ */
+export type EscalationStore = Pick<PrismaClient, 'idempotencyKey' | 'errorLog'>;
 
 export interface EscalationDeps {
   db?: EscalationStore;
   now?: () => Date;
+}
+
+/** Одно и то же основание — один и тот же ключ у захвата и у возврата. */
+function escalationKey(clientId: string, reason: string): string {
+  return `${SCOPE}:${clientId}:${reason}`;
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -72,7 +84,7 @@ export async function claimEscalation(
 ): Promise<boolean> {
   const db = deps.db ?? prisma;
   const now = (deps.now ?? ((): Date => new Date()))();
-  const key = `${SCOPE}:${clientId}:${reason}`;
+  const key = escalationKey(clientId, reason);
   const expiresAt = new Date(now.getTime() + ESCALATION_WINDOW_MS);
 
   try {
@@ -94,5 +106,76 @@ export async function claimEscalation(
     // а непозванный человек означает клиента, о котором никто не узнает.
     log.error({ clientId, reason, err: describeError(err) }, 'escalation dedup failed');
     return true;
+  }
+}
+
+/**
+ * Возврат права позвать человека.
+ *
+ * Захват берётся до отправки — иначе два сообщения клиента, пришедшие
+ * одновременно, дадут человеку два одинаковых письма. Значит и отпускать его
+ * обязан тот, у кого письмо не ушло: строка живёт сутки, и оставленная после
+ * недоставленного письма она гасит все следующие поводы по этому клиенту. Роман
+ * не получает ничего, а клиенту в тот же миг сказано «дальше подключится человек».
+ *
+ * `deleteMany`, а не `delete`: строки может не быть (её унесла чистка, её удалил
+ * параллельный ход), и отсутствие — не ошибка. Сбой самого удаления проглатываем
+ * по той же причине, что и сбой захвата: ход клиента ронять нельзя, ему уже ответили.
+ */
+export async function releaseEscalation(
+  clientId: string,
+  reason: string,
+  deps: EscalationDeps = {},
+): Promise<void> {
+  const db = deps.db ?? prisma;
+  try {
+    await db.idempotencyKey.deleteMany({ where: { key: escalationKey(clientId, reason) } });
+  } catch (err) {
+    log.error({ clientId, reason, err: describeError(err) }, 'cannot release escalation claim');
+  }
+}
+
+/** Scope записи в `ErrorLog`: по нему эскалации видно среди прочих отказов. */
+export const ESCALATION_SCOPE = 'bot:onboarding-escalation';
+
+export interface EscalationFailure {
+  clientId: string;
+  /** Основание, по которому звали человека, — оно же в ключе дедупликации. */
+  reason: string;
+  code: 'ESCALATION_UNDELIVERED' | 'ESCALATION_NO_ADMIN_CHAT';
+  message: string;
+}
+
+/**
+ * След несработавшего канала.
+ *
+ * Пишется в `ErrorLog`, потому что это единственное место, которое видно без
+ * Telegram: и дашборд, и тревоги читают его. Клиенту в этот момент уже обещан
+ * человек — и если письмо не ушло, а строки нет, то человека не позовёт ничто:
+ * повтор случится, только если клиент напишет ещё раз, а ему только что сказали,
+ * что писать больше не нужно.
+ *
+ * Сама запись ход не роняет: клиенту ответ уже отправлен.
+ */
+export async function recordEscalationFailure(
+  failure: EscalationFailure,
+  deps: EscalationDeps = {},
+): Promise<void> {
+  const db = deps.db ?? prisma;
+  try {
+    await db.errorLog.create({
+      data: {
+        clientId: failure.clientId,
+        scope: ESCALATION_SCOPE,
+        code: failure.code,
+        message: failure.message,
+        context: { reason: failure.reason },
+      },
+    });
+  } catch (err) {
+    log.error(
+      { clientId: failure.clientId, err: describeError(err) },
+      'cannot persist escalation failure to ErrorLog',
+    );
   }
 }
