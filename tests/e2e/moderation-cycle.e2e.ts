@@ -843,18 +843,17 @@ describe('AI-Модератор: отказ площадки → перепис�
     expect(model.rewriteCalls).toBe(2);
   });
 
-  it('ДЕФЕКТ: пообъектная ошибка Директа считается успешной отправкой', async () => {
+  it('пообъектная ошибка Директа не считается успешной отправкой', async () => {
     /**
-     * Не чиним здесь — правка не в границах модуля, см. отчёт.
+     * Было сломано: `updateAdText` возвращал `applied: true` независимо от
+     * содержимого `UpdateResults` — пообъектные ошибки складывались в `failed`,
+     * но результат их не смотрел. Модерация верила ответу канала и записывала
+     * объявление переписанным: у нас новый текст и `PENDING`, в кабинете старый
+     * и `REJECTED`. Через три таких цикла человек получал разбор текстов,
+     * которых площадка никогда не видела.
      *
-     * `YandexDirectAdapter.updateAdText` возвращает `applied: true` независимо от
-     * содержимого `UpdateResults`: `summariseResults` складывает пообъектные ошибки
-     * в `failed`, но `applied()` их не смотрит (у VK на этом месте стоит
-     * `writeResultOf`, который бросает `VK_MASS_UPDATE_REJECTED`). Модерация верит
-     * ответу канала и записывает объявление переписанным.
-     *
-     * Тест закрепляет наблюдаемое поведение, а не желаемое: наши строки расходятся
-     * с кабинетом — у нас новый текст и `PENDING`, в кабинете старый и `REJECTED`.
+     * Теперь полный отказ бросает, отказ виден в сводке прогона, а наша строка
+     * остаётся честной — переписывания не было.
      */
     const model = stub();
     const adId = silent.adIds['rejected'] ?? '';
@@ -879,22 +878,20 @@ describe('AI-Модератор: отказ площадки → перепис�
       runRewrite: model.rewrite,
     });
 
-    expect(summary).toMatchObject({ rejected: 1, rewritten: 1, escalated: 0 });
-    expect(summary.failures).toEqual([]);
+    expect(summary).toMatchObject({ rejected: 1, rewritten: 0, escalated: 0 });
+    // Отказ обязан быть виден: молчаливый успех — то, из-за чего дефект и жил.
+    expect(summary.failures).not.toEqual([]);
 
     // Кабинет не изменился ни на символ.
     const remote = direct.adById(IDS.silent.rejected);
     expect(remote).toMatchObject({ title: 'Самые лучшие ворота', status: 'REJECTED', updates: 0 });
 
-    // А наша строка считает объявление переписанным и ушедшим на проверку.
+    // И наша строка тоже: объявление не переписано, текст прежний.
     const row = await prisma.ad.findUniqueOrThrow({ where: { id: adId } });
-    expect(row).toMatchObject({
-      title: variant(1).title,
-      moderationStatus: ModerationStatus.PENDING,
-      moderationRetries: 1,
-    });
+    expect(row.title).toBe('Самые лучшие ворота');
+    expect(row.moderationStatus).toBe(ModerationStatus.REJECTED);
     expect(
       await prisma.changeLog.count({ where: { entityId: adId, action: 'moderation_rewrite' } }),
-    ).toBe(1);
+    ).toBe(0);
   });
 });
