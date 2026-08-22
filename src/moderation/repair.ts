@@ -91,6 +91,19 @@ async function reservePreview(deps: ModerationDeps, ad: RejectedAd): Promise<boo
   }
 }
 
+/**
+ * Снимает резерв предпросмотра.
+ *
+ * Тем же приёмом, что `optimizer/runtime.ts` и `creatives/scheduled.ts`: занятый ключ
+ * после отказа — это молчание вместо работы. Best-effort: наверх обязана уйти исходная
+ * ошибка, а не отказ уборки за ней.
+ */
+async function releasePreview(deps: ModerationDeps, ad: RejectedAd): Promise<void> {
+  await bestEffort(ad.id, 'failed to release the moderation preview key', () =>
+    deps.db.idempotencyKey.deleteMany({ where: { key: previewKey(ad) } }),
+  );
+}
+
 interface EscalationInput {
   cause: EscalationCause;
   classification: ClassifiedRejection | null;
@@ -167,6 +180,23 @@ async function reportExternalIdLoss(
     ...failure,
     message: `Ad ${ad.id}: внешний id остался ${ad.externalId}, хотя в кабинете живёт ${externalId} — ${failure.message}`,
   });
+}
+
+/**
+ * Переезд строки на новый внешний id.
+ *
+ * Старый id дописывается в `Ad.supersededExternalIds` той же записью, что и сам переезд:
+ * у VK правка текста создаёт новый баннер, а уборка старого проходит не всегда, и
+ * оставшийся в листинге баннер не принадлежит больше ни одной строке. Загрузка
+ * (`ingestion/entities.ts`) узнаёт его по этому списку и заводит под него архивную
+ * строку, а не работающее объявление со своим счётчиком попыток.
+ *
+ * `push`, а не `set`: строку переписывают до трёх раз подряд, и каждая неудавшаяся
+ * уборка оставляет в кабинете ещё один такой баннер. Помнить надо все — иначе первый же
+ * синк вернул бы предыдущему «работает».
+ */
+function switchedExternalId(from: string, to: string): Prisma.AdUpdateInput {
+  return { externalId: to, supersededExternalIds: { push: from } };
 }
 
 /** Поля строки, описывающие отправленный в кабинет текст. */
@@ -455,6 +485,33 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
     return { status: 'unchanged' };
   }
 
+  try {
+    return await rewriteAndResubmit(rc, ad, updateAdText);
+  } catch (err) {
+    // Отметка означает «ответ по этому входу уже получен и показан». Отказ её не
+    // подтверждает: оставить ключ занятым — значит выключить объявление из починки на
+    // весь его срок, причём молча, ведь ненулевой `unchanged` при DRY_RUN документирован
+    // как норма. Отпускается только на отказе: `escalated` — это полученный и оплаченный
+    // ответ, и платить за него каждые полчаса заново не за что.
+    if (ctx.dryRun) await releasePreview(deps, ad);
+    throw err;
+  }
+}
+
+/**
+ * Классификация, переписывание и отправка — всё, за что уже платят деньгами.
+ *
+ * Отдельная функция ровно ради `try` в `repairRejectedAd`: резерв предпросмотра надо
+ * отпустить на любом отказе этого куска, а обрамлять `try` половину тела вызывающего —
+ * значит однажды дописать шаг мимо него.
+ */
+async function rewriteAndResubmit(
+  rc: RepairContext,
+  ad: RejectedAd,
+  updateAdText: NonNullable<ChannelAdapter['updateAdText']>,
+): Promise<RepairOutcome> {
+  const { deps, target, ctx } = rc;
+
   const classification = await classifyRejection(
     {
       clientId: target.clientId,
@@ -545,7 +602,11 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
       try {
         await deps.db.ad.update({
           where: { id: ad.id },
-          data: { ...rewrittenTextFields(rewrite.ad), ...release, externalId: live },
+          data: {
+            ...rewrittenTextFields(rewrite.ad),
+            ...release,
+            ...switchedExternalId(ad.externalId, live),
+          },
         });
         liveExternalId = live;
         log.warn(
@@ -622,7 +683,10 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
   try {
     await deps.db.ad.update({
       where: { id: ad.id },
-      data: nextExternalId === null ? data : { ...data, externalId: nextExternalId },
+      data:
+        nextExternalId === null
+          ? data
+          : { ...data, ...switchedExternalId(ad.externalId, nextExternalId) },
     });
   } catch (err) {
     if (nextExternalId === null || !isUniqueViolation(err)) throw err;

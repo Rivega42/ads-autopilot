@@ -856,6 +856,51 @@ describe('AI-Модератор: отказ площадки → перепис�
     expect(model.rewriteCalls).toBe(2);
   });
 
+  it('упавшая модель не выключает объявление из починки на срок ключа', async () => {
+    /**
+     * Отметка о предпросмотре живёт 30 дней и резервируется до классификации, то есть
+     * до первого платного вызова. Разовый отказ провайдера LLM оставлял её занятой:
+     * провайдер поднялся, а прогон отвечает `unchanged` — «показывать нечего» — и так
+     * до истечения ключа. Заметить это по сводке нельзя: ненулевой `unchanged` при
+     * `DRY_RUN` документирован как норма, а `DRY_RUN` по умолчанию `true`.
+     */
+    const adId = dry.adIds['rejected'] ?? '';
+    const planning = {
+      clientId: dry.clientId,
+      contextFor: async (clientId: string): Promise<ChannelContext> => ({
+        ...(await buildContext(clientId, 'YANDEX_DIRECT')),
+        dryRun: true,
+      }),
+    };
+    // Новый вердикт — новый вход модели, а значит и новая отметка.
+    direct.setVerdict(IDS.dry.rejected, 'REJECTED', 'Сравнение с конкурентом без ссылки');
+    // Отметки прошлых входов этого объявления никуда не делись — считаем прирост.
+    const keysBefore = await prisma.idempotencyKey.count({ where: { entityId: adId } });
+
+    const model = stub();
+    const outage = await runModerationCheck({
+      ...planning,
+      runClassify: (() => Promise.reject(new Error('LLM 503'))) as typeof model.classify,
+      runRewrite: model.rewrite,
+    });
+    expect(outage).toMatchObject({ rejected: 1, planned: 0, unchanged: 0 });
+    expect(outage.failures).toHaveLength(1);
+    expect(outage.failures[0]).toMatchObject({ stage: `repair:${adId}` });
+    // Ключ отпущен: занятым он остался бы только после полученного ответа.
+    expect(await prisma.idempotencyKey.count({ where: { entityId: adId } })).toBe(keysBefore);
+
+    const recovered = await runModerationCheck({
+      ...planning,
+      runClassify: model.classify,
+      runRewrite: model.rewrite,
+    });
+    expect(recovered).toMatchObject({ rejected: 1, planned: 1, unchanged: 0 });
+    expect(recovered.failures).toEqual([]);
+    expect(model.rewriteCalls).toBe(1);
+    // А вот показанный предпросмотр отметку оставляет — иначе следующий тик заплатит снова.
+    expect(await prisma.idempotencyKey.count({ where: { entityId: adId } })).toBe(keysBefore + 1);
+  });
+
   it('пообъектная ошибка Директа не считается успешной отправкой', async () => {
     /**
      * Было сломано: `updateAdText` возвращал `applied: true` независимо от

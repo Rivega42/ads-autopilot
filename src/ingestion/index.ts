@@ -11,7 +11,6 @@ export { describeFailure, recordFailure, type IngestionFailure } from '@/ingesti
 export {
   syncEntities,
   MAX_ARCHIVE_SHARE,
-  MODERATION_REWRITE_ACTION,
   type AdSyncCount,
   type EntitySyncResult,
   type LevelSyncCount,

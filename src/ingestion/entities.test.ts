@@ -9,11 +9,10 @@ import {
   remoteKeyword,
 } from '@/ingestion/__tests__/fake-adapter.js';
 import { FakePrisma, type FakeRow } from '@/ingestion/__tests__/fake-prisma.js';
-import { REWRITE_ACTION } from '@/moderation/repair.js';
 
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
-const { syncEntities, MODERATION_REWRITE_ACTION } = await import('@/ingestion/entities.js');
+const { syncEntities } = await import('@/ingestion/entities.js');
 
 const CLIENT = 'cl1';
 const CTX: ChannelContext = { clientId: CLIENT, credentials: {}, dryRun: true };
@@ -264,12 +263,6 @@ describe('syncEntities', () => {
     expect(result.ads.orphaned).toBe(1);
   });
 
-  it('знает то же имя действия журнала, что пишет модерация', () => {
-    // Константа продублирована, чтобы не тянуть в загрузку весь модуль модерации.
-    // Разъедься эти две строки — и заменённые баннеры молча вернулись бы в решения.
-    expect(MODERATION_REWRITE_ACTION).toBe(REWRITE_ACTION);
-  });
-
   it('не заводит живую строку под баннер, который мы сами заменили при правке текста', async () => {
     // Строка уже переехала на новый баннер: так делает `moderation/repair.ts`, когда VK
     // создал замену, а удалить старый баннер не смог. Старый при этом остаётся в
@@ -282,16 +275,7 @@ describe('syncEntities', () => {
       ),
     );
     const row = db.store.ad[0] as FakeRow;
-    await db.changeLog.create({
-      data: {
-        campaignId: db.store.campaign[0]?.['id'],
-        entityType: 'AD',
-        entityId: row['id'],
-        action: MODERATION_REWRITE_ACTION,
-        newValue: { externalIdBefore: '300', externalIdAfter: '301' },
-        actor: 'AI',
-      },
-    });
+    row['supersededExternalIds'] = ['300'];
 
     const withOrphan = fakeAdapter('YANDEX_DIRECT', {
       ...fullCabinet,
@@ -306,6 +290,35 @@ describe('syncEntities', () => {
     expect(db.store.ad.find((ad) => ad['externalId'] === '301')?.['status']).toBe('ACTIVE');
   });
 
+  it('гасит все баннеры цепочки замен, а не только последний', async () => {
+    // Строку переписывают до трёх раз подряд, и каждая неудавшаяся уборка оставляет в
+    // кабинете ещё один погашенный баннер. Помнить только последний — значит вернуть
+    // предыдущему «работает» на первом же синке.
+    await syncEntities(
+      CLIENT,
+      'YANDEX_DIRECT',
+      deps(
+        fakeAdapter('YANDEX_DIRECT', { ...fullCabinet, ads: [remoteAd({ externalId: '302' })] }),
+      ),
+    );
+    (db.store.ad[0] as FakeRow)['supersededExternalIds'] = ['300', '301'];
+
+    const withOrphans = fakeAdapter('YANDEX_DIRECT', {
+      ...fullCabinet,
+      ads: [
+        remoteAd({ externalId: '302' }),
+        remoteAd({ externalId: '301', status: 'BLOCKED' }),
+        remoteAd({ externalId: '300', status: 'BLOCKED' }),
+      ],
+    });
+    const result = await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(withOrphans));
+
+    expect(result.ads.superseded).toBe(2);
+    expect(db.store.ad.find((ad) => ad['externalId'] === '300')?.['status']).toBe('ARCHIVED');
+    expect(db.store.ad.find((ad) => ad['externalId'] === '301')?.['status']).toBe('ARCHIVED');
+    expect(db.store.ad.find((ad) => ad['externalId'] === '302')?.['status']).toBe('ACTIVE');
+  });
+
   it('гасит заменённый баннер, даже если кабинет отдаёт его работающим', async () => {
     // Погасить старый баннер адаптер пытается сам, но попытка может не пройти. Тогда
     // объявление крутится и тратит бюджет, а его строка попала бы и в оптимизатор, и в
@@ -317,15 +330,7 @@ describe('syncEntities', () => {
         fakeAdapter('YANDEX_DIRECT', { ...fullCabinet, ads: [remoteAd({ externalId: '301' })] }),
       ),
     );
-    await db.changeLog.create({
-      data: {
-        entityType: 'AD',
-        entityId: db.store.ad[0]?.['id'],
-        action: MODERATION_REWRITE_ACTION,
-        newValue: { externalIdBefore: '300', externalIdAfter: '301' },
-        actor: 'AI',
-      },
-    });
+    (db.store.ad[0] as FakeRow)['supersededExternalIds'] = ['300'];
 
     const stillRunning = fakeAdapter('YANDEX_DIRECT', {
       ...fullCabinet,
@@ -346,15 +351,7 @@ describe('syncEntities', () => {
     };
     await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(fakeAdapter('YANDEX_DIRECT', twoGroups)));
     const other = db.store.ad.find((ad) => ad['externalId'] === '399');
-    await db.changeLog.create({
-      data: {
-        entityType: 'AD',
-        entityId: other?.['id'],
-        action: MODERATION_REWRITE_ACTION,
-        newValue: { externalIdBefore: '300', externalIdAfter: '399' },
-        actor: 'AI',
-      },
-    });
+    if (other) other['supersededExternalIds'] = ['300'];
 
     const result = await syncEntities(
       CLIENT,
@@ -366,18 +363,10 @@ describe('syncEntities', () => {
     expect(db.store.ad.every((ad) => ad['status'] === 'ACTIVE')).toBe(true);
   });
 
-  it('журнал без смены id ничего не гасит', async () => {
-    // У Директа текст правится на месте: пары `externalIdBefore/After` в записи нет.
+  it('строка без заменённых баннеров ничего не гасит', async () => {
+    // У Директа текст правится на месте: замены нет, и список остаётся пустым.
     await syncEntities(CLIENT, 'YANDEX_DIRECT', deps(fakeAdapter('YANDEX_DIRECT', fullCabinet)));
-    await db.changeLog.create({
-      data: {
-        entityType: 'AD',
-        entityId: db.store.ad[0]?.['id'],
-        action: MODERATION_REWRITE_ACTION,
-        newValue: { retries: 1 },
-        actor: 'AI',
-      },
-    });
+    expect(db.store.ad[0]?.['supersededExternalIds']).toEqual([]);
 
     const result = await syncEntities(
       CLIENT,

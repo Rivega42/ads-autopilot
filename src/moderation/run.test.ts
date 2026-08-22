@@ -314,6 +314,98 @@ describe('runModerationCheck', () => {
     expect(again).toMatchObject({ planned: 1, unchanged: 1, deferred: 0 });
   });
 
+  it('авария провайдера не выключает объявление из починки до истечения ключа', async () => {
+    // DRY_RUN — режим по умолчанию, а отметка о предпросмотре живёт 30 дней. Ключ,
+    // занятый упавшей моделью, означал бы: провайдер поднялся, а прогон отвечает
+    // `unchanged` и не зовёт модель — и так месяц. Заметить это по сводке нельзя:
+    // ненулевой `unchanged` при DRY_RUN документирован как норма.
+    const dry = async (clientId: string): Promise<ChannelContext> => ({
+      clientId,
+      credentials: {},
+      dryRun: true,
+    });
+    const { adapter, opts } = options({ contextFor: dry });
+    const base = { ...opts, adapterFor: () => adapter, contextFor: dry };
+
+    const outage = await runModerationCheck({
+      ...base,
+      runClassify: queueRunner<RejectionClassificationDraft>([new Error('LLM 503')]).run,
+    });
+    expect(outage.planned).toBe(0);
+    expect(outage.failures).toHaveLength(1);
+    expect(outage.failures[0]?.stage).toBe('repair:ad1');
+
+    // Провайдер поднялся: следующий тик обязан снова позвать модель.
+    const recovered = await runModerationCheck({
+      ...base,
+      runClassify: queueRunner<RejectionClassificationDraft>([CLASSIFICATION]).run,
+      runRewrite: queueRunner<AdRewriteDraft>([REWRITE]).run,
+    });
+    expect(recovered).toMatchObject({ planned: 1, unchanged: 0 });
+    expect(recovered.failures).toEqual([]);
+  });
+
+  it('при аварии провайдера потолок ограничивает попытки, но отложенное не теряется', async () => {
+    // Упавшая починка слот потолка тратит — и это защита, а не потеря: один вызов
+    // модели в `clients/llm/run.ts` это до трёх попыток по 120 секунд, и прогон без
+    // потолка на мёртвом провайдере пережил бы собственный период в полчаса. Терять
+    // при этом нечего: отложенное объявление приходит на следующем тике.
+    db.seedAd({
+      id: 'ad1b',
+      adGroupId: 'g-cl1',
+      externalId: 'a1b',
+      title: 'Самый лучший ремонт холодильников',
+      body: 'Починим сегодня, недорого и с гарантией на работу мастера.',
+      moderationStatus: ModerationStatus.PENDING,
+    });
+    // Кабинет мутируемый: приняв новый текст, площадка снимает отказ — иначе
+    // починенное объявление отбирало бы потолок у соседнего вечно.
+    const cabinet = [
+      { ...REJECTED_REMOTE },
+      remoteAd({
+        externalId: 'a1b',
+        adGroupExternalId: 'ext-cl1',
+        title: 'Самый лучший ремонт холодильников',
+        text: 'Починим сегодня, недорого и с гарантией на работу мастера.',
+        moderationStatus: 'REJECTED',
+        moderationReason: 'Превосходная степень без подтверждения',
+      }),
+      APPROVED_REMOTE,
+    ];
+    const adapter = fakeAdapter({
+      channel: Provider.YANDEX_DIRECT,
+      ads: cabinet,
+      updateAdText: () => ({ applied: true, plan: {} }),
+    });
+    const { opts } = options();
+    const working = (): typeof opts => ({
+      ...opts,
+      adapterFor: () => adapter,
+      maxRepairs: 1,
+      runClassify: queueRunner<RejectionClassificationDraft>([CLASSIFICATION]).run,
+      runRewrite: queueRunner<AdRewriteDraft>([REWRITE]).run,
+    });
+
+    const outage = await runModerationCheck({
+      ...working(),
+      runClassify: queueRunner<RejectionClassificationDraft>([new Error('LLM 503')]).run,
+    });
+    // Одна попытка на тик, а не по попытке на каждое отклонённое объявление.
+    expect(outage).toMatchObject({ rewritten: 0, deferred: 1 });
+    expect(outage.failures).toHaveLength(1);
+    expect(db.adOf('ad1').title).not.toBe(REWRITE.title);
+
+    const first = await runModerationCheck(working());
+    expect(first).toMatchObject({ rewritten: 1, deferred: 1 });
+    expect(db.adOf('ad1').title).toBe(REWRITE.title);
+    cabinet[0] = { ...REJECTED_REMOTE, moderationStatus: 'ACCEPTED' };
+
+    // Отложенное объявление ничего не потеряло: свой потолок оно получает следующим.
+    const second = await runModerationCheck(working());
+    expect(second).toMatchObject({ rewritten: 1, deferred: 0 });
+    expect(db.adOf('ad1b').title).toBe(REWRITE.title);
+  });
+
   describe('строка без объявления в кабинете', () => {
     /** Процесс умер между отправкой замены и записью нового id: id указывает в пустоту. */
     function seedLostAd(): void {

@@ -192,6 +192,9 @@ describe('AI-Модератор в VK: замена применилась на�
       externalIdBefore: String(IDS.rejected),
       externalIdAfter: String(liveBannerId),
     });
+    // А вот брошенный id — на самой строке: журнал отвечает на вопрос «что было»,
+    // и восстанавливать по нему текущее состояние загрузка больше не обязана.
+    expect(row.supersededExternalIds).toEqual([String(IDS.rejected)]);
 
     const sent = letters();
     expect(sent).toHaveLength(1);
@@ -236,8 +239,9 @@ describe('AI-Модератор в VK: замена применилась на�
   });
 
   it('повторная загрузка переутверждает пометку, а не забывает её', async () => {
-    // Пометка выводится из журнала заново на каждом прогоне и не запоминается
-    // в строке: иначе первый же синк вернул бы погашенному баннеру «работает».
+    // Пометка переутверждается на каждом прогоне по `supersededExternalIds` живой
+    // строки и в строке самого баннера не запоминается: иначе первый же синк,
+    // увидевший его работающим, вернул бы ему «работает».
     await prisma.ad.updateMany({
       where: { externalId: String(IDS.rejected) },
       data: { status: AdStatus.ACTIVE },

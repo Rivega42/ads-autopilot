@@ -42,6 +42,8 @@ export interface AdRow {
   moderationReason: string | null;
   moderationRetries: number;
   llmVariant: string | null;
+  /** Внешние id, оставленные позади при правке текста: в схеме это список. */
+  supersededExternalIds: string[];
   /** Как `@updatedAt` в схеме: любая запись в строку двигает отметку. */
   updatedAt: Date;
 }
@@ -93,6 +95,8 @@ interface AdData {
   moderationReason?: string | null;
   moderationRetries?: number;
   llmVariant?: string | null;
+  /** Только `push`: `set` по этой колонке никто не делает, и молча принять его нельзя. */
+  supersededExternalIds?: { push: string };
 }
 
 /** След записи в `Ad`: по нему видно, сколько состояний строка прошла между двумя точками. */
@@ -170,6 +174,7 @@ export class FakeDb {
       moderationReason: null,
       moderationRetries: 0,
       llmVariant: null,
+      supersededExternalIds: [],
       updatedAt: new Date(),
       ...row,
     };
@@ -215,7 +220,11 @@ export class FakeDb {
     if (data.externalId !== undefined) {
       this.assertExternalIdFree({ ...ad, externalId: data.externalId });
     }
-    Object.assign(ad, data, { updatedAt: new Date() });
+    const { supersededExternalIds: superseded, ...scalars } = data;
+    Object.assign(ad, scalars, { updatedAt: new Date() });
+    // Список дописывается, а не подменяется: `push` в Postgres — это `array_cat`.
+    if (superseded !== undefined)
+      ad.supersededExternalIds = [...ad.supersededExternalIds, superseded.push];
     this.adWrites.push({ op, data });
   }
 
@@ -319,6 +328,14 @@ export class FakeDb {
         throw new FakeUniqueViolation('key');
       }
       this.idempotencyKeys.push({ key: args.data.key, scope: args.data.scope });
+    },
+
+    deleteMany: async (args: { where: { key: string } }): Promise<{ count: number }> => {
+      const before = this.idempotencyKeys.length;
+      const kept = this.idempotencyKeys.filter((row) => row.key !== args.where.key);
+      this.idempotencyKeys.length = 0;
+      this.idempotencyKeys.push(...kept);
+      return { count: before - kept.length };
     },
   };
 

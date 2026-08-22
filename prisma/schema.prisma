@@ -234,15 +234,15 @@ model AdGroup {
 }
 
 model Ad {
-  id                String           @id @default(cuid())
-  adGroupId         String
-  externalId        String
-  format            AdFormat
-  title             String
-  body              String
-  imageUrl          String?
-  videoUrl          String?
-  cta               String?
+  id                    String           @id @default(cuid())
+  adGroupId             String
+  externalId            String
+  format                AdFormat
+  title                 String
+  body                  String
+  imageUrl              String?
+  videoUrl              String?
+  cta                   String?
   /// Крутится ли объявление в кабинете. Это не то же самое, что moderationStatus:
   /// одобренное модерацией объявление бывает выключено, а выключенное — отклонено.
   /// Источник — листинг площадки (`Ad.State` у Директа, `banner.status` у VK), но
@@ -254,14 +254,26 @@ model Ad {
   /// `optimizer/rules.ts`) и модерация (`moderation/`). Отчёты (`reporter/`) поле не
   /// читают вовсе. ACTIVE по умолчанию — «статус неизвестен, считаем работающим»:
   /// спрятать живое объявление из A/B дороже, чем лишний раз предложить его паузу.
-  status            AdStatus         @default(ACTIVE)
-  moderationStatus  ModerationStatus @default(PENDING)
-  moderationReason  String?
-  moderationRetries Int              @default(0)
-  llmVariant        String?
-  creativeId        String?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  status                AdStatus         @default(ACTIVE)
+  moderationStatus      ModerationStatus @default(PENDING)
+  moderationReason      String?
+  moderationRetries     Int              @default(0)
+  llmVariant            String?
+  /// Внешние id, которые эта строка оставила позади, меняя текст.
+  ///
+  /// У VK правка текста — это создание нового баннера с удалением старого, и когда
+  /// удаление не проходит, старый остаётся в листинге ничьим (`moderation/repair.ts`
+  /// переводит строку на новый id). Без пометки очередная загрузка завела бы под него
+  /// работающее объявление со своим счётчиком попыток. Список, а не одно значение:
+  /// строку переписывают до трёх раз подряд, и каждая неудавшаяся уборка оставляет в
+  /// кабинете ещё один такой баннер — помнить надо все.
+  ///
+  /// Читает `ingestion/entities.ts`. Раньше эта связь восстанавливалась перебором
+  /// `ChangeLog`: журнал — про историю, и выборка росла вместе со всем проектом.
+  supersededExternalIds String[]
+  creativeId            String?
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
 
   adGroup  AdGroup   @relation(fields: [adGroupId], references: [id], onDelete: Cascade)
   creative Creative? @relation(fields: [creativeId], references: [id], onDelete: SetNull)

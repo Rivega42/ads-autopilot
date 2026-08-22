@@ -431,10 +431,26 @@ describe('repairRejectedAd в VK', () => {
     // Старый баннер удалён: строка со старым id не сопоставилась бы ни со статистикой
     // (`ingestion/stats.ts` индексирует по externalId), ни с опросом модерации.
     expect(db.adOf('ad1').externalId).toBe('10');
+    // Тот же ответ, что раньше собирала загрузка перебором журнала: под старым id
+    // в кабинете может остаться баннер, и заводить под него работающую строку нельзя.
+    expect(db.adOf('ad1').supersededExternalIds).toEqual(['9']);
     expect(db.changeLogs.find((row) => row.action === REWRITE_ACTION)?.newValue).toMatchObject({
       externalIdBefore: '9',
       externalIdAfter: '10',
     });
+  });
+
+  it('дописывает заменённый баннер к прежним, а не затирает их', async () => {
+    // Строку переписывают до трёх раз подряд, и каждая неудавшаяся уборка оставляет в
+    // кабинете ещё один погашенный баннер. Одно значение на строку помнило бы только
+    // последний, а предыдущему первый же синк вернул бы «работает».
+    db.adOf('ad1').supersededExternalIds = ['7'];
+    const vk = vkHarness();
+    const h = harness({ adapter: vk.adapter, channel: Provider.VK_ADS, rewrites: [VK_REWRITE] });
+
+    await repairRejectedAd(h.rc, rejected());
+
+    expect(db.adOf('ad1').supersededExternalIds).toEqual(['7', '9']);
   });
 
   it('при частичном отказе сохраняет id уже созданного баннера', async () => {
@@ -447,6 +463,9 @@ describe('repairRejectedAd в VK', () => {
     // Замена уже показывается и тратит бюджет — потеряв её id, мы потеряли бы
     // единственное живое объявление группы.
     expect(ad.externalId).toBe('10');
+    // Ровно тот случай, ради которого связь и хранится: баннер 9 остался в кабинете
+    // погашенным, и загрузка узнаёт его по этому списку, а не перебором журнала.
+    expect(ad.supersededExternalIds).toEqual(['9']);
     expect(ad.moderationStatus).toBe(ModerationStatus.REJECTED);
     expect(ad.moderationRetries).toBe(1);
     // Человеку нужен id того баннера, который сейчас крутится, а не удаляемого.
@@ -502,6 +521,9 @@ describe('repairRejectedAd в VK', () => {
     // Слить две строки автоматика не вправе, поэтому id остаётся старым, но тексты
     // и статус сохраняются: иначе объявление зависло бы в REWRITING.
     expect(ad.externalId).toBe('9');
+    // Переезда не было — строка осталась на своём баннере, и записывать нечего:
+    // пометка означает «этот id больше не наш», а он всё ещё наш.
+    expect(ad.supersededExternalIds).toEqual([]);
     expect(ad.title).toBe(VK_REWRITE.title);
     expect(ad.moderationStatus).toBe(ModerationStatus.PENDING);
     // Баннер 9 удалён при замене. Оставить строку работающей значит вечно предлагать
@@ -588,6 +610,54 @@ describe('repairRejectedAd: dry-run не платит за один и тот ж
 
     expect(outcome).toMatchObject({ status: 'planned' });
     expect(second.rewriteCalls).toHaveLength(1);
+  });
+
+  it('упавшая модель не оставляет отметку занятой', async () => {
+    // Отметка живёт 30 дней и означает «ответ по этому входу уже получен и показан».
+    // Разовый отказ провайдера её не подтверждает: оставь ключ занятым — и объявление
+    // выпадает из починки до истечения срока, причём молча, потому что ненулевой
+    // `unchanged` в сводке при DRY_RUN — норма (см. `ModerationRunSummary`).
+    const failing = harness({ ctx: DRY(), rewrites: [new Error('LLM 503')] });
+
+    await expect(repairRejectedAd(failing.rc, rejected())).rejects.toThrow('LLM 503');
+
+    expect(db.idempotencyKeys).toEqual([]);
+
+    const next = harness({ ctx: DRY() });
+    const outcome = await repairRejectedAd(next.rc, rejected());
+    expect(outcome).toMatchObject({ status: 'planned' });
+    expect(next.rewriteCalls).toHaveLength(1);
+  });
+
+  it('отметка остаётся занятой, когда модель ответила, а вариант не прошёл проверки', async () => {
+    // Здесь ответ получен и оплачен, а человеку уже ушло письмо: платить за тот же
+    // ответ каждые полчаса не за что. Отпускается ключ только на отказе, а не на
+    // любом исходе, отличном от плана.
+    const h = harness({
+      ctx: DRY(),
+      rewrites: [{ ...REWRITE, title: 'Лучший ремонт стиральных машин' }],
+    });
+
+    const outcome = await repairRejectedAd(h.rc, rejected());
+
+    expect(outcome).toMatchObject({ status: 'escalated' });
+    expect(db.idempotencyKeys).toHaveLength(1);
+  });
+
+  it('упавший кабинет тоже не съедает отметку: предпросмотр так и не показан', async () => {
+    const h = harness({
+      ctx: DRY(),
+      adapter: fakeAdapter({
+        channel: Provider.YANDEX_DIRECT,
+        updateAdText: () => {
+          throw new Error('Директ недоступен');
+        },
+      }),
+    });
+
+    await expect(repairRejectedAd(h.rc, rejected())).rejects.toThrow('Директ недоступен');
+
+    expect(db.idempotencyKeys).toEqual([]);
   });
 
   it('вне dry-run ключ не резервируется: там от повтора держит захват строки', async () => {

@@ -54,7 +54,7 @@ const DEFAULTS: Partial<Record<ModelName, FakeRow>> = {
   client: { metrikaCounterId: null, metrikaGoalId: null, metrikaAttribution: null },
   campaign: { status: 'DRAFT' },
   adGroup: { status: 'ACTIVE', targetings: null },
-  ad: { moderationStatus: 'PENDING', moderationRetries: 0 },
+  ad: { moderationStatus: 'PENDING', moderationRetries: 0, supersededExternalIds: [] },
   keyword: { status: 'ACTIVE', matchType: 'PHRASE', externalId: null, bid: null },
   campaignStat: {
     impressions: 0,
