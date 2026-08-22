@@ -1,7 +1,12 @@
-import { Provider, StatEntityType } from '@prisma/client';
+import { ChangeActor, Provider, StatEntityType } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { listCampaigns, listCampaignsView, listClientsView } from '../../web/lib/queries.js';
+import {
+  listCampaigns,
+  listCampaignsView,
+  listChangesView,
+  listClientsView,
+} from '../../web/lib/queries.js';
 
 import { dashboardFilters, disconnectDashboardPrisma } from './support/dashboard-checks.js';
 import { PERIOD_FROM, dateColumn } from './support/dashboard-seed.js';
@@ -176,5 +181,61 @@ describe('дашборд: потолок выборки', () => {
 
     expect(rows).toHaveLength(ROW_LIMIT);
     expect(rows.reduce((sum, row) => sum + row.totals.spend, 0)).toBeLessThan(TOTAL_SPEND);
+  });
+});
+
+/**
+ * История изменений обрезается тем же потолком, что и списки, и до сих пор
+ * молчала об этом. `/changes` — то место, куда человек идёт разбираться, что
+ * система сделала с кабинетом; список, у которого не видно хвоста, отвечает на
+ * этот вопрос неполно и не говорит, что неполно.
+ */
+describe('дашборд: потолок истории изменений', () => {
+  const CHANGE_COUNT = 205;
+
+  beforeAll(async () => {
+    const campaign = await prisma.campaign.findFirstOrThrow({
+      where: { clientId },
+      select: { id: true },
+    });
+    await prisma.changeLog.createMany({
+      data: Array.from({ length: CHANGE_COUNT }, (_, index) => ({
+        campaignId: campaign.id,
+        entityType: 'KEYWORD',
+        entityId: `kw-${index}`,
+        action: 'bid_change',
+        prevValue: { bid: 100 },
+        newValue: { bid: 110 },
+        reason: `Правка ${index}`,
+        actor: ChangeActor.AI,
+        provider: Provider.YANDEX_DIRECT,
+        appliedAt: new Date(`${PERIOD_FROM}T09:00:00.000Z`),
+      })),
+    });
+  });
+
+  it('обрезка видна: страница знает размер набора, а не только показанное', async () => {
+    const view = await listChangesView(dashboardFilters());
+
+    expect(view.rows).toHaveLength(ROW_LIMIT);
+    expect(view.total).toBe(CHANGE_COUNT);
+    expect(view.truncated).toBe(true);
+  });
+
+  it('набор ровно по потолку обрезанным не считается', async () => {
+    const view = await listChangesView(dashboardFilters(), { limit: CHANGE_COUNT });
+
+    expect(view.rows).toHaveLength(CHANGE_COUNT);
+    expect(view.truncated).toBe(false);
+  });
+
+  it('размер набора считается по тому же фильтру, что и строки', async () => {
+    // Иначе «показаны первые 200 из 205» становится другой ложью: число из одной
+    // выборки, подписанное как размер другой.
+    const view = await listChangesView(dashboardFilters({ provider: Provider.VK_ADS }));
+
+    expect(view.rows).toEqual([]);
+    expect(view.total).toBe(0);
+    expect(view.truncated).toBe(false);
   });
 });

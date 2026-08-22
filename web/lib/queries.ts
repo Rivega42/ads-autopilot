@@ -49,6 +49,8 @@ export interface CampaignsView extends ListWindow<CampaignRow> {
 
 export type ClientsView = ListWindow<ClientRow>;
 
+export type ChangesView = ListWindow<ChangeRow>;
+
 export interface ApprovalsView extends ListWindow<ApprovalRow> {
   /** false — это очередь ждущих решения, и она периодом не режется. */
   readonly periodApplies: boolean;
@@ -517,18 +519,29 @@ export async function getCampaignDaily(
   });
 }
 
+function changeWhere(
+  filters: DashboardFilters,
+  options: { readonly campaignId?: string } = {},
+): Prisma.ChangeLogWhereInput {
+  return {
+    campaignId: options.campaignId ?? undefined,
+    provider: filters.provider ?? undefined,
+    // appliedAt — timestamp, поэтому границы московские, а не UTC-полночь.
+    appliedAt: { gte: mskDateToUtc(filters.from), lt: mskDateToUtc(shiftYmd(filters.to, 1)) },
+    ...(filters.clientId ? { campaign: { clientId: filters.clientId } } : {}),
+  };
+}
+
+/**
+ * Строки истории — до потолка выборки. Суммировать и пересчитывать по ним
+ * ничего нельзя: размер набора знает только `listChangesView`.
+ */
 export async function listChanges(
   filters: DashboardFilters,
   options: { readonly campaignId?: string; readonly limit?: number } = {},
 ): Promise<ChangeRow[]> {
   const changes = await getPrisma().changeLog.findMany({
-    where: {
-      campaignId: options.campaignId ?? undefined,
-      provider: filters.provider ?? undefined,
-      // appliedAt — timestamp, поэтому границы московские, а не UTC-полночь.
-      appliedAt: { gte: mskDateToUtc(filters.from), lt: mskDateToUtc(shiftYmd(filters.to, 1)) },
-      ...(filters.clientId ? { campaign: { clientId: filters.clientId } } : {}),
-    },
+    where: changeWhere(filters, options),
     select: {
       id: true,
       appliedAt: true,
@@ -646,6 +659,26 @@ export async function listApprovalsView(filters: DashboardFilters): Promise<Appr
     truncated: rows.length < total,
     periodApplies: approvalsArePeriodBound(filters),
   };
+}
+
+/**
+ * Страница истории изменений целиком: обрезанный список и размер набора.
+ *
+ * `/changes` — то место, куда человек идёт разбираться, что система сделала с
+ * кабинетом. Список без хвоста отвечает на этот вопрос неполно; молчащий об
+ * обрезке — ещё и не признаётся в этом.
+ */
+export async function listChangesView(
+  filters: DashboardFilters,
+  options: { readonly campaignId?: string; readonly limit?: number } = {},
+): Promise<ChangesView> {
+  const where = changeWhere(filters, options);
+  const [rows, total] = await Promise.all([
+    listChanges(filters, options),
+    getPrisma().changeLog.count({ where }),
+  ]);
+
+  return { rows, total, limit: options.limit ?? ROW_LIMIT, truncated: rows.length < total };
 }
 
 /**

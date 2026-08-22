@@ -38,7 +38,7 @@ import {
 } from '../../../lib/labels';
 import { cpa, cpaDeviation, ctr } from '../../../lib/metrics';
 import type { DailyMetrics } from '../../../lib/queries';
-import { getCampaign, getCampaignDaily, listChanges } from '../../../lib/queries';
+import { getCampaign, getCampaignDaily, listChangesView } from '../../../lib/queries';
 
 export const dynamic = 'force-dynamic';
 
@@ -64,10 +64,11 @@ export default async function CampaignPage({
   const campaign = await getCampaign(params.id);
   if (!campaign) notFound();
 
-  const [daily, changes] = await Promise.all([
+  const [daily, changeView] = await Promise.all([
     getCampaignDaily(campaign.id, filters.from, filters.to),
-    listChanges(filters, { campaignId: campaign.id, limit: 50 }),
+    listChangesView(filters, { campaignId: campaign.id, limit: 50 }),
   ]);
+  const changes = changeView.rows;
 
   const totals = daily.reduce(
     (accumulator, row) => ({
@@ -215,7 +216,17 @@ export default async function CampaignPage({
 
       <section className="card">
         <div className="card-head">
-          <h2>История изменений</h2>
+          <h2>
+            История изменений
+            {changeView.truncated ? (
+              // Панель карточки показывает последние 50 — здесь это не дефект, а
+              // размер панели. Дефектом было бы промолчать про остальные.
+              <span className="muted">
+                {' '}
+                — последние {formatInteger(changes.length)} из {formatInteger(changeView.total)}
+              </span>
+            ) : null}
+          </h2>
           <Link className="link-reset" href={withFilters('/changes', filters)}>
             Все изменения
           </Link>
