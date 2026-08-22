@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import type { BidHistoryRow } from './bid-history.js';
 import {
   buildRunId,
   hasMixedAttribution,
@@ -24,6 +25,18 @@ interface Fixture {
   keywords?: KeywordRecord[];
   ads?: AdRecord[];
   stats?: CampaignStatRecord[];
+  /** Записи журнала об изменениях ставки — из них строится точка отсчёта окна. */
+  changes?: BidHistoryRow[];
+}
+
+/** Запись журнала об изменении ставки: `prevValue` — то, чем ставка была до неё. */
+function bidChange(entityId: string, previous: number, appliedAt: Date): BidHistoryRow {
+  return {
+    entityType: 'KEYWORD',
+    entityId,
+    prevValue: { kind: 'bid', amount: previous },
+    appliedAt,
+  };
 }
 
 function campaignRecord(overrides: Partial<CampaignRecord> = {}): CampaignRecord {
@@ -96,6 +109,25 @@ function createDb(fixture: Fixture = {}): OptimizerDb {
     },
     campaignStat: {
       findMany: vi.fn(async () => fixture.stats ?? []),
+    },
+    changeLog: {
+      // Мок отвечает ровно на то, что спросили: журнал огромен, и выборка без окна,
+      // потолка или фильтра по действию — тот самый дефект, который здесь и проверяется.
+      findMany: vi.fn(async (args) => {
+        const { where, take } = args;
+        if (where.entityId.in.length === 0) throw new Error('выборка журнала без сущностей');
+        if (where.action.in.length === 0) throw new Error('выборка журнала без фильтра действия');
+        if (!(take > 0)) throw new Error('выборка журнала без потолка');
+        return (fixture.changes ?? [])
+          .filter(
+            (row) =>
+              row.entityType === where.entityType &&
+              where.entityId.in.includes(row.entityId) &&
+              row.appliedAt >= where.appliedAt.gte,
+          )
+          .sort((a, b) => a.appliedAt.getTime() - b.appliedAt.getTime())
+          .slice(0, take);
+      }),
     },
   };
 }
@@ -341,7 +373,9 @@ describe('runOptimizer', () => {
 
     expect(run.dryRun).toBe(true);
     expect(run.allowed).toHaveLength(1);
-    expect(Object.keys(db)).not.toContain('changeLog');
+    // Журнал движок читает (точка отсчёта окна), но писать в него ему нечем: запись —
+    // дело apply.ts, и порт обязан оставаться доступным только на чтение.
+    expect(Object.keys(db.changeLog)).toEqual(['findMany']);
   });
 
   it('sends everything to approval for an imported campaign in OBSERVER mode', async () => {
@@ -513,6 +547,46 @@ describe('runOptimizer', () => {
     const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW, sources: [mlLike] });
 
     expect(run.allowed[0]?.layer).toBe('ml');
+  });
+
+  /**
+   * CPA вдвое выше цели при 400 показах: снижение ставки без паузы (порог паузы —
+   * 500 показов и тройная цель). Пауза забрала бы изменение ставки себе в
+   * `resolveConflicts`, и предохранителю нечего было бы ограничивать.
+   */
+  const bidDecreaseFixture = (changes?: BidHistoryRow[]): Fixture => ({
+    keywords: [{ id: 'kw-1', phrase: 'ремонт', bid: '10.00', status: 'ACTIVE' }],
+    stats: statsOver('kw-1', 3, { impressions: 400, clicks: 40, spend: 1000, conversions: 1 }),
+    ...(changes ? { changes } : {}),
+  });
+
+  it('считает лимит ставки от начала окна, а не только от текущего значения', async () => {
+    // Ставка 10 уже опустилась внутри окна с 13: спуск ниже 9.1 (−30% от 13) —
+    // это и есть накопление, ради которого предохранитель существует.
+    const run = await runOptimizer(
+      createDb(bidDecreaseFixture([bidChange('kw-1', 13, new Date('2026-08-05T03:00:00.000Z'))])),
+      { campaignId: 'c-1', now: NOW },
+    );
+
+    expect(run.allowed[0]?.nextValue).toEqual({ kind: 'bid', amount: 9.1 });
+    expect(run.clamped[0]?.rail).toBe('MAX_BID_CHANGE_WINDOW');
+
+    // Без записи в окне тот же прогон опустил бы ставку до 8.5 — шаговый лимит от 10.
+    const fresh = await runOptimizer(createDb(bidDecreaseFixture()), {
+      campaignId: 'c-1',
+      now: NOW,
+    });
+    expect(fresh.allowed[0]?.nextValue).toEqual({ kind: 'bid', amount: 8.5 });
+  });
+
+  it('не спрашивает журнал за пределами своего окна', async () => {
+    const db = createDb(bidDecreaseFixture());
+
+    const run = await runOptimizer(db, { campaignId: 'c-1', now: NOW, windowDays: 10 });
+
+    const call = (db.changeLog.findMany as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[0]?.[0] as { where: { appliedAt: { gte: Date } } };
+    expect(call.where.appliedAt.gte).toEqual(run.windowStart);
   });
 
   it('clamps an out-of-range source proposal instead of trusting it', async () => {

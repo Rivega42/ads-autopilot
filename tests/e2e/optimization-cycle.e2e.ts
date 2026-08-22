@@ -2,6 +2,14 @@ import type { ChangeLog, PendingApproval } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { resetDatabase } from './support/database.js';
+import {
+  DRIFT_DAYS,
+  DRIFT_RULE_STEP,
+  DRIFT_START_BID,
+  driftRunAt,
+  seedDriftAccount,
+  type DriftFixture,
+} from './support/optimizer-drift-seed.js';
 import { runAt, seedAccount, type Fixture } from './support/seed.js';
 import { createTelegramMock, type TelegramMock } from './support/telegram-mock.js';
 import { createYandexApiMock, type YandexApiMock } from './support/yandex-api-mock.js';
@@ -10,7 +18,11 @@ import { applyApproval, setMessenger } from '@/approval/index.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { resetYandexRuntimeState } from '@/clients/yandex-direct/http.js';
 import { prisma } from '@/db/prisma.js';
-import { runScheduledOptimization } from '@/optimizer/index.js';
+import {
+  DEFAULT_GUARDRAILS,
+  runScheduledOptimization,
+  type ScheduledOptimizationSummary,
+} from '@/optimizer/index.js';
 
 /**
  * Сквозной прогон конвейера оптимизации на живых Postgres и Redis.
@@ -320,7 +332,9 @@ describe('цикл оптимизации целиком', () => {
     // в первые сутки, 170 → 144.5 во вторые. Это и есть настоящее поведение в проде —
     // раньше вторые сутки повторяли те же 200 → 170 только потому, что применённое
     // изменение не доезжало до наших строк, а часовой синк в сценарии не запускается.
-    // Внимание: предохранитель ограничивает один шаг, а не сумму за неделю.
+    // Оба шага помещаются в лимит и по отдельности, и в сумме: 144.5 — это −27.75% от
+    // ставки на начало окна при потолке в 30%. Что происходит, когда сумма шагов лимит
+    // перебирает, проверяет сценарий «ставка за неделю» ниже.
     const decreases = rows.filter((r) => r.action === 'BID_DECREASE');
     expect(decreases).toHaveLength(2);
     expect(decreases.map((r) => r.newValue)).toEqual([
@@ -365,5 +379,82 @@ describe('цикл оптимизации целиком', () => {
       await worker.close();
       await queue.close();
     }
+  });
+});
+
+/**
+ * Накопление изменения ставки за неделю.
+ *
+ * Отдельный кабинет и отдельный прогон на семь суток подряд. Правило просит −15%
+ * каждые сутки, и ни один шаг не нарушает лимита в 30%: пока лимит считался по одному
+ * шагу, семь таких шагов уводили ставку с 200 до 64.12 — это −68%, и предохранитель
+ * при этом ни разу не срабатывал. Проверяется, что теперь считается сумма за окно.
+ */
+describe('ставка за неделю', () => {
+  let drift: DriftFixture;
+  let driftYandex: YandexApiMock;
+  let driftTelegram: TelegramMock;
+
+  beforeAll(async () => {
+    await resetDatabase();
+    resetYandexRuntimeState();
+    bootstrapChannels();
+
+    driftYandex = createYandexApiMock([
+      { id: 911, name: 'Поиск — сползающая ставка', dailyBudget: 2000, negativeKeywords: [] },
+    ]);
+    driftYandex.server.listen({ onUnhandledRequest: 'error' });
+
+    driftTelegram = createTelegramMock();
+    setMessenger(driftTelegram);
+
+    drift = await seedDriftAccount();
+  });
+
+  afterAll(async () => {
+    driftYandex?.server.close();
+    setMessenger(null);
+    await prisma.$disconnect();
+  });
+
+  it('семь суток подряд по −15% не уводят ставку дальше, чем на один шаг', async () => {
+    const summaries: ScheduledOptimizationSummary[] = [];
+    for (let day = 0; day < DRIFT_DAYS; day += 1) {
+      summaries.push(await runScheduledOptimization({ dryRun: false, now: driftRunAt(day) }));
+    }
+
+    // Первые двое суток шаг помещается в остаток лимита целиком, третьи — только
+    // частично (потому и clamped), дальше остатка нет вовсе и решение отклоняется.
+    // Правило при этом просит своё снижение каждые сутки: предохранитель обязан
+    // держать оборону постоянно, а не «успокоить» источник решений.
+    expect(summaries.map((s) => s.autoApply)).toEqual([1, 1, 1, 0, 0, 0, 0]);
+    expect(summaries.map((s) => s.rejected)).toEqual([0, 0, 0, 1, 1, 1, 1]);
+    expect(summaries.map((s) => s.clamped)).toEqual([0, 0, 1, 0, 0, 0, 0]);
+    expect(summaries.every((s) => s.failed === 0 && s.applyFailed === 0)).toBe(true);
+
+    const rows = await prisma.changeLog.findMany({
+      where: { entityId: drift.keywordId, action: 'BID_DECREASE' },
+      orderBy: [{ appliedAt: 'asc' }, { id: 'asc' }],
+    });
+    expect(rows.map((r) => (r.newValue as { amount: number }).amount)).toEqual([170, 144.5, 140]);
+
+    // Отклонённое не доезжает ни до площадки, ни до журнала: запись «поменять на
+    // ту же ставку» стоила бы баллов и означала бы в аудите изменение, которого не было.
+    expect(driftYandex.bids).toEqual([
+      { keywordId: 931, searchBid: 170 },
+      { keywordId: 931, searchBid: 144.5 },
+      { keywordId: 931, searchBid: 140 },
+    ]);
+
+    const keyword = await prisma.keyword.findUniqueOrThrow({ where: { id: drift.keywordId } });
+    expect(Number(keyword.bid)).toBe(140);
+
+    // Ровно предохранитель, не «примерно»: за окно ставка ушла на 30%, а не на 68%,
+    // как уходила, пока лимит считался по одному шагу.
+    const drop = 1 - Number(keyword.bid) / DRIFT_START_BID;
+    expect(drop).toBeCloseTo(DEFAULT_GUARDRAILS.maxBidChangePct, 10);
+    expect(DRIFT_RULE_STEP).toBeLessThan(DEFAULT_GUARDRAILS.maxBidChangePct);
+
+    expect(await prisma.errorLog.count()).toBe(0);
   });
 });

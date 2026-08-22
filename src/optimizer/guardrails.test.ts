@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { bidHistoryKey, noBidHistory, type BidHistory } from './bid-history.js';
 import {
   applyGuardrails,
   DEFAULT_GUARDRAILS,
@@ -42,7 +43,19 @@ function context(
   return {
     dailyBudget: 5000,
     observations: new Map(observations),
+    bidHistory: noBidHistory(WINDOW_DAYS),
     ...overrides,
+  };
+}
+
+const WINDOW_DAYS = 7;
+
+/** История, в которой ставка сущности на начало окна была `anchor`. */
+function history(anchor: number, entityId = 'kw-1'): BidHistory {
+  return {
+    windowDays: WINDOW_DAYS,
+    anchors: new Map([[bidHistoryKey('KEYWORD', entityId), anchor]]),
+    unavailable: new Set(),
   };
 }
 
@@ -136,6 +149,168 @@ describe('max bid change per day', () => {
       config({ maxBidChangePct: 0.1 }),
     );
     expect(bidAmount(outcome.allowed[0]?.nextValue ?? { kind: 'absent' })).toBe(90);
+  });
+});
+
+describe('max bid change per window', () => {
+  /**
+   * Ставка уже опустилась со 100 до 80 внутри окна, то есть на 20% из тридцати.
+   * Остаток хода вниз — до 70, и предохранитель обязан считать его от 100, а не от 80.
+   */
+  const moved = (next: number): Decision =>
+    decision({ prevValue: { kind: 'bid', amount: 80 }, nextValue: { kind: 'bid', amount: next } });
+
+  it('шаг, помещающийся в остаток лимита, проходит целиком', () => {
+    const outcome = applyGuardrails([moved(72)], context({ bidHistory: history(100) }));
+    expect(outcome.rejected).toEqual([]);
+    expect(bidAmount(outcome.allowed[0]?.nextValue ?? { kind: 'absent' })).toBe(72);
+    expect(outcome.clamped).toEqual([]);
+  });
+
+  it('шаг, перебирающий остаток, урезается до остатка, а не до шагового лимита', () => {
+    const outcome = applyGuardrails([moved(68)], context({ bidHistory: history(100) }));
+    // Шаговый лимит от 80 разрешил бы 56 — и ставка ушла бы за −30% от начала окна.
+    expect(bidAmount(outcome.allowed[0]?.nextValue ?? { kind: 'absent' })).toBe(70);
+    expect(outcome.clamped[0]?.rail).toBe('MAX_BID_CHANGE_WINDOW');
+    expect(outcome.allowed[0]?.reason).toContain('за 7 сут.');
+  });
+
+  it('исчерпанный лимит отклоняет решение, а не превращает его в изменение на ноль', () => {
+    const outcome = applyGuardrails([moved(70)], context({ bidHistory: history(100) }));
+    expect(outcome.allowed).toHaveLength(1);
+
+    const exhausted = applyGuardrails(
+      [
+        decision({
+          prevValue: { kind: 'bid', amount: 70 },
+          nextValue: { kind: 'bid', amount: 60 },
+        }),
+      ],
+      context({ bidHistory: history(100) }),
+    );
+    expect(exhausted.allowed).toEqual([]);
+    expect(exhausted.clamped).toEqual([]);
+    expect(exhausted.rejected[0]?.rail).toBe('MAX_BID_CHANGE_WINDOW');
+    expect(exhausted.rejected[0]?.note).toContain('исчерпан');
+  });
+
+  it('лимит за окно считается по модулю: обратный ход после спуска разрешён', () => {
+    const outcome = applyGuardrails(
+      [
+        decision({
+          prevValue: { kind: 'bid', amount: 70 },
+          nextValue: { kind: 'bid', amount: 77 },
+        }),
+      ],
+      context({ bidHistory: history(100) }),
+    );
+    expect(bidAmount(outcome.allowed[0]?.nextValue ?? { kind: 'absent' })).toBe(77);
+  });
+
+  it('шаговый лимит остаётся главным, когда он строже оконного', () => {
+    // Якорь ниже текущей ставки: за окно ставка уже росла, вверх хода почти нет,
+    // а вниз шаговый лимит от 200 не пускает дальше 140.
+    const outcome = applyGuardrails(
+      [
+        decision({
+          prevValue: { kind: 'bid', amount: 200 },
+          nextValue: { kind: 'bid', amount: 10 },
+        }),
+      ],
+      context({ bidHistory: history(180) }),
+    );
+    expect(bidAmount(outcome.allowed[0]?.nextValue ?? { kind: 'absent' })).toBe(140);
+    expect(outcome.clamped[0]?.rail).toBe('MAX_BID_CHANGE');
+  });
+
+  it('ставка, уже вынесенная за коридор окна, может только возвращаться в него', () => {
+    // Человек поднял ставку руками до 200 при якоре 100: коридор окна — 70…130.
+    const up = applyGuardrails(
+      [
+        decision({
+          action: 'BID_INCREASE',
+          prevValue: { kind: 'bid', amount: 200 },
+          nextValue: { kind: 'bid', amount: 220 },
+        }),
+      ],
+      context({ bidHistory: history(100) }),
+    );
+    expect(up.allowed).toEqual([]);
+    expect(up.rejected[0]?.rail).toBe('MAX_BID_CHANGE_WINDOW');
+
+    const down = applyGuardrails(
+      [
+        decision({
+          prevValue: { kind: 'bid', amount: 200 },
+          nextValue: { kind: 'bid', amount: 150 },
+        }),
+      ],
+      context({ bidHistory: history(100) }),
+    );
+    expect(bidAmount(down.allowed[0]?.nextValue ?? { kind: 'absent' })).toBe(150);
+  });
+
+  it('недостоверная история отклоняет изменение ставки, а не пропускает его', () => {
+    const outcome = applyGuardrails(
+      [decision()],
+      context({
+        bidHistory: {
+          windowDays: 7,
+          anchors: new Map(),
+          unavailable: new Set([bidHistoryKey('KEYWORD', 'kw-1')]),
+        },
+      }),
+    );
+    expect(outcome.allowed).toEqual([]);
+    expect(outcome.rejected[0]?.rail).toBe('BID_HISTORY_UNAVAILABLE');
+  });
+
+  it('недостоверная история не мешает поставить сущность на паузу', () => {
+    const outcome = applyGuardrails(
+      [
+        decision({
+          action: 'PAUSE',
+          prevValue: { kind: 'status', status: 'ACTIVE' },
+          nextValue: { kind: 'status', status: 'PAUSED' },
+        }),
+      ],
+      context({
+        bidHistory: {
+          windowDays: 7,
+          anchors: new Map(),
+          unavailable: new Set([bidHistoryKey('KEYWORD', 'kw-1')]),
+        },
+      }),
+    );
+    expect(outcome.allowed).toHaveLength(1);
+  });
+
+  it('семь шагов правила по −15% упираются в лимит, а не складываются', () => {
+    // Тот же сюжет, что в сценарии tests/e2e/optimization-cycle.e2e.ts, но без БД:
+    // здесь видно арифметику, там — что она доезжает до кабинета.
+    const anchorBid = 200;
+    let bid = anchorBid;
+    const applied: number[] = [];
+
+    for (let day = 0; day < 7; day += 1) {
+      const proposed = Math.round(bid * 0.85 * 100) / 100;
+      const outcome = applyGuardrails(
+        [
+          decision({
+            prevValue: { kind: 'bid', amount: bid },
+            nextValue: { kind: 'bid', amount: proposed },
+          }),
+        ],
+        context({ bidHistory: day === 0 ? noBidHistory(7) : history(anchorBid) }),
+      );
+      const next = bidAmount(outcome.allowed[0]?.nextValue ?? { kind: 'absent' });
+      if (next === null) continue;
+      bid = next;
+      applied.push(next);
+    }
+
+    expect(applied).toEqual([170, 144.5, 140]);
+    expect(1 - bid / anchorBid).toBeCloseTo(DEFAULT_GUARDRAILS.maxBidChangePct, 10);
   });
 });
 
@@ -406,12 +581,26 @@ describe('property: no rule output escapes the guardrails', () => {
         });
       }
 
+      // Часть сущностей уже двигалась внутри окна: без якорей свойство проверяло бы
+      // только шаговый коридор, то есть ровно ту половину предохранителя, что была и до
+      // суммарного лимита.
+      const anchors = new Map<string, number>();
+      for (const entity of scenario.entities) {
+        if (entity.currentBid === null || entity.currentBid <= 0) continue;
+        if (random() < 0.5) continue;
+        anchors.set(
+          `${entity.entityType}:${entity.entityId}`,
+          Math.round(entity.currentBid * (0.8 + random() * 0.45) * 100) / 100,
+        );
+      }
+
       const outcome = applyGuardrails(
         decisions,
         {
           dailyBudget: scenario.targets.dailyBudget,
           observations,
           eligibleEntityCount: scenario.entities.length,
+          bidHistory: { windowDays: 7, anchors, unavailable: new Set() },
         },
         settings,
       );
@@ -443,6 +632,16 @@ describe('property: no rule output escapes the guardrails', () => {
           const change = Math.abs(allowed.nextValue.amount - previous) / previous;
           expect(change).toBeLessThanOrEqual(settings.maxBidChangePct);
           expect(allowed.nextValue.amount).toBeGreaterThan(0);
+          // Ставка не может стать дальше от коридора окна, чем уже была: внутри коридора
+          // она обязана в нём остаться, а снаружи — только приближаться.
+          const anchor = anchors.get(`${allowed.entityType}:${allowed.entityId}`) ?? previous;
+          const away = (value: number): number =>
+            Math.max(
+              0,
+              anchor * (1 - settings.maxBidChangePct) - value,
+              value - anchor * (1 + settings.maxBidChangePct),
+            );
+          expect(away(allowed.nextValue.amount)).toBeLessThanOrEqual(away(previous) + 0.01);
         }
 
         if (allowed.nextValue.kind === 'budget') {

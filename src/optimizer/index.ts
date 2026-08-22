@@ -1,4 +1,5 @@
 export * from './types.js';
+export * from './bid-history.js';
 export * from './guardrails.js';
 export * from './rules.js';
 export * from './policy.js';

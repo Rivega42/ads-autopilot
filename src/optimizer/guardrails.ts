@@ -1,15 +1,26 @@
+import { bidHistoryKey, type BidHistory } from './bid-history.js';
 import { ceilMoney, floorMoney, formatMoney, formatPercent } from './money.js';
 import type { Decision } from './types.js';
 
 export type GuardrailRail =
   | 'MAX_BID_CHANGE'
+  | 'MAX_BID_CHANGE_WINDOW'
   | 'BUDGET_CEILING'
   | 'MIN_OBSERVATIONS'
   | 'MAX_CHANGED_ENTITY_SHARE'
-  | 'UNUSABLE_PREVIOUS_VALUE';
+  | 'UNUSABLE_PREVIOUS_VALUE'
+  | 'BID_HISTORY_UNAVAILABLE';
 
 export interface GuardrailConfig {
-  /** TZ §13.5: изменение ставки за сутки ≤ 30%. */
+  /**
+   * TZ §13.5: изменение ставки ≤ 30%.
+   *
+   * Ограничивает и один шаг, и сумму шагов за окно наблюдения — отдельного порога на
+   * период нет намеренно. Две константы разъехались бы при первой правке одной из них,
+   * а инвариант «одно окно данных даёт право на одно движение» не разъезжается: прогоны
+   * внутри одного окна решают по почти одним и тем же цифрам, и семь решений на одних
+   * данных не должны стоить семи шагов.
+   */
   maxBidChangePct: number;
   /** TZ §13.5: дневной бюджет hard limit = целевой + 20% → ratio 1.2 of `Campaign.dailyBudget`. */
   budgetCeilingRatio: number;
@@ -38,6 +49,8 @@ export interface ObservationCounts {
 export interface GuardrailContext {
   dailyBudget: number;
   observations: Map<string, ObservationCounts>;
+  /** Ставка на начало окна по каждой сущности — точка отсчёта суммарного лимита. */
+  bidHistory: BidHistory;
   /**
    * Population the batch is measured against for the share rail. Omit to disable that rail — the
    * caller may legitimately not know the denominator (e.g. a single-entity re-run).
@@ -184,13 +197,26 @@ function limitValue(
         note: 'неизвестна текущая ставка — относительный лимит неприменим',
       };
     }
-    return clampAroundPrevious(
+
+    const key = bidHistoryKey(decision.entityType, decision.entityId);
+    if (context.bidHistory.unavailable.has(key)) {
+      // Reject, never clamp: без точки отсчёта суммарный лимит неизвестен, а шаговый
+      // разрешил бы очередные 30% — то есть ровно то, ради чего эта ветка существует.
+      return {
+        outcome: 'rejected',
+        rail: 'BID_HISTORY_UNAVAILABLE',
+        note: 'история изменений ставки за окно недостоверна — суммарный лимит неприменим',
+      };
+    }
+
+    return clampBid(
       decision,
       decision.prevValue.amount,
+      // Ставку в окне не меняли — значит начало окна и есть текущее значение.
+      context.bidHistory.anchors.get(key) ?? decision.prevValue.amount,
       decision.nextValue.amount,
       config.maxBidChangePct,
-      'MAX_BID_CHANGE',
-      (amount) => ({ kind: 'bid', amount }),
+      context.bidHistory.windowDays,
     );
   }
 
@@ -215,25 +241,62 @@ function limitValue(
   return { outcome: 'allowed' };
 }
 
-function clampAroundPrevious(
+/**
+ * Ставка внутри двух коридоров сразу: шага и окна.
+ *
+ * Шаговый коридор строится вокруг текущей ставки, оконный — вокруг ставки на начало окна.
+ * Без второго предохранитель ловит только опечатку: −15% в сутки ни разу не нарушают
+ * лимит в 30%, а за неделю уводят ставку почти на −70%, и кампания уходит с показов не
+ * хуже, чем от паузы.
+ *
+ * Оконная граница никогда не запрещает остаться на текущей ставке: если её уже вынесло за
+ * коридор (ставку поправил человек, якорь сместился при сдвиге окна), обратный ход обязан
+ * остаться возможным, иначе предохранитель запирает сущность вместо того, чтобы её беречь.
+ * Отсюда `max(windowUpper, previous)` и `min(windowLower, previous)` — оконный коридор
+ * умеет только сузить шаговый, но не расширить.
+ */
+function clampBid(
   decision: Decision,
   previous: number,
+  anchor: number,
   next: number,
   maxChangePct: number,
-  rail: GuardrailRail,
-  build: (amount: number) => Decision['nextValue'],
+  windowDays: number,
 ): LimitResult {
-  const upper = floorMoney(previous * (1 + maxChangePct));
-  const lower = ceilMoney(previous * (1 - maxChangePct));
+  const stepUpper = floorMoney(previous * (1 + maxChangePct));
+  const stepLower = ceilMoney(previous * (1 - maxChangePct));
+  const windowUpper = floorMoney(anchor * (1 + maxChangePct));
+  const windowLower = ceilMoney(anchor * (1 - maxChangePct));
+
+  const upper = Math.min(stepUpper, Math.max(windowUpper, previous));
+  const lower = Math.max(stepLower, Math.min(windowLower, previous));
   if (next <= upper && next >= lower) return { outcome: 'allowed' };
 
-  // Clamp, not reject: the layer above is right about the direction (CPA really is off target),
-  // it is only asking for a bigger step than one day is allowed to take. The remainder can be
-  // taken tomorrow, which is precisely the intent of a per-day limit.
   const amount = next > upper ? upper : lower;
+  const byWindow = next > upper ? upper < stepUpper : lower > stepLower;
+  const rail: GuardrailRail = byWindow ? 'MAX_BID_CHANGE_WINDOW' : 'MAX_BID_CHANGE';
+  const limit = byWindow
+    ? `${formatPercent(maxChangePct)}% за ${windowDays} сут. от ${formatMoney(anchor)}`
+    : `${formatPercent(maxChangePct)}%/сут`;
+
+  if (amount === previous) {
+    // Урезать до нуля нельзя: решение «поменять на ничего» доехало бы до площадки за
+    // баллы и легло бы в ChangeLog записью об изменении, которого не было.
+    return {
+      outcome: 'rejected',
+      rail,
+      note:
+        `лимит изменения ставки исчерпан (${limit}): запрошено ${formatMoney(next)} ` +
+        `от ${formatMoney(previous)}, коридор ${formatMoney(lower)}…${formatMoney(upper)}`,
+    };
+  }
+
+  // Clamp, not reject: the layer above is right about the direction (CPA really is off target),
+  // it is only asking for a bigger step than the limit allows. The remainder can be taken later,
+  // which is precisely the intent of a rate limit.
   const clampedDecision = annotate(
-    withNextValue(decision, build(amount)),
-    `ограничено guardrail: изменение ставки ≤ ${formatPercent(maxChangePct)}%/сут ` +
+    withNextValue(decision, { kind: 'bid', amount }),
+    `ограничено guardrail: изменение ставки ≤ ${limit} ` +
       `(${formatMoney(next)} → ${formatMoney(amount)})`,
   );
   return {

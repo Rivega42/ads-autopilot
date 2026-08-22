@@ -1,3 +1,4 @@
+import { loadBidHistory, type BidHistory, type BidHistoryDb } from './bid-history.js';
 import {
   applyGuardrails,
   DEFAULT_GUARDRAILS,
@@ -67,7 +68,7 @@ export interface CampaignStatRecord {
  * The slice of Prisma the optimizer touches. Declared structurally so `PrismaClient` satisfies it
  * without the optimizer depending on a generated client, and so tests can pass a plain object.
  */
-export interface OptimizerDb {
+export interface OptimizerDb extends BidHistoryDb {
   campaign: {
     findUnique(args: { where: { id: string } }): Promise<CampaignRecord | null>;
   };
@@ -279,7 +280,8 @@ export async function runOptimizer(
   }
 
   const deduped = resolveConflicts(proposed);
-  const context = buildGuardrailContext(campaign, entities, searchQueries);
+  const bidHistory = await loadBidHistory(db, deduped, { start: windowStart, days: windowDays });
+  const context = buildGuardrailContext(campaign, entities, searchQueries, bidHistory);
   const guarded = applyGuardrails(deduped, context, config);
   const policyContext: PolicyContext = { handoverMode: campaign.handoverMode };
   const { autoApply, approvals } = classifyDecisions(guarded.allowed, policyContext);
@@ -374,6 +376,7 @@ function buildGuardrailContext(
   campaign: CampaignRecord,
   entities: readonly EntityMetrics[],
   searchQueries: readonly SearchQueryMetrics[],
+  bidHistory: BidHistory,
 ): GuardrailContext {
   const observations = new Map<string, ObservationCounts>();
   for (const entity of entities) {
@@ -393,6 +396,7 @@ function buildGuardrailContext(
     dailyBudget: toNumber(campaign.dailyBudget) ?? 0,
     observations,
     eligibleEntityCount: entities.length,
+    bidHistory,
   };
 }
 
