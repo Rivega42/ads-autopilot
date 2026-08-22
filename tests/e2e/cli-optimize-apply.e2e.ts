@@ -317,9 +317,18 @@ describe('optimize --apply, когда карточку доставить не�
     expect(result.mock.telegram.sent).toEqual([]);
   });
 
-  it('нажать карточку некому — это видно и строкой, и кодом возврата', () => {
+  it('нажать карточку некому — это видно строкой, но не кодом возврата', () => {
+    // Кода возврата у этого случая намеренно нет: клиент, держащий бота в блоке, —
+    // стоячее состояние, и ненулевой код горел бы каждые сутки подряд, пока он его
+    // не снимет. Повод доставляет тревога `approval_undelivered`, а не выход
+    // команды; см. докблок `optimizeNeedsHumanFix`.
     expect(result.stdout).toContain('карточек не доставлено');
-    expect(result.code).not.toBe(0);
+    expect(result.code).toBe(0);
+  });
+
+  it('повод при этом лежит в журнале, откуда его берёт тревога', async () => {
+    const rows = await prisma.errorLog.findMany({ where: { clientId: fx.clientId } });
+    expect(rows.map((r) => r.code)).toContain('APPROVAL_NOT_DELIVERED');
   });
 
   it('заявка жива и несёт причину недоставки — по ней её найдёт дашборд', async () => {

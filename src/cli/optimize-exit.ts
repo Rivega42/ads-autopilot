@@ -16,9 +16,11 @@ export function optimizeNeedsHumanFix(summary: ScheduledOptimizationSummary): bo
   return (
     summary.applyFailed > 0 ||
     summary.approvalsFailed > 0 ||
-    // Недоставленная карточка — тот же случай, что у `campaign`: заявка создана,
-    // а нажать её некому, и через APPROVAL_TIMEOUT_HOURS она тихо истечёт.
-    summary.approvalsUndelivered > 0 ||
+    // Недоставленная карточка сюда намеренно не входит, хотя счётчик у неё есть:
+    // это не поломка прогона, а стоячее состояние — клиент держит бота в блоке, и
+    // само оно не пройдёт. Ненулевой код горел бы каждые сутки подряд ровно так же,
+    // как на незаполненном брифе. Повод доставляет тревога `approval_undelivered`
+    // с суточной тишиной; молчания после этой правки не возникает.
     summary.localStateFailed > 0 ||
     summary.failed > 0
   );

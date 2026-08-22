@@ -28,6 +28,7 @@ import {
   ERROR_LOOKBACK_OVERLAP_MINUTES,
   ERROR_WINDOW_MINUTES,
   MAX_ALERTS_PER_RUN,
+  MAX_ERROR_GROUPS,
   PROVIDER_BURST_THRESHOLD,
   REPORT_FAILURE_CODES,
   runAlertScan,
@@ -577,6 +578,39 @@ describe('тревоги администратору', () => {
       expect(texts.every((text) => text.includes('⚠️ *Кончились units API*'))).toBe(true);
       expect(texts.every((text) => text.includes('Задачи по этому кабинету отложены.'))).toBe(true);
       expect(texts.every((text) => !text.includes('META_ADS'))).toBe(true);
+    });
+  });
+
+  describe('скан не всё посмотрел', () => {
+    it('упёршись в потолок групп, скан говорит об этом тревогой, а не логом', async () => {
+      // Групп на одну больше потолка. Дорого это не стоит: группа — это
+      // сочетание «клиент × площадка × scope × код», а не строка журнала.
+      await seedErrors(
+        Array.from({ length: MAX_ERROR_GROUPS + 1 }, (_u, i) => ({
+          clientId: alpha.clientId,
+          provider: 'YANDEX_DIRECT' as const,
+          scope: `clients:probe-${i}`,
+          code: 'HTTP_500',
+          minutes: -1,
+        })),
+      );
+
+      const summary = await scan();
+
+      const incomplete = summary.alerts.filter((alert) => alert.kind === 'scan_incomplete');
+      expect(incomplete).toHaveLength(1);
+      expect(incomplete[0]?.severity).toBe('critical');
+      expect(tg.plainTexts().some((text) => text.includes('видел не весь журнал'))).toBe(true);
+    });
+
+    it('пока групп меньше потолка, скан молчит об этом', async () => {
+      await seedErrors([
+        { clientId: alpha.clientId, provider: 'YANDEX_DIRECT', code: 'HTTP_500', minutes: -1 },
+      ]);
+
+      const summary = await scan();
+
+      expect(kindsOf(summary)).not.toContain('scan_incomplete');
     });
   });
 

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/db/prisma.js', () => ({ prisma: {} }));
 
+import { FAILURE_ROWS_PER_BATCH_CAP } from '@/optimizer/errors.js';
 import { FakeDb, type FakeErrorRow } from '@/reporter/__tests__/fake-db.js';
 import { fakeMessenger, type FakeMessenger } from '@/reporter/__tests__/fake-messenger.js';
 import {
@@ -13,7 +14,7 @@ import {
   ERROR_LOOKBACK_MINUTES,
   ERROR_WINDOW_MINUTES,
   MAX_ALERTS_PER_RUN,
-  MAX_ERROR_ROWS,
+  MAX_ERROR_GROUPS,
   PROVIDER_BURST_THRESHOLD,
 } from '@/reporter/alerts.js';
 import { REPORT_FAILURE_CODES } from '@/reporter/errors.js';
@@ -21,6 +22,15 @@ import { CooldownLimiter } from '@/reporter/rate-limit.js';
 
 const NOW = new Date('2026-08-08T09:00:00Z');
 const CHAT = '999';
+
+/** Кампаний у крупного клиента — столько прогонов `recordFailures` за один тик. */
+const FLOOD_CAMPAIGNS = 40;
+
+/** Сколько строк журнала рождает прогон такого клиента, когда площадка отвергает всё. */
+function floodRows(campaigns: number): number {
+  // Потолок на кампанию плюс схлопнутый хвост: `recordFailures` пишет ровно столько.
+  return campaigns * (FAILURE_ROWS_PER_BATCH_CAP + 1);
+}
 
 let db: FakeDb;
 let messenger: FakeMessenger;
@@ -375,14 +385,58 @@ describe('detectAlerts', () => {
   });
 
   it('не вычитывает весь журнал целиком, когда кабинет сыплется тысячами строк', async () => {
-    seedBurst(MAX_ERROR_ROWS + 200);
+    seedBurst(floodRows(FLOOD_CAMPAIGNS));
 
     const alerts = await detectAlerts(deps());
 
     expect(alerts).toHaveLength(1);
-    // Счёт обрезан потолком выборки — говорим «больше», а не выдуманное число.
-    expect(alerts[0]?.title).toContain('больше');
-    expect(alerts[0]?.title).toContain(`${MAX_ERROR_ROWS} ошибок`);
+    // Счёт точный: он берётся агрегатом, а не длиной обрезанной выборки.
+    expect(alerts[0]?.title).toContain(`${floodRows(FLOOD_CAMPAIGNS)} ошибок`);
+    // И при этом строк из базы поднято на порядок меньше, чем их лежит.
+    expect(db.errorRowsRead).toBeLessThan(floodRows(FLOOD_CAMPAIGNS) / 10);
+  });
+
+  it('флуд одного кабинета не крадёт тревогу у соседнего', async () => {
+    // Столько строк рождает прогон крупного клиента: `recordFailures` пишет по
+    // строке на пообъектный отказ площадки, с потолком на кампанию, а кампаний
+    // у такого клиента десятки. Число не выдумано — оно взято у того, кто пишет.
+    seedBurst(floodRows(FLOOD_CAMPAIGNS), { clientId: 'cl-flood' });
+    // 401 соседа старше флуда: в выборке «свежие сначала» он оказывался за бортом,
+    // а назад ни один тик не смотрит — повод терялся навсегда.
+    db.seedError({
+      createdAt: new Date(NOW.getTime() - 8 * 60_000),
+      clientId: 'cl-quiet',
+      provider: 'YANDEX_DIRECT',
+      scope: 'yandex:auth',
+      code: 'AUTH_FAILED',
+      message: 'token rejected',
+    });
+
+    const alerts = await detectAlerts(deps());
+
+    expect(alerts.map((a) => `${a.kind}:${String(a.clientId)}`)).toContain('auth_error:cl-quiet');
+  });
+
+  it('не влезший в скан журнал — тревога, а не строчка в логе', async () => {
+    // Групп больше потолка: скан честно говорит, что смотрел не всё. Молчание
+    // здесь неотличимо от «всё хорошо», а это ровно тот класс, который в проекте
+    // ловили трижды: проверка, которая молча самоотключается.
+    for (let i = 0; i <= MAX_ERROR_GROUPS; i += 1) {
+      db.seedError({
+        createdAt: new Date(NOW.getTime() - 60_000),
+        clientId: `cl-${i}`,
+        provider: 'YANDEX_DIRECT',
+        scope: 'yandex:campaigns',
+        code: '152',
+        message: 'Bad Request',
+      });
+    }
+
+    const alerts = await detectAlerts(deps());
+
+    const incomplete = alerts.find((a) => a.kind === 'scan_incomplete');
+    expect(incomplete?.severity).toBe('critical');
+    expect(alerts[0]?.kind).toBe('scan_incomplete');
   });
 });
 

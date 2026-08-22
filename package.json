@@ -34,7 +34,9 @@
     "start:bot": "node dist/apps/bot.js",
     "test:evals": "vitest run tests/ai-evals",
     "test:e2e": "vitest run --config tests/e2e/vitest.config.ts",
-    "cli": "tsx src/apps/cli.ts"
+    "cli": "tsx src/apps/cli.ts",
+    "acceptance": "tsx src/apps/acceptance.ts",
+    "start:acceptance": "node dist/apps/acceptance.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",

@@ -37,8 +37,12 @@ bot) exec node dist/apps/bot.js ;;
 # собранный `dist/apps/cli.js`, и роль нужна затем, чтобы это знание жило здесь,
 # а не в памяти дежурного.
 cli) exec node dist/apps/cli.js "$@" ;;
+# Приёмка ТЗ §9.6: `docker compose run --rm -e ROLE=acceptance api --days 1`.
+# Отдельная роль, а не аргумент cli: команда возвращает 0/1/2 как вердикт, и
+# смешивать эти коды с кодами возврата CLI нельзя. Процедура — docs/ACCEPTANCE.md.
+acceptance) exec node dist/apps/acceptance.js "$@" ;;
 *)
-  echo "entrypoint: неизвестная роль ROLE=${ROLE}; ожидается migrate|api|worker|bot|cli" >&2
+  echo "entrypoint: неизвестная роль ROLE=${ROLE}; ожидается migrate|api|worker|bot|cli|acceptance" >&2
   exit 64
   ;;
 esac

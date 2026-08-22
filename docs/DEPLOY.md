@@ -239,6 +239,14 @@ docker compose -f docker-compose.prod.yml run --rm -e ROLE=cli api campaign --cl
 docker compose -f docker-compose.prod.yml run --rm -e ROLE=cli api optimize --dry-run
 ```
 
+Отдельная роль — у проверки приёмки §9.6: у неё код возврата означает вердикт
+(0 — пройдено, 1 — сорвано, 2 — улик не хватает), и смешивать его с кодами CLI
+нельзя. Процедура — [`ACCEPTANCE.md`](./ACCEPTANCE.md).
+
+```bash
+docker compose -f docker-compose.prod.yml run --rm -e ROLE=acceptance api --days 1
+```
+
 Справка это знает сама: `printUsage` смотрит, чем запущен процесс, и в образе
 печатает `docker compose … -e ROLE=cli api …`, а в дереве исходников — `pnpm cli`.
 Раньше строка «Использование: pnpm cli …» врала ровно тому, кто читал её здесь.

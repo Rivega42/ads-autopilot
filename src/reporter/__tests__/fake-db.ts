@@ -69,6 +69,17 @@ export interface FakeErrorRow {
   createdAt: Date;
 }
 
+/** Строка агрегата `errorLog.groupBy` — форма повторяет ответ Prisma. */
+interface FakeErrorGroup {
+  clientId: string | null;
+  provider: Provider | null;
+  scope: string;
+  code: string | null;
+  _count: { _all: number };
+  _min: { id: bigint; createdAt: Date };
+  _max: { createdAt: Date };
+}
+
 interface DateFilter {
   gte?: Date;
   lte?: Date;
@@ -90,6 +101,9 @@ export class FakeDb {
 
   /** Сколько раз ходили в статистику: тест на переиспользование отчёта смотрит сюда. */
   statQueries = 0;
+
+  /** Сколько строк `ErrorLog` реально поднято: скан тревог обязан читать их единицами. */
+  errorRowsRead = 0;
 
   private sequence = 0;
 
@@ -272,18 +286,20 @@ export class FakeDb {
 
   readonly errorLog = {
     findMany: async (args: {
-      where?: { createdAt?: DateFilter; clientId?: string };
+      where?: { createdAt?: DateFilter; clientId?: string; id?: { in?: bigint[] } };
       select?: unknown;
       orderBy?: { createdAt?: 'asc' | 'desc' };
       take?: number;
     }): Promise<FakeErrorRow[]> => {
       const where = args.where ?? {};
       const desc = args.orderBy?.createdAt === 'desc';
+      const ids = where.id?.in;
       const rows = this.errors
         .filter(
           (row) =>
             inRange(row.createdAt, where.createdAt) &&
-            (where.clientId ? row.clientId === where.clientId : true),
+            (where.clientId ? row.clientId === where.clientId : true) &&
+            (ids ? ids.includes(row.id) : true),
         )
         // Вторичный ключ — порядок вставки: без него `take` на одинаковых
         // отметках времени отдавал бы произвольные строки, и тест на срез мигал.
@@ -292,7 +308,60 @@ export class FakeDb {
           const stable = byTime !== 0 ? byTime : Number(a.id - b.id);
           return desc ? -stable : stable;
         });
-      return args.take === undefined ? rows : rows.slice(0, args.take);
+      const taken = args.take === undefined ? rows : rows.slice(0, args.take);
+      this.errorRowsRead += taken.length;
+      return taken;
+    },
+
+    /**
+     * Настоящий `GROUP BY`, а не пересчёт заранее выбранных строк.
+     *
+     * Считать группы по уже обрезанной выборке значило бы повторить в заглушке
+     * ровно ту ошибку, из-за которой скан слеп: тест на вытеснение прошёл бы
+     * при сломанном коде.
+     */
+    groupBy: async (args: {
+      by: readonly string[];
+      where?: { createdAt?: DateFilter; clientId?: string };
+      _count?: unknown;
+      _min?: unknown;
+      _max?: unknown;
+      orderBy?: unknown;
+      take?: number;
+    }): Promise<FakeErrorGroup[]> => {
+      const where = args.where ?? {};
+      const matched = this.errors.filter(
+        (row) =>
+          inRange(row.createdAt, where.createdAt) &&
+          (where.clientId ? row.clientId === where.clientId : true),
+      );
+
+      const groups = new Map<string, FakeErrorGroup>();
+      for (const row of matched) {
+        const key = args.by.map((field) => String(row[field as keyof FakeErrorRow])).join('\u0000');
+        const found = groups.get(key);
+        if (!found) {
+          groups.set(key, {
+            clientId: row.clientId,
+            provider: row.provider,
+            scope: row.scope,
+            code: row.code,
+            _count: { _all: 1 },
+            _min: { id: row.id, createdAt: row.createdAt },
+            _max: { createdAt: row.createdAt },
+          });
+          continue;
+        }
+        found._count._all += 1;
+        if (row.id < found._min.id) found._min = { id: row.id, createdAt: row.createdAt };
+        if (row.createdAt > found._max.createdAt) found._max = { createdAt: row.createdAt };
+      }
+
+      // Порядок как у запроса: свежие группы первыми — обрезается хвост.
+      const ordered = [...groups.values()].sort(
+        (a, b) => b._max.createdAt.getTime() - a._max.createdAt.getTime(),
+      );
+      return args.take === undefined ? ordered : ordered.slice(0, args.take);
     },
 
     create: async (args: {

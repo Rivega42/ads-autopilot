@@ -10,7 +10,13 @@ import {
 } from './apply.js';
 import { runOptimizer } from './engine.js';
 import type { OptimizerRun } from './engine.js';
-import { describeFailure, recordFailure, recordFailures, type OptimizerFailure } from './errors.js';
+import {
+  APPROVAL_NOT_DELIVERED_CODE,
+  describeFailure,
+  recordFailure,
+  recordFailures,
+  type OptimizerFailure,
+} from './errors.js';
 import { syncAppliedDecisions } from './local-state.js';
 import type { ApprovalRequest } from './policy.js';
 import { createApplyDb, createPlatformWriter, createPrismaIdempotencyStore } from './runtime.js';
@@ -59,6 +65,16 @@ export interface ScheduledOptimizationSummary {
    * заблокировавшего бота — обычный случай). Подмножество `approvals`, а не замена:
    * строка в `PendingApproval` есть, её видит дашборд и добьёт крон экспирации, —
    * но нажать её некому, и «выпущено: 2» без этой цифры читается как успех.
+   *
+   * Считает все недоставленные, без деления на «впервые» и «всё ещё», и это
+   * осознанно. Различать их пришлось бы по состоянию, которого у прогона нет, а
+   * настоящее деление проходит не там: «не удалось записать ставку» — поломка
+   * этого прогона, «клиент держит бота в блоке» — стоячее состояние, которое
+   * само не пройдёт и повторится завтра. Стоячее состояние ведёт канал тревог
+   * (`approval_undelivered` в `reporter/alerts.ts`, тишина в сутки), а не код
+   * возврата команды: код, горящий каждый день, перестают читать — ровно тот
+   * износ, из-за которого из `optimizeNeedsHumanFix` намеренно исключили «нет
+   * цели по CPA».
    */
   approvalsUndelivered: number;
   /** Карточка уже создана этим же прогоном — повтор задачи BullMQ второй не шлёт. */
@@ -334,9 +350,15 @@ interface CampaignRow {
  * `recordFailure` звался лишь из catch-блоков вокруг всей кампании, то есть когда
  * падал сам `applyDecisions`. Отказ площадки на конкретной ставке туда не попадал:
  * `applyDecisions` его ловит и кладёт в `report.failed`, а дальше он оседал в
- * строке лога `platform write failed` (`optimizer/runtime.ts`) — и всё. Алерт
- * `error_burst` (TZ §3.6) и дашборд читают `ErrorLog`, значит площадка, отвергающая
- * наши записи, не будила никого ни при пяти отказах, ни при пятистах.
+ * строке лога `platform write failed` (`optimizer/runtime.ts`) — и всё. Читает
+ * `ErrorLog` ровно один потребитель — алерт `error_burst` (ТЗ §3.6); дашборд его
+ * не открывает вовсе (`grep -rn ErrorLog web/` пусто). Значит площадка,
+ * отвергающая наши записи, не будила никого ни при пяти отказах, ни при пятистах.
+ *
+ * Из единственности потребителя следует и цена одиночной записи: до порога
+ * всплеска она не дотягивает, а показать её больше негде — такой отказ не видит
+ * никто. Поводы, у которых своё действие, поэтому и заведены в `reporter/alerts.ts`
+ * отдельными тревогами по коду, без порога (`APPROVAL_NOT_DELIVERED_CODE`).
  *
  * Код разный, потому что и разбираться человеку по ним предстоит по-разному:
  * `PLATFORM_WRITE_REFUSED` — изменения нет нигде, `CHANGELOG_WRITE_FAILED` — оно
@@ -543,7 +565,7 @@ async function createApprovalCards(
           provider: campaign.provider,
           campaignId: campaign.id,
           stage: 'approval',
-          code: 'APPROVAL_NOT_DELIVERED',
+          code: APPROVAL_NOT_DELIVERED_CODE,
           message: `карточка ${action.kind} создана, но не доставлена: ${approval.error}`,
         });
       }

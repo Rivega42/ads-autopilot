@@ -4,8 +4,11 @@ import { env } from '@/env.js';
 import { formatMsk } from '@/lib/dates.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
+// Код, под которым оптимизатор пишет недоставленную карточку. Импорт, а не своя
+// строка: разъехавшиеся константы дают молчащую тревогу, и заметить это нечем.
+import { APPROVAL_NOT_DELIVERED_CODE } from '@/optimizer/errors.js';
 import { detectSpendOutlier } from '@/reporter/anomalies.js';
-import { resolveDeps, type ReporterDeps } from '@/reporter/deps.js';
+import { resolveDeps, type ReporterDb, type ReporterDeps } from '@/reporter/deps.js';
 import {
   describeFailure,
   recordFailure,
@@ -43,8 +46,11 @@ export type AlertKind =
   | 'provider_burst'
   | 'auth_error'
   | 'out_of_units'
+  | 'approval_undelivered'
   | 'report_failed'
-  | 'spend_anomaly';
+  | 'spend_anomaly'
+  /** Скан не увидел весь журнал: тревог этого прогона могло не хватить. */
+  | 'scan_incomplete';
 
 export type AlertSeverity = 'warning' | 'critical';
 
@@ -114,13 +120,19 @@ export const ERROR_LOOKBACK_MINUTES = Math.max(
 export const ERROR_LOOKBACK_OVERLAP_MINUTES = ERROR_LOOKBACK_MINUTES - ERROR_WINDOW_MINUTES;
 
 /**
- * Потолок выборки из `ErrorLog`.
+ * Потолок числа групп в скане.
  *
- * Сломанный кабинет даёт сотни строк за пять минут, а для решения хватает
- * факта «больше порога» и трёх верхних кодов. Берём свежие: пропустить старую
- * ошибку не страшно, пропустить последнюю — страшно.
+ * Считать теперь можно агрегатом, поэтому потолок стоит не на строках, а на
+ * различных сочетаниях «клиент × площадка × scope × код». Тысяча строк одного
+ * отказа — одна группа, и в потолок такой кабинет не упирается вовсе: раньше
+ * он ровно этим и вытеснял из выборки чужие поводы.
+ *
+ * Потолок всё равно нужен — запрос без границы это запрос без границы, — но
+ * упереться в него значит «я смотрел не всё», и об этом поднимается своя
+ * тревога `scan_incomplete`. Молча урезанная проверка — то же самое, что
+ * выключенная.
  */
-export const MAX_ERROR_ROWS = 500;
+export const MAX_ERROR_GROUPS = 500;
 
 /** Сколько дней истории берём под аномальный расход. */
 export const SPEND_BASELINE_DAYS = 8;
@@ -134,6 +146,16 @@ export const SPEND_BASELINE_DAYS = 8;
  * мимо. Одна аномалия за день — одно сообщение; завтрашняя дата даст новый ключ.
  */
 export const SPEND_ALERT_COOLDOWN_MS = 20 * 60 * 60 * 1000;
+
+/**
+ * Тишина по стоячему состоянию — почти сутки, по той же причине.
+ *
+ * «Клиент держит бота в блоке» не проходит само между прогонами: повод
+ * повторяется каждым тиком, пока человек не позвонит клиенту. С общими 30
+ * минутами такой повод за сутки даёт полсотни одинаковых сообщений — и уносит
+ * с собой внимание к тем, которые срочные.
+ */
+export const STANDING_ALERT_COOLDOWN_MS = 20 * 60 * 60 * 1000;
 
 /**
  * Как часто вообще имеет смысл проверять расход.
@@ -209,17 +231,139 @@ export interface AlertRunSummary {
   alerts: Alert[];
 }
 
-interface ErrorRow {
+/**
+ * Срез журнала: сколько ошибок одного вида пришло от одного кабинета.
+ *
+ * Тревоги считают строки, но читать строки ради счёта не обязаны: у группы
+ * «клиент × площадка × scope × код» счёт берётся агрегатом. Это не оптимизация,
+ * а условие правильности — см. `groupErrors`.
+ */
+interface ErrorGroup {
   clientId: string | null;
   provider: Provider | null;
   scope: string;
   code: string | null;
-  message: string;
-  createdAt: Date;
+  count: number;
+  /** id первой строки группы: адрес образца текста и порядок появления разом. */
+  firstId: bigint;
+  firstAt: Date;
+}
+
+interface ErrorScan {
+  groups: ErrorGroup[];
+  /** Скан упёрся в потолок групп: часть журнала он не видел. */
+  incomplete: boolean;
 }
 
 function bucketKey(row: { clientId: string | null; provider: Provider | null }): string {
   return `${row.clientId ?? 'system'}:${row.provider ?? 'none'}`;
+}
+
+/**
+ * Журнал за окно — агрегатом, а не выборкой строк.
+ *
+ * Раньше здесь стоял один `findMany` с потолком в 500 свежих строк на всех
+ * клиентов сразу. Прогон крупного кабинета пишет тысячу строк за тик
+ * (`recordFailures`: до потолка на кампанию, кампаний десятки) и выбивал из
+ * выборки чужие: 401 соседнего клиента в неё не попадал, а назад ни один тик не
+ * смотрит — повод терялся навсегда, а в чат уходила ровно одна тревога: про
+ * флудящего. Поднимать потолок бессмысленно — следующий клиент крупнее.
+ *
+ * Агрегат снимает саму возможность вытеснения. Тысяча строк одного отказа — это
+ * одна группа, и число в ней точное: обрезать нечего.
+ */
+async function groupErrors(
+  db: ReporterDb,
+  since: Date,
+  clientId: string | undefined,
+): Promise<ErrorScan> {
+  const rows = await db.errorLog.groupBy({
+    by: ['clientId', 'provider', 'scope', 'code'],
+    where: {
+      createdAt: { gte: since },
+      ...(clientId ? { clientId } : {}),
+    },
+    _count: { _all: true },
+    _min: { id: true, createdAt: true },
+    _max: { createdAt: true },
+    // Если групп всё-таки больше потолка, отрезать надо старые.
+    orderBy: { _max: { createdAt: 'desc' } },
+    take: MAX_ERROR_GROUPS + 1,
+  });
+
+  const groups: ErrorGroup[] = [];
+  for (const row of rows.slice(0, MAX_ERROR_GROUPS)) {
+    const firstId = row._min?.id;
+    const firstAt = row._min?.createdAt;
+    if (firstId === null || firstId === undefined || !firstAt) continue;
+    groups.push({
+      clientId: row.clientId,
+      provider: row.provider,
+      scope: row.scope,
+      code: row.code,
+      count: row._count._all,
+      firstId,
+      firstAt,
+    });
+  }
+
+  // Порядок появления: тексты называют «первую» ошибку, и он же задаёт порядок
+  // самих тревог. Без явной сортировки он зависел бы от плана запроса.
+  groups.sort((a, b) => (a.firstId === b.firstId ? 0 : a.firstId < b.firstId ? -1 : 1));
+
+  return { groups, incomplete: rows.length > MAX_ERROR_GROUPS };
+}
+
+/**
+ * Тексты первых строк выбранных групп — по их id, а не выборкой «сверху».
+ *
+ * Строк ровно столько, сколько групп: у каждой группы свой id, и вытеснить
+ * чужой образец нечем.
+ */
+async function loadSamples(
+  db: ReporterDb,
+  groups: readonly ErrorGroup[],
+): Promise<Map<string, string>> {
+  const ids = [...new Set(groups.map((group) => group.firstId))];
+  if (ids.length === 0) return new Map();
+
+  const rows = await db.errorLog.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, message: true },
+    take: ids.length,
+  });
+  return new Map(rows.map((row) => [String(row.id), row.message]));
+}
+
+function bucketize(groups: readonly ErrorGroup[]): Map<string, ErrorGroup[]> {
+  const buckets = new Map<string, ErrorGroup[]>();
+  for (const group of groups) {
+    const key = bucketKey(group);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(group);
+    else buckets.set(key, [group]);
+  }
+  return buckets;
+}
+
+function totalOf(groups: readonly ErrorGroup[]): number {
+  return groups.reduce((sum, group) => sum + group.count, 0);
+}
+
+interface BucketBurst {
+  anchor: ErrorGroup;
+  count: number;
+  groups: ErrorGroup[];
+}
+
+/** Поводы одного бакета «клиент × площадка», найденные за один проход. */
+interface BucketFindings {
+  burst?: BucketBurst;
+  auth?: ErrorGroup;
+  units?: ErrorGroup;
+  approval?: ErrorGroup;
+  /** Отказы отчётности, сгруппированные по этапу и виду отказа. */
+  reports: ErrorGroup[][];
 }
 
 /**
@@ -231,81 +375,135 @@ export async function detectAlerts(options: AlertOptions = {}): Promise<Alert[]>
   const now = deps.now();
   const windowMinutes = options.windowMinutes ?? ERROR_WINDOW_MINUTES;
   const threshold = options.burstThreshold ?? ERROR_BURST_THRESHOLD;
+  const lookbackMinutes = Math.max(windowMinutes, ERROR_LOOKBACK_MINUTES);
   const burstSince = new Date(now.getTime() - windowMinutes * 60_000);
-  const since = new Date(now.getTime() - Math.max(windowMinutes, ERROR_LOOKBACK_MINUTES) * 60_000);
+  const since = new Date(now.getTime() - lookbackMinutes * 60_000);
 
-  const fetched: ErrorRow[] = await deps.db.errorLog.findMany({
-    where: {
-      createdAt: { gte: since },
-      ...(options.clientId ? { clientId: options.clientId } : {}),
-    },
-    select: {
-      clientId: true,
-      provider: true,
-      scope: true,
-      code: true,
-      message: true,
-      createdAt: true,
-    },
-    // Свежие сначала — потолок обязан отрезать хвост, а не голову.
-    orderBy: { createdAt: 'desc' },
-    take: MAX_ERROR_ROWS,
-  });
-
-  const capped = fetched.length >= MAX_ERROR_ROWS;
-  if (capped) {
-    log.warn({ since, take: MAX_ERROR_ROWS }, 'error log window is larger than the alert cap');
-  }
-  const rows = [...fetched].reverse();
+  const lookback = await groupErrors(deps.db, since, options.clientId);
+  // Окно всплеска уже выборки; при совпадении границ второй запрос не нужен.
+  const inWindowScan =
+    burstSince.getTime() === since.getTime()
+      ? lookback
+      : await groupErrors(deps.db, burstSince, options.clientId);
 
   const alerts: Alert[] = [];
-  const buckets = new Map<string, ErrorRow[]>();
-  for (const row of rows) {
-    const key = bucketKey(row);
-    const bucket = buckets.get(key);
-    if (bucket) bucket.push(row);
-    else buckets.set(key, [row]);
+
+  // Первым делом — признание в неполноте. Оно обязано быть тревогой, а не
+  // строчкой в логе: молчание неполного скана неотличимо от «всё хорошо», и
+  // именно так проверка самоотключается, никого не предупредив.
+  if (lookback.incomplete || inWindowScan.incomplete) {
+    log.error({ since, groups: MAX_ERROR_GROUPS }, 'alert scan hit the error group cap');
+    alerts.push({
+      kind: 'scan_incomplete',
+      severity: 'critical',
+      key: 'scan_incomplete',
+      clientId: null,
+      provider: null,
+      title: 'Скан тревог видел не весь журнал',
+      lines: [
+        `Групп ошибок за ${lookbackMinutes} мин больше ${MAX_ERROR_GROUPS} — остальные в прогон не попали.`,
+        'Пока это так, тишина по кабинету ничего не доказывает.',
+      ],
+    });
   }
+
+  const windowBuckets = bucketize(inWindowScan.groups);
 
   // Поломки площадки ищем до кабинетных: если сыплется вся площадка, разговор
   // идёт о ней, а не о каждом задетом кабинете по отдельности.
-  const providerAlerts = providerBursts(rows, burstSince, windowMinutes, threshold, capped);
+  const providerBursts = findProviderBursts(inWindowScan.groups, threshold);
   const widespread = new Map<Provider, string>();
-  for (const alert of providerAlerts) {
-    if (alert.provider !== null) widespread.set(alert.provider, alert.key);
+  for (const burst of providerBursts) {
+    widespread.set(burst.provider, `provider_burst:${burst.provider}`);
   }
-  alerts.push(...providerAlerts);
 
-  for (const [key, bucket] of buckets) {
-    const first = bucket[0];
-    if (!first) continue;
-
+  const findings = new Map<string, BucketFindings>();
+  for (const [key, groups] of bucketize(lookback.groups)) {
     // Порог из ТЗ задан на окно — считаем строго по нему, хотя выбрали шире.
-    const inWindow = bucket.filter((row) => row.createdAt >= burstSince);
-    const burstFirst = inWindow[0] ?? first;
-    if (inWindow.length > threshold) {
+    const inWindow = windowBuckets.get(key) ?? [];
+    const count = totalOf(inWindow);
+    const anchor = inWindow[0];
+
+    const reports = new Map<string, ErrorGroup[]>();
+    for (const group of groups) {
+      if (group.code === null || !REPORT_FAILURE_CODE_VALUES.has(group.code)) continue;
+      const reportKey = `${reportStage(group.scope)}|${group.code}`;
+      const same = reports.get(reportKey);
+      if (same) same.push(group);
+      else reports.set(reportKey, [group]);
+    }
+
+    findings.set(key, {
+      ...(anchor && count > threshold ? { burst: { anchor, count, groups: inWindow } } : {}),
+      auth: groups.find((group) => group.code !== null && AUTH_CODES.has(group.code)),
+      units: groups.find((group) => group.code !== null && UNITS_CODES.has(group.code)),
+      approval: groups.find((group) => group.code === APPROVAL_NOT_DELIVERED_CODE),
+      reports: [...reports.values()],
+    });
+  }
+
+  // Тексты — одним запросом на все найденные поводы разом, и только после того,
+  // как поводы найдены: до этого момента ни одна строка журнала не читалась.
+  const samples = await loadSamples(deps.db, [
+    ...providerBursts.map((burst) => burst.anchor),
+    ...[...findings.values()].flatMap((found) =>
+      [
+        found.burst?.anchor,
+        found.auth,
+        found.units,
+        found.approval,
+        ...found.reports.map((r) => r[0]),
+      ].filter((group): group is ErrorGroup => group !== undefined),
+    ),
+  ]);
+  const messageOf = (group: ErrorGroup): string => samples.get(String(group.firstId)) ?? '';
+
+  for (const burst of providerBursts) {
+    const loud = burst.clients.filter(([, count]) => count > threshold);
+    alerts.push({
+      kind: 'provider_burst',
+      severity: 'critical',
+      key: `provider_burst:${burst.provider}`,
+      // Клиента нет намеренно: поломка не принадлежит ни одному кабинету.
+      clientId: null,
+      provider: burst.provider,
+      title: `${burst.count} ошибок ${burst.provider} за ${windowMinutes} мин`,
+      lines: [
+        `Кабинетов задето: ${burst.clients.length} — похоже на площадку, а не на один кабинет.`,
+        ...burst.clients.slice(0, 3).map(([clientId, count]) => `${clientId}: ${count}`),
+        ...(loud.length > 0 ? [`Сверх кабинетного порога: ${listClients(loud)}.`] : []),
+        `Первая: ${formatMsk(burst.anchor.firstAt, 'HH:mm')} — ${truncate(messageOf(burst.anchor), 160)}`,
+        ...topCodes(burst.groups).map(([code, count]) => `${code}: ${count}`),
+      ],
+    });
+  }
+
+  for (const [key, found] of findings) {
+    const burst = found.burst;
+    if (burst) {
       // Тревога по площадке уже назовёт этот кабинет строкой — второе сообщение
       // об одной поломке лишнее. Но именно свёрнута, а не выброшена: если
       // родитель промолчит, этот повод уйдёт сам.
-      const parent = first.provider === null ? undefined : widespread.get(first.provider);
+      const parent =
+        burst.anchor.provider === null ? undefined : widespread.get(burst.anchor.provider);
       alerts.push({
         kind: 'error_burst',
         severity: 'critical',
         key: `error_burst:${key}`,
         foldedInto: parent,
-        clientId: burstFirst.clientId,
-        provider: burstFirst.provider,
-        title: `${capped ? 'больше ' : ''}${inWindow.length} ошибок за ${windowMinutes} мин`,
+        clientId: burst.anchor.clientId,
+        provider: burst.anchor.provider,
+        title: `${burst.count} ошибок за ${windowMinutes} мин`,
         lines: [
-          `Кабинет: ${describeScope(burstFirst)}`,
-          `Первая: ${formatMsk(burstFirst.createdAt, 'HH:mm')} — ${truncate(burstFirst.message, 160)}`,
-          ...topCodes(inWindow).map(([code, count]) => `${code}: ${count}`),
+          `Кабинет: ${describeScope(burst.anchor)}`,
+          `Первая: ${formatMsk(burst.anchor.firstAt, 'HH:mm')} — ${truncate(messageOf(burst.anchor), 160)}`,
+          ...topCodes(burst.groups).map(([code, count]) => `${code}: ${count}`),
         ],
       });
     }
 
-    const auth = bucket.find((row) => row.code !== null && AUTH_CODES.has(row.code));
-    if (auth) {
+    if (found.auth) {
+      const auth = found.auth;
       alerts.push({
         kind: 'auth_error',
         severity: 'critical',
@@ -315,14 +513,14 @@ export async function detectAlerts(options: AlertOptions = {}): Promise<Alert[]>
         title: 'Токен не принят площадкой',
         lines: [
           `Кабинет: ${describeScope(auth)}`,
-          truncate(auth.message, 200),
+          truncate(messageOf(auth), 200),
           'Ретрай бесполезен — нужна переавторизация.',
         ],
       });
     }
 
-    const units = bucket.find((row) => row.code !== null && UNITS_CODES.has(row.code));
-    if (units) {
+    if (found.units) {
+      const units = found.units;
       alerts.push({
         kind: 'out_of_units',
         severity: 'warning',
@@ -334,10 +532,27 @@ export async function detectAlerts(options: AlertOptions = {}): Promise<Alert[]>
       });
     }
 
-    // Отказ отчётности: по одной тревоге на кабинет и этап, а не на запись —
-    // иначе прогон, упавший по всем клиентам, превратился бы в поток сообщений.
-    for (const failure of reportFailures(bucket)) {
-      alerts.push(failure);
+    if (found.approval) {
+      const approval = found.approval;
+      alerts.push({
+        kind: 'approval_undelivered',
+        severity: 'warning',
+        key: `approval_undelivered:${key}`,
+        cooldownMs: STANDING_ALERT_COOLDOWN_MS,
+        clientId: approval.clientId,
+        provider: approval.provider,
+        title: 'Карточку апрува некому нажать',
+        lines: [
+          `Кабинет: ${describeScope(approval)}`,
+          truncate(messageOf(approval), 200),
+          ...(approval.count > 1 ? [`Карточек за выборку: ${approval.count}`] : []),
+          'Заявка создана, но не доставлена: без человека она истечёт сама.',
+        ],
+      });
+    }
+
+    for (const groups of found.reports) {
+      alerts.push(reportFailure(groups, messageOf));
     }
   }
 
@@ -397,7 +612,7 @@ async function detectSpendAlerts(options: AlertOptions): Promise<Alert[]> {
 }
 
 /**
- * Отказы отчётности в бакете — по одному поводу на этап и вид отказа.
+ * Отказ отчётности — один повод на кабинет, этап и вид отказа.
  *
  * Этап (`daily`, `weekly`, `alerts`) входит в ключ подавления: недоставленный
  * дневной отчёт и упавший недельный разбор — разные поломки, и вторая не должна
@@ -408,44 +623,37 @@ async function detectSpendAlerts(options: AlertOptions): Promise<Alert[]> {
  * ровно тем, чем выглядело: дневной отчёт, упавший на расчёте, объявлялся
  * неушедшим клиенту, потому что этап называется `daily`.
  */
-function reportFailures(bucket: readonly ErrorRow[]): Alert[] {
-  const groups = new Map<string, ErrorRow[]>();
-  for (const row of bucket) {
-    if (row.code === null || !REPORT_FAILURE_CODE_VALUES.has(row.code)) continue;
-    const key = `${reportStage(row.scope)}\u0000${row.code}`;
-    const rows = groups.get(key);
-    if (rows) rows.push(row);
-    else groups.set(key, [row]);
-  }
-
-  return [...groups.values()].map((rows) => {
-    const first = rows[0] as ErrorRow;
-    const stage = reportStage(first.scope);
-    const delivery = first.code === REPORT_FAILURE_CODES.delivery;
-    // У `alerts` клиента-получателя нет: этап служебный, отчёта клиенту он не шлёт.
-    const clientFacing = stage === 'daily' || stage === 'weekly';
-    return {
-      kind: 'report_failed' as const,
-      severity: 'critical' as const,
-      key: `report_failed:${bucketKey(first)}:${stage}:${first.code ?? ''}`,
-      clientId: first.clientId,
-      provider: first.provider,
-      title: delivery ? `Отчёт не ушёл клиенту (${stage})` : `Сбой отчётности (${stage})`,
-      lines: [
-        `Кабинет: ${describeScope(first)}`,
-        truncate(first.message, 200),
-        ...(rows.length > 1 ? [`Отказов за выборку: ${rows.length}`] : []),
-        ...(clientFacing
-          ? [
-              'Клиент за этот период отчёта не получил.',
-              delivery
-                ? 'Текст уже в БД: следующий прогон отправит его без пересчёта.'
-                : 'Отчёт не собрался — повтор упрётся в ту же причину, пока её не разобрать.',
-            ]
-          : []),
-      ],
-    };
-  });
+function reportFailure(
+  groups: readonly ErrorGroup[],
+  messageOf: (group: ErrorGroup) => string,
+): Alert {
+  const first = groups[0] as ErrorGroup;
+  const stage = reportStage(first.scope);
+  const delivery = first.code === REPORT_FAILURE_CODES.delivery;
+  const count = totalOf(groups);
+  // У `alerts` клиента-получателя нет: этап служебный, отчёта клиенту он не шлёт.
+  const clientFacing = stage === 'daily' || stage === 'weekly';
+  return {
+    kind: 'report_failed',
+    severity: 'critical',
+    key: `report_failed:${bucketKey(first)}:${stage}:${first.code ?? ''}`,
+    clientId: first.clientId,
+    provider: first.provider,
+    title: delivery ? `Отчёт не ушёл клиенту (${stage})` : `Сбой отчётности (${stage})`,
+    lines: [
+      `Кабинет: ${describeScope(first)}`,
+      truncate(messageOf(first), 200),
+      ...(count > 1 ? [`Отказов за выборку: ${count}`] : []),
+      ...(clientFacing
+        ? [
+            'Клиент за этот период отчёта не получил.',
+            delivery
+              ? 'Текст уже в БД: следующий прогон отправит его без пересчёта.'
+              : 'Отчёт не собрался — повтор упрётся в ту же причину, пока её не разобрать.',
+          ]
+        : []),
+    ],
+  };
 }
 
 /** `reporter:daily` → `daily`. Чужие scope оставляем как есть — врать в заголовке нельзя. */
@@ -481,10 +689,18 @@ function isWidespread(clients: ReadonlyArray<[string, number]>, threshold: numbe
   return quiet.length >= PROVIDER_BURST_MIN_CLIENTS && quietTotal > threshold;
 }
 
+interface ProviderBurst {
+  provider: Provider;
+  count: number;
+  clients: Array<[string, number]>;
+  groups: ErrorGroup[];
+  anchor: ErrorGroup;
+}
+
 /**
  * Всплеск по площадке целиком.
  *
- * Считается по тем же строкам и тому же окну, что и всплеск по бакету, но без
+ * Считается по тем же группам и тому же окну, что и всплеск по бакету, но без
  * разбиения по клиентам. Поднимается, только когда ошибки действительно
  * размазаны по кабинетам (`isWidespread`), а не просто попали в два бакета.
  *
@@ -496,49 +712,29 @@ function isWidespread(clients: ReadonlyArray<[string, number]>, threshold: numbe
  * поводы со своим действием — переавторизация, кончившиеся units, неушедший
  * отчёт — остаются отдельными: они про конкретного клиента.
  */
-function providerBursts(
-  rows: readonly ErrorRow[],
-  burstSince: Date,
-  windowMinutes: number,
-  threshold: number,
-  capped: boolean,
-): Alert[] {
-  const byProvider = new Map<Provider, ErrorRow[]>();
-  for (const row of rows) {
-    if (row.provider === null || row.createdAt < burstSince) continue;
-    const bucket = byProvider.get(row.provider);
-    if (bucket) bucket.push(row);
-    else byProvider.set(row.provider, [row]);
+function findProviderBursts(groups: readonly ErrorGroup[], threshold: number): ProviderBurst[] {
+  const byProvider = new Map<Provider, ErrorGroup[]>();
+  for (const group of groups) {
+    if (group.provider === null) continue;
+    const bucket = byProvider.get(group.provider);
+    if (bucket) bucket.push(group);
+    else byProvider.set(group.provider, [group]);
   }
 
-  const alerts: Alert[] = [];
+  const bursts: ProviderBurst[] = [];
   for (const [provider, inWindow] of byProvider) {
-    if (inWindow.length <= threshold) continue;
-    const clients = countBy(inWindow, (row) => row.clientId ?? 'без клиента');
+    const count = totalOf(inWindow);
+    if (count <= threshold) continue;
+    const clients = countBy(inWindow, (group) => group.clientId ?? 'без клиента');
     if (clients.length < PROVIDER_BURST_MIN_CLIENTS) continue;
     if (!isWidespread(clients, threshold)) continue;
 
-    const loud = clients.filter(([, count]) => count > threshold);
-    const first = inWindow[0] as ErrorRow;
-    alerts.push({
-      kind: 'provider_burst',
-      severity: 'critical',
-      key: `provider_burst:${provider}`,
-      // Клиента нет намеренно: поломка не принадлежит ни одному кабинету.
-      clientId: null,
-      provider,
-      title: `${capped ? 'больше ' : ''}${inWindow.length} ошибок ${provider} за ${windowMinutes} мин`,
-      lines: [
-        `Кабинетов задето: ${clients.length} — похоже на площадку, а не на один кабинет.`,
-        ...clients.slice(0, 3).map(([clientId, count]) => `${clientId}: ${count}`),
-        ...(loud.length > 0 ? [`Сверх кабинетного порога: ${listClients(loud)}.`] : []),
-        `Первая: ${formatMsk(first.createdAt, 'HH:mm')} — ${truncate(first.message, 160)}`,
-        ...topCodes(inWindow).map(([code, count]) => `${code}: ${count}`),
-      ],
-    });
+    const anchor = inWindow[0];
+    if (!anchor) continue;
+    bursts.push({ provider, count, clients, groups: inWindow, anchor });
   }
 
-  return alerts;
+  return bursts;
 }
 
 /** Кабинеты с числами в одну строку: три поимённо, остальные счётом. */
@@ -548,23 +744,23 @@ function listClients(clients: ReadonlyArray<[string, number]>): string {
   return rest > 0 ? `${named.join(', ')} и ещё ${rest}` : named.join(', ');
 }
 
-function describeScope(row: ErrorRow): string {
-  return [row.provider ?? 'система', row.clientId ?? 'без клиента', row.scope].join(' / ');
+function describeScope(group: ErrorGroup): string {
+  return [group.provider ?? 'система', group.clientId ?? 'без клиента', group.scope].join(' / ');
 }
 
-function topCodes(rows: readonly ErrorRow[]): Array<[string, number]> {
-  return countBy(rows, (row) => row.code ?? row.scope).slice(0, 3);
+function topCodes(groups: readonly ErrorGroup[]): Array<[string, number]> {
+  return countBy(groups, (group) => group.code ?? group.scope).slice(0, 3);
 }
 
 /** Счётчик по ключу, от частого к редкому. */
 function countBy(
-  rows: readonly ErrorRow[],
-  key: (row: ErrorRow) => string,
+  groups: readonly ErrorGroup[],
+  key: (group: ErrorGroup) => string,
 ): Array<[string, number]> {
   const counts = new Map<string, number>();
-  for (const row of rows) {
-    const value = key(row);
-    counts.set(value, (counts.get(value) ?? 0) + 1);
+  for (const group of groups) {
+    const value = key(group);
+    counts.set(value, (counts.get(value) ?? 0) + group.count);
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1]);
 }

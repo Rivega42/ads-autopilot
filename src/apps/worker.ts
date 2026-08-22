@@ -9,10 +9,10 @@ import { logger } from '@/logger.js';
 import { handlers } from '@/scheduler/handlers.js';
 import {
   CRON_SCHEDULE,
-  DEFAULT_JOB_OPTIONS,
   QUEUE_NAMES,
   closeQueues,
   getQueue,
+  jobOptionsFor,
   type QueueName,
 } from '@/scheduler/queues.js';
 import { onShutdown } from '@/shutdown.js';
@@ -44,7 +44,7 @@ async function scheduleRepeatables(): Promise<void> {
     await getQueue(name).upsertJobScheduler(
       `cron:${name}`,
       { pattern, tz: MSK },
-      { name, opts: DEFAULT_JOB_OPTIONS },
+      { name, opts: jobOptionsFor(name) },
     );
     log.info({ queue: name, pattern, tz: MSK }, 'scheduled repeatable job');
   }

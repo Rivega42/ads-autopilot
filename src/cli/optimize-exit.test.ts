@@ -33,11 +33,18 @@ describe('optimizeNeedsHumanFix', () => {
   it.each([
     ['applyFailed', { applyFailed: 5 }],
     ['approvalsFailed', { approvalsFailed: 1 }],
-    ['approvalsUndelivered', { approvalsUndelivered: 2 }],
     ['localStateFailed', { localStateFailed: 1 }],
     ['failed', { failed: 1 }],
   ])('%s — потеря, которую сама система не исправит', (_name, over) => {
     expect(optimizeNeedsHumanFix(summary(over))).toBe(true);
+  });
+
+  it('недоставленная карточка кода возврата не поднимает', () => {
+    // Стоячее состояние, а не поломка прогона: клиент держит бота в блоке, и само
+    // оно не пройдёт. Ненулевой код горел бы каждые сутки подряд — ровно тот износ,
+    // из-за которого отсюда исключён и незаполненный бриф. Повод доставляет
+    // тревога `approval_undelivered`, а не код возврата.
+    expect(optimizeNeedsHumanFix(summary({ approvalsUndelivered: 2 }))).toBe(false);
   });
 
   it('кампании без цели по CPA кодом возврата не сигналят', () => {
