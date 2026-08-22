@@ -69,7 +69,7 @@ function nextDecision(): Decision {
     nextValue: { kind: 'bid', amount: NEXT_BID },
     reason: 'CPA всё ещё выше цели',
     requiresApproval: false,
-    layer: 'RULE',
+    layer: 'rule',
     ruleId: 'bid-down',
     approvalKind: null,
   };

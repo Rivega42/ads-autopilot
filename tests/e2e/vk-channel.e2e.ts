@@ -282,8 +282,11 @@ describe('канал VK: кабинет → база → решения → ка
   it('минус-слов у VK нет: решение не уходит в сеть, а честно помечается пропущенным', async () => {
     // Проверка по коду, а не по аналогии с Директом: показы покупаются аудиториями,
     // отчёта по поисковым запросам у площадки нет, поэтому и минус-слов нет.
-    expect(vkAdsAdapter.addNegativeKeywords).toBeUndefined();
-    expect(vkAdsAdapter.getSearchQueries).toBeUndefined();
+    // Через запись: у типа адаптера этих методов нет вовсе, и обращение к ним
+    // напрямую — ошибка компиляции, а не проверка. Проверяем именно рантайм.
+    const surface = vkAdsAdapter as unknown as Record<string, unknown>;
+    expect(surface['addNegativeKeywords']).toBeUndefined();
+    expect(surface['getSearchQueries']).toBeUndefined();
 
     const group = await prisma.adGroup.findFirstOrThrow({
       where: { externalId: String(VK_IDS.groupMoscow) },

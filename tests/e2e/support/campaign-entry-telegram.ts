@@ -83,15 +83,22 @@ export function createTelegramApiMock(token: string): TelegramApiMock {
   const sent: SentMessage[] = [];
   const edited: EditedMessage[] = [];
   const answers: AnsweredCallback[] = [];
+  /** Тело отказа Telegram: `ok: false` плюс код и описание — как у площадки. */
+  interface TelegramError {
+    ok: false;
+    error_code: number;
+    description: string;
+  }
+
   const blocked = new Set<string>();
   let nextMessageId = 5_000;
 
   /** Ответ площадки на отказ: тело то же, что при 200, но `ok: false`. */
-  const refuse = (status: number, description: string): HttpResponse =>
+  const refuse = (status: number, description: string): HttpResponse<TelegramError> =>
     HttpResponse.json({ ok: false, error_code: status, description }, { status });
 
   /** Проверки, общие для `sendMessage` и `editMessageText`. */
-  const rejectText = (chatId: string, text: string): HttpResponse | null => {
+  const rejectText = (chatId: string, text: string): HttpResponse<TelegramError> | null => {
     if (blocked.has(chatId)) return refuse(403, 'Forbidden: bot was blocked by the user');
     if (text.length === 0) return refuse(400, 'Bad Request: message text is empty');
     if (text.length > TELEGRAM_TEXT_MAX) return refuse(400, 'Bad Request: message is too long');

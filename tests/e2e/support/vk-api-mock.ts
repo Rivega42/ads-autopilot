@@ -1,4 +1,4 @@
-import { http, HttpResponse, type HttpHandler } from 'msw';
+import { http, HttpResponse, type HttpHandler, type JsonBodyType } from 'msw';
 import { setupServer, type SetupServer } from 'msw/node';
 
 /** Совпадает с `VK_ADS_BASE_URL` (`src/constants.ts`), без хвостового слэша. */
@@ -205,7 +205,7 @@ function vkFieldError(ctx: Ctx, field: string, message: string): Response {
   );
 }
 
-function ok(ctx: Ctx, body: unknown): Response {
+function ok(ctx: Ctx, body: JsonBodyType): Response {
   return HttpResponse.json(body, { status: 200, headers: headersOf(ctx) });
 }
 
