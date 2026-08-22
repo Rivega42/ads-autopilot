@@ -17,7 +17,7 @@ import type { RunRewriteAgent } from '@/moderation/rewrite.js';
  */
 export type ModerationDb = Pick<
   PrismaClient,
-  'ad' | 'adGroup' | 'client' | 'credential' | 'changeLog' | 'errorLog'
+  'ad' | 'adGroup' | 'client' | 'credential' | 'changeLog' | 'errorLog' | 'idempotencyKey'
 >;
 
 export interface ModerationDeps {

@@ -539,3 +539,62 @@ describe('repairRejectedAd в VK', () => {
     expect(db.changeLogs).toEqual([]);
   });
 });
+
+describe('repairRejectedAd: dry-run не платит за один и тот же ответ дважды', () => {
+  const DRY = () => channelContext(true);
+
+  it('второй прогон по тому же объявлению модель не зовёт', async () => {
+    // Крон модерации ходит каждые полчаса, а dry-run намеренно ничего не пишет в
+    // БД — значит, следующий прогон видит ровно ту же отклонённую строку. Раньше
+    // это означало две оплаченные модели на объявление 48 раз в сутки за один и
+    // тот же ответ.
+    const first = harness({ ctx: DRY() });
+    const before = await repairRejectedAd(first.rc, rejected());
+    expect(before).toMatchObject({ status: 'planned' });
+    expect(first.classifyCalls).toHaveLength(1);
+    expect(first.rewriteCalls).toHaveLength(1);
+
+    const second = harness({ ctx: DRY() });
+    const after = await repairRejectedAd(second.rc, rejected());
+
+    expect(after).toMatchObject({ status: 'unchanged' });
+    expect(second.classifyCalls).toEqual([]);
+    expect(second.rewriteCalls).toEqual([]);
+  });
+
+  it('изменившийся текст объявления снова стоит вызова модели', async () => {
+    const first = harness({ ctx: DRY() });
+    await repairRejectedAd(first.rc, rejected());
+
+    const second = harness({ ctx: DRY() });
+    const outcome = await repairRejectedAd(
+      second.rc,
+      rejected({ ad: { title: 'Ремонт стиральных машин', text: 'Другой текст объявления.' } }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'planned' });
+    expect(second.rewriteCalls).toHaveLength(1);
+  });
+
+  it('новая причина отказа снова стоит вызова модели', async () => {
+    const first = harness({ ctx: DRY() });
+    await repairRejectedAd(first.rc, rejected());
+
+    const second = harness({ ctx: DRY() });
+    const outcome = await repairRejectedAd(
+      second.rc,
+      rejected({ reason: 'Нет ссылки на документ о рекламируемом товаре' }),
+    );
+
+    expect(outcome).toMatchObject({ status: 'planned' });
+    expect(second.rewriteCalls).toHaveLength(1);
+  });
+
+  it('вне dry-run ключ не резервируется: там от повтора держит захват строки', async () => {
+    const h = harness({ ctx: channelContext(false) });
+
+    await repairRejectedAd(h.rc, rejected());
+
+    expect(db.idempotencyKeys).toEqual([]);
+  });
+});

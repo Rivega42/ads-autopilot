@@ -272,6 +272,48 @@ describe('runModerationCheck', () => {
     expect(db.adOf('ad1').title).toBe(REWRITE.title);
   });
 
+  it('в dry-run уже показанный предпросмотр не съедает потолок у соседнего отказа', async () => {
+    // Тот же принцип, что и с запаркованным объявлением: `unchanged` — это ноль
+    // работы, ни вызова модели, ни обращения в кабинет. Списывать за него бюджет
+    // значило бы, что порядок `listAds` стабилен, первый отказ вечно занимает
+    // потолок, а второй не дождётся предпросмотра никогда.
+    db.seedAd({
+      id: 'ad1b',
+      adGroupId: 'g-cl1',
+      externalId: 'a1b',
+      title: 'Самый лучший ремонт холодильников',
+      body: 'Починим сегодня, недорого и с гарантией на работу мастера.',
+      moderationStatus: ModerationStatus.PENDING,
+    });
+    const second = remoteAd({
+      externalId: 'a1b',
+      adGroupExternalId: 'ext-cl1',
+      title: 'Самый лучший ремонт холодильников',
+      text: 'Починим сегодня, недорого и с гарантией на работу мастера.',
+      moderationStatus: 'REJECTED',
+      moderationReason: 'Превосходная степень без подтверждения',
+    });
+    const adapter = fakeAdapter({
+      channel: Provider.YANDEX_DIRECT,
+      ads: [REJECTED_REMOTE, second, APPROVED_REMOTE],
+      updateAdText: () => ({ applied: false, plan: {} }),
+    });
+    const dry = async (clientId: string): Promise<ChannelContext> => ({
+      clientId,
+      credentials: {},
+      dryRun: true,
+    });
+    const { opts } = options({ contextFor: dry });
+    const run = { ...opts, adapterFor: () => adapter, contextFor: dry, maxRepairs: 1 };
+
+    const first = await runModerationCheck(run);
+    expect(first).toMatchObject({ planned: 1, unchanged: 0, deferred: 1 });
+
+    const again = await runModerationCheck(run);
+    // Потолок достался второму отказу, а не сгорел на уже показанном предпросмотре.
+    expect(again).toMatchObject({ planned: 1, unchanged: 1, deferred: 0 });
+  });
+
   describe('строка без объявления в кабинете', () => {
     /** Процесс умер между отправкой замены и записью нового id: id указывает в пустоту. */
     function seedLostAd(): void {

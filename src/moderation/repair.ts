@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { AdStatus, ChangeActor, ModerationStatus, type Prisma } from '@prisma/client';
 
 import type { ChannelAdapter, ChannelContext, WriteResult } from '@/channels/types.js';
@@ -23,6 +25,16 @@ const log = logger.child({ scope: 'moderation:repair' });
 export const MAX_MODERATION_RETRIES = 3;
 
 export const REWRITE_ACTION = 'moderation_rewrite';
+export const PREVIEW_SCOPE = 'moderation.preview';
+
+/**
+ * Сколько живёт отметка о показанном предпросмотре.
+ *
+ * Ключ содержит отпечаток входа модели, поэтому срок нужен не для правильности,
+ * а чтобы таблица не росла вечно: изменившийся текст или новая причина отказа
+ * дают новый ключ сразу, не дожидаясь истечения старого.
+ */
+export const PREVIEW_KEY_TTL_DAYS = 30;
 export const ESCALATION_ACTION = 'moderation_escalated';
 export const MISSING_ACTION = 'moderation_missing';
 
@@ -38,7 +50,46 @@ export type RepairOutcome =
   | { status: 'rewritten'; retries: number; changes: string }
   | { status: 'planned'; plan: Record<string, unknown> }
   | { status: 'escalated'; cause: EscalationCause }
+  /** Предпросмотр по этому входу уже показывали: модель не звали. */
+  | { status: 'unchanged' }
   | { status: 'skipped'; reason: string };
+
+/**
+ * Отпечаток того, что увидела бы модель: объявление, причина отказа и номер
+ * попытки. Всё, что меняет ответ, входит в ключ; всё, что не меняет, — нет.
+ */
+export function previewKey(ad: RejectedAd): string {
+  const reason = createHash('sha256').update(ad.reason).digest('hex').slice(0, 12);
+  return `${PREVIEW_SCOPE}:${ad.id}:${textVariantId(ad.ad)}:${ad.retries}:${reason}`;
+}
+
+/**
+ * Резервирует отметку о предпросмотре. `false` — отметка уже стоит.
+ *
+ * Нужно только в dry-run. В боевом режиме от повторной оплаты держит захват
+ * строки (`REJECTED` → `REWRITING`), а в dry-run записей в БД нет намеренно:
+ * счётчик попыток тратится только на реальную отправку. Из-за этого крон каждые
+ * полчаса видел одно и то же объявление и каждый раз платил за две модели —
+ * 96 оплаченных вызовов в сутки на объявление ради одного и того же ответа.
+ */
+async function reservePreview(deps: ModerationDeps, ad: RejectedAd): Promise<boolean> {
+  const ttlMs = PREVIEW_KEY_TTL_DAYS * 24 * 60 * 60 * 1000;
+  try {
+    await deps.db.idempotencyKey.create({
+      data: {
+        key: previewKey(ad),
+        scope: PREVIEW_SCOPE,
+        entityType: 'ad',
+        entityId: ad.id,
+        expiresAt: new Date(deps.now().getTime() + ttlMs),
+      },
+    });
+    return true;
+  } catch (err) {
+    if (isUniqueViolation(err)) return false;
+    throw err;
+  }
+}
 
 interface EscalationInput {
   cause: EscalationCause;
@@ -397,6 +448,11 @@ export async function repairRejectedAd(rc: RepairContext, ad: RejectedAd): Promi
       ad: ad.ad,
       problems: [`адаптер ${target.provider} не реализует updateAdText`],
     });
+  }
+
+  // Резерв идёт до классификации: за ней начинаются платные вызовы.
+  if (ctx.dryRun && !(await reservePreview(deps, ad))) {
+    return { status: 'unchanged' };
   }
 
   const classification = await classifyRejection(

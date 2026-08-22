@@ -131,6 +131,7 @@ export class FakeDb {
   readonly changeLogs: ChangeLogRow[] = [];
   readonly errorLogs: ErrorLogRow[] = [];
   readonly adWrites: AdWrite[] = [];
+  readonly idempotencyKeys: { key: string; scope: string }[] = [];
 
   seedClient(row: Partial<ClientRow> & { id: string }): ClientRow {
     const client: ClientRow = {
@@ -309,6 +310,15 @@ export class FakeDb {
     create: async (args: { data: ErrorLogRow }): Promise<ErrorLogRow> => {
       this.errorLogs.push(args.data);
       return args.data;
+    },
+  };
+
+  readonly idempotencyKey = {
+    create: async (args: { data: { key: string; scope: string } }): Promise<void> => {
+      if (this.idempotencyKeys.some((row) => row.key === args.data.key)) {
+        throw new FakeUniqueViolation('key');
+      }
+      this.idempotencyKeys.push({ key: args.data.key, scope: args.data.scope });
     },
   };
 

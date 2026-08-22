@@ -59,6 +59,12 @@ export interface ModerationRunSummary {
   rewritten: number;
   /** Посчитано и показано планом, но не отправлено из-за dry-run. */
   planned: number;
+  /**
+   * Отклонённых объявлений, по которым предпросмотр в dry-run уже показывали и с
+   * тех пор ничего не изменилось: модель не звали. Ненулевое — это норма при
+   * включённом DRY_RUN, а не признак застоя.
+   */
+  unchanged: number;
   escalated: number;
   skipped: number;
   /** Отклонённые объявления, до которых прогон не дошёл из-за потолка. */
@@ -113,6 +119,7 @@ export async function runModerationCheck(
     rejected: 0,
     rewritten: 0,
     planned: 0,
+    unchanged: 0,
     escalated: 0,
     skipped: 0,
     deferred: 0,
@@ -197,7 +204,9 @@ async function checkTarget(
       // в кабинете. Списывать за него бюджет значило бы отдать весь потолок застрявшим
       // объявлениям (порядок `listAds` стабилен, так что тем же самым каждый прогон),
       // а свежие отказы откладывать до бесконечности.
-      if (outcome.status !== 'skipped') left -= 1;
+      // `unchanged` в этом смысле то же самое: предпросмотр уже показан, модель не
+      // звали, в кабинет не ходили — работы не было.
+      if (outcome.status !== 'skipped' && outcome.status !== 'unchanged') left -= 1;
     } catch (err) {
       // Одно объявление не чинится — остальные в этом же кабинете чинятся.
       left -= 1;
@@ -220,6 +229,9 @@ function tally(
       return;
     case 'escalated':
       summary.escalated += 1;
+      return;
+    case 'unchanged':
+      summary.unchanged += 1;
       return;
     default:
       summary.skipped += 1;

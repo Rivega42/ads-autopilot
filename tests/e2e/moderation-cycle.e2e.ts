@@ -797,17 +797,18 @@ describe('AI-Модератор: отказ площадки → перепис�
     expect(direct.adById(IDS.unfixable.rejected)?.updates).toBe(0);
   });
 
-  it('ДЕФЕКТ: dry-run платит за модель на каждом прогоне и никуда не двигается', async () => {
+  it('dry-run показывает предпросмотр один раз и не платит за него повторно', async () => {
     /**
-     * Не чиним здесь — правка меняла бы поведение модуля, см. отчёт.
+     * Было сломано: `repairRejectedAd` проверял `ctx.dryRun` только перед отправкой,
+     * то есть классификация и генерация к этому моменту уже оплачены. Записей при
+     * этом не оставалось никаких — ни счётчика, ни журнала, ни следа эскалации, —
+     * поэтому следующий тик `check-moderation` (каждые полчаса) видел тот же отказ и
+     * платил заново: 96 оплаченных вызовов в сутки на одно объявление за один и тот
+     * же ответ. `DRY_RUN` по умолчанию `true`, то есть это было поведение «из коробки».
      *
-     * `repairRejectedAd` проверяет `ctx.dryRun` только перед отправкой: классификация
-     * и до трёх генераций к этому моменту уже оплачены. Записей при этом не остаётся
-     * никаких — ни счётчика, ни журнала, ни следа эскалации, — значит следующий тик
-     * `check-moderation` (каждые полчаса) увидит тот же отказ и заплатит заново.
-     * `DRY_RUN` по умолчанию `true`, то есть это поведение кабинета «из коробки».
-     *
-     * Тест закрепляет наблюдаемое поведение, а не желаемое.
+     * Теперь отпечаток входа модели — объявление, причина отказа, номер попытки —
+     * резервируется в `IdempotencyKey` до классификации. Счётчик попыток по-прежнему
+     * не тратится: предохранитель ничего не меняет ни в кабинете, ни в наших строках.
      */
     const model = stub();
     const adId = dry.adIds['rejected'] ?? '';
@@ -837,8 +838,20 @@ describe('AI-Модератор: отказ площадки → перепис�
     expect(model.rewriteCalls).toBe(1);
 
     const second = await runModerationCheck(planning);
-    expect(second).toMatchObject({ rejected: 1, planned: 1 });
-    // Вот и цена: тот же отказ, те же вызовы модели, и так каждые полчаса.
+    // Тот же вход — тот же ответ, платить второй раз не за что.
+    expect(second).toMatchObject({ rejected: 1, planned: 0, unchanged: 1 });
+    expect(model.classifyCalls).toBe(1);
+    expect(model.rewriteCalls).toBe(1);
+    // Счётчик попыток так и не тронут: он тратится только на реальную отправку.
+    expect(await prisma.ad.findUniqueOrThrow({ where: { id: adId } })).toMatchObject({
+      moderationRetries: 0,
+    });
+
+    // Новая причина отказа — новый вход: за него платим, и это правильно.
+    direct.setVerdict(IDS.dry.rejected, 'REJECTED', 'Нет документа на рекламируемый товар');
+
+    const third = await runModerationCheck(planning);
+    expect(third).toMatchObject({ rejected: 1, planned: 1, unchanged: 0 });
     expect(model.classifyCalls).toBe(2);
     expect(model.rewriteCalls).toBe(2);
   });
