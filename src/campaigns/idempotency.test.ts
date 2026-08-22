@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   campaignCreateKey,
   CAMPAIGN_CREATE_SCOPE,
+  CAMPAIGN_KEY_NEVER_EXPIRES_AT,
   createInMemoryCampaignIdempotency,
   createPrismaCampaignIdempotency,
   PENDING_EXTERNAL_ID,
@@ -101,13 +102,20 @@ describe('createPrismaCampaignIdempotency', () => {
     );
   });
 
-  it('ключ живёт ограниченное время', async () => {
+  it('ключ создания не истекает: предикат крона чистки под него не подходит', async () => {
     const { db, created } = makeDb();
-    await createPrismaCampaignIdempotency(db, 1).reserve('k');
+    await createPrismaCampaignIdempotency(db).reserve('k');
 
     const expiresAt = created[0]?.['expiresAt'];
     expect(expiresAt).toBeInstanceOf(Date);
-    expect((expiresAt as Date).getTime()).toBeGreaterThan(Date.now());
+    expect((expiresAt as Date).toISOString()).toBe(CAMPAIGN_KEY_NEVER_EXPIRES_AT);
+
+    // Крон чистки (src/scheduler/purge.ts) удаляет строки по `expiresAt <= now`.
+    // Ни один мыслимый прогон не должен попасть в этот предикат: строка отвечает
+    // на вопрос «создавалась ли кампания», а у него срока давности нет — с
+    // прежним TTL в 90 дней ответ становился «нет» ровно в день чистки.
+    const purgeRun = new Date('2126-01-01T00:00:00.000Z');
+    expect((expiresAt as Date).getTime()).toBeGreaterThan(purgeRun.getTime());
   });
 });
 

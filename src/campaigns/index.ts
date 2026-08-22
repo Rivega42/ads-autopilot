@@ -57,9 +57,15 @@ export {
   type CampaignLaunchOutcome,
   type CreatedCampaignRef,
   type LiveApproval,
+  type ReusablePlan,
 } from '@/campaigns/entry.js';
 
-export { renderEntryBlock, renderPlanSummary, renderReadiness } from '@/campaigns/entry-text.js';
+export {
+  renderEntryBlock,
+  renderPlanSummary,
+  renderReadiness,
+  type PlanSummaryOptions,
+} from '@/campaigns/entry-text.js';
 
 export {
   loadPlan,
@@ -86,6 +92,7 @@ export {
   createInMemoryCampaignIdempotency,
   createPrismaCampaignIdempotency,
   CAMPAIGN_CREATE_SCOPE,
+  CAMPAIGN_KEY_NEVER_EXPIRES_AT,
   type CampaignIdempotency,
   type Reservation,
 } from '@/campaigns/idempotency.js';

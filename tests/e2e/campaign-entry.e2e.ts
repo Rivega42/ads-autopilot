@@ -20,6 +20,7 @@ import {
   callbackUpdate,
   commandUpdate,
   createTelegramApiMock,
+  TELEGRAM_TEXT_MAX,
   type SentMessage,
   type TelegramApiMock,
 } from './support/campaign-entry-telegram.js';
@@ -27,11 +28,13 @@ import { E2E_DATABASE_URL, E2E_ENCRYPTION_KEY } from './support/config.js';
 import { resetDatabase } from './support/database.js';
 
 import type { ClientBriefData } from '@/ai/onboarding/brief.schema.js';
-import { setMessenger } from '@/approval/telegram.js';
+import { getMessenger, setMessenger } from '@/approval/telegram.js';
 import { buildBot } from '@/apps/bot.js';
+import { launchCampaign, type CampaignLaunchOptions } from '@/campaigns/index.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
 import { resetYandexRuntimeState } from '@/clients/yandex-direct/http.js';
 import { prisma } from '@/db/prisma.js';
+import { purgeExpiredIdempotencyKeys } from '@/scheduler/purge.js';
 
 /**
  * Вход в создание кампании: от команды человека до строки в БД (пункт приёмки §9.1).
@@ -94,12 +97,15 @@ async function seed(brief: ClientBriefData): Promise<{ clientId: string; tgUserI
 }
 
 /** Бот собирается ровно так же, как в проде, — с подменой только агентов модели. */
-async function botWith(stubs: PlannerStubs, dryRun = false): Promise<Bot> {
+async function botWith(
+  stubs: PlannerStubs,
+  over: Partial<CampaignLaunchOptions> = {},
+): Promise<Bot> {
   const bot = buildBot(BOT_TOKEN, {
     campaigns: {
       options: {
         plan: { runStructure: stubs.runStructure, runTexts: stubs.runTexts },
-        ...(dryRun ? { dryRun: true } : {}),
+        ...over,
       },
     },
   });
@@ -173,6 +179,12 @@ describe('от команды «запусти» до кампании в каб
   let firstCard: SentMessage | undefined;
   let secondCard: SentMessage | undefined;
   let callsAfterPress: DirectAddCall[] = [];
+  let campaignsAfterPress: {
+    name: string;
+    externalId: string;
+    dailyBudget: unknown;
+    adGroups: { name: string; keywords: { phrase: string }[] }[];
+  }[] = [];
   let secondPressAnswer = '';
   let approvalsAfterLaunch = 0;
   let chatsAfterLaunch: (string | null)[] = [];
@@ -181,7 +193,12 @@ describe('от команды «запусти» до кампании в каб
   let relaunchCards = 0;
   let structureCallsAfterRelaunch = 0;
   let resubmitMessages: SentMessage[] = [];
-  let callsAfterRepeatApprove: DirectAddCall[] = [];
+  let resubmitCards: SentMessage[] = [];
+  let callsAfterRestApprove: DirectAddCall[] = [];
+  let creationKeysAfterPurge: { key: string; entityId: string }[] = [];
+  let afterPurgeText = '';
+  let afterPurgeCards = 0;
+  let callsAfterPurge: DirectAddCall[] = [];
 
   beforeAll(async () => {
     telegram.reset();
@@ -214,6 +231,17 @@ describe('от команды «запусти» до кампании в каб
       ),
     );
     callsAfterPress = [...direct.calls];
+    // Снимок делается здесь, а не в самой проверке: она выполняется после всех
+    // шагов, и к тому моменту в БД будет уже вторая кампания.
+    campaignsAfterPress = await prisma.campaign.findMany({
+      where: { clientId },
+      select: {
+        name: true,
+        externalId: true,
+        dailyBudget: true,
+        adGroups: { select: { name: true, keywords: { select: { phrase: true } } } },
+      },
+    });
 
     // ── шаг 3: то же нажатие второй раз ───────────────────────────────────────
     telegram.reset();
@@ -248,15 +276,34 @@ describe('от команды «запусти» до кампании в каб
     direct.reset();
     await bot.handleUpdate(commandUpdate(tgUserId, '/launch'));
     resubmitMessages = [...telegram.sent];
+    resubmitCards = telegram.cards();
 
-    // ── шаг 6: одобрение карточки по уже созданной кампании ───────────────────
-    const repeat = telegram.cards().find((c) => c.text.includes('Поиск —'));
+    // ── шаг 6: одобрение переспрошенной карточки ──────────────────────────────
+    const rest = resubmitCards[0];
     telegram.reset();
     direct.reset();
     await bot.handleUpdate(
-      callbackUpdate(tgUserId, buttonData(repeat?.keyboard, 'Одобрить'), repeat?.messageId ?? 0),
+      callbackUpdate(tgUserId, buttonData(rest?.keyboard, 'Одобрить'), rest?.messageId ?? 0),
     );
-    callsAfterRepeatApprove = [...direct.calls];
+    callsAfterRestApprove = [...direct.calls];
+
+    // ── шаг 7: чистка просроченных ключей и «запусти» после неё ───────────────
+    // Прогон крона на сто лет вперёд: любой TTL на ключах создания к этому дню
+    // истечёт, и это ровно тот день, в который вход переставал видеть созданные
+    // кампании и предлагал план заново.
+    await purgeExpiredIdempotencyKeys(new Date('2126-01-01T00:00:00.000Z'));
+    creationKeysAfterPurge = await prisma.idempotencyKey.findMany({
+      where: { scope: 'campaigns.create' },
+      select: { key: true, entityId: true },
+      orderBy: { key: 'asc' },
+    });
+
+    telegram.reset();
+    direct.reset();
+    await bot.handleUpdate(commandUpdate(tgUserId, '/launch'));
+    afterPurgeText = textsOf(telegram.sent);
+    afterPurgeCards = telegram.cards().length;
+    callsAfterPurge = [...direct.calls];
   });
 
   it('человек видит деньги и регионы до того, как появится кнопка', () => {
@@ -292,20 +339,12 @@ describe('от команды «запусти» до кампании в каб
     expect(stubs.textsCalls).toBe(1);
   });
 
-  it('нажатие ✅ доводит кампанию до кабинета и до нашей БД', async () => {
+  it('нажатие ✅ доводит кампанию до кабинета и до нашей БД', () => {
     expect(callsAfterPress.filter((c) => c.requestError !== undefined)).toEqual([]);
     expect(callsAfterPress.flatMap((c) => c.operationErrors)).toEqual([]);
     expect(callsAfterPress.filter((c) => c.service === 'campaigns')).toHaveLength(1);
 
-    const campaigns = await prisma.campaign.findMany({
-      where: { clientId },
-      select: {
-        name: true,
-        externalId: true,
-        dailyBudget: true,
-        adGroups: { select: { name: true, keywords: { select: { phrase: true } } } },
-      },
-    });
+    const campaigns = campaignsAfterPress;
     expect(campaigns).toHaveLength(1);
     expect(campaigns[0]?.name).toContain('Поиск —');
     expect(campaigns[0]?.externalId).toMatch(/^\d+$/);
@@ -331,22 +370,50 @@ describe('от команды «запусти» до кампании в каб
     expect(textsOf(resubmitMessages)).toContain('модель звать не буду');
     expect(stubs.structureCalls).toBe(1);
     expect(stubs.textsCalls).toBe(1);
-    expect(resubmitMessages.filter((m) => m.keyboard !== undefined)).toHaveLength(2);
   });
 
-  it('одобрение карточки по уже созданной кампании не создаёт вторую', async () => {
-    expect(callsAfterRepeatApprove.filter((c) => c.service === 'campaigns')).toEqual([]);
+  it('переспрашивают только про нетронутую кампанию, и счёт — только по ней', () => {
+    // Карточка на уже созданную кампанию нажимается впустую (её держит ключ
+    // идемпотентности), но человеку она обещала бы списание, которое уже идёт.
+    expect(resubmitCards).toHaveLength(1);
+    expect(resubmitCards[0]?.text).toContain('РСЯ —');
 
-    const campaigns = await prisma.campaign.findMany({ where: { clientId } });
-    expect(campaigns).toHaveLength(1);
+    const summary = resubmitMessages.find((m) => m.text.startsWith('📊 План кампании'));
+    expect(summary?.text).toContain('Общий дневной бюджет: 1 500 ₽/сут');
+    expect(summary?.text).toContain('из них уже создано: 1');
+    expect(summary?.text).not.toContain('Поиск —');
+    expect(summary?.text).not.toContain('3 500 ₽/сут');
+    expect(textsOf(resubmitMessages)).toContain('которых ещё нет в кабинете: 1 из 2');
+  });
 
-    // Ключ идемпотентности остался один на пару (план, кампания) и несёт внешний id.
-    const keys = await prisma.idempotencyKey.findMany({
-      where: { scope: 'campaigns.create' },
-      select: { key: true, entityId: true },
+  it('одобрение переспрошенной карточки создаёт ровно вторую кампанию', async () => {
+    expect(callsAfterRestApprove.filter((c) => c.requestError !== undefined)).toEqual([]);
+    expect(callsAfterRestApprove.filter((c) => c.service === 'campaigns')).toHaveLength(1);
+
+    const campaigns = await prisma.campaign.findMany({
+      where: { clientId },
+      select: { name: true, dailyBudget: true },
+      orderBy: { name: 'asc' },
     });
-    expect(keys).toHaveLength(1);
-    expect(keys[0]?.entityId).toBe(campaigns[0]?.externalId);
+    expect(campaigns).toHaveLength(2);
+    expect(campaigns.map((c) => Number(c.dailyBudget)).sort((a, b) => a - b)).toEqual([
+      1_500, 3_500,
+    ]);
+  });
+
+  it('чистка ключей не стирает память о том, что кампании уже созданы', async () => {
+    // Ключ создания отвечает не на «можно ли повторить сейчас», а на «создавалась
+    // ли кампания», и срока давности у этого ответа нет. Пока стоял TTL в 90 дней,
+    // именно здесь план из января в апреле выглядел нетронутым, переиспользовался
+    // целиком, и нажатие ✅ создавало вторую кампанию с тем же именем и бюджетом.
+    expect(creationKeysAfterPurge).toHaveLength(2);
+    for (const key of creationKeysAfterPurge) expect(key.entityId).toMatch(/^\d+$/);
+
+    expect(afterPurgeText).toContain('уже созданы');
+    expect(afterPurgeCards).toBe(0);
+    expect(callsAfterPurge).toEqual([]);
+    expect(stubs.structureCalls).toBe(1);
+    expect(await prisma.campaign.count({ where: { clientId } })).toBe(2);
   });
 });
 
@@ -366,7 +433,7 @@ describe('предохранитель DRY_RUN', () => {
     const seeded = await seed(briefOf({ product: DRY_RUN_PRODUCT, dailyBudgetRub: 1_000 }));
     clientId = seeded.clientId;
 
-    const bot = await botWith(stubs, true);
+    const bot = await botWith(stubs, { dryRun: true });
     await bot.handleUpdate(commandUpdate(seeded.tgUserId, '/launch'));
     messages = [...telegram.sent];
     card = telegram.cards()[0];
@@ -419,6 +486,68 @@ describe('предохранитель DRY_RUN', () => {
   });
 });
 
+/** Чат, в котором «бота заблокировали»: Telegram отвечает на него 403. */
+const BLOCKED_CHAT = '999000111';
+
+describe('карточка, которую Telegram не принял', () => {
+  let messages: SentMessage[] = [];
+  let approvals: { error: string | null; decision: ApprovalDecision }[] = [];
+  let calls: DirectAddCall[] = [];
+
+  beforeAll(async () => {
+    telegram.reset();
+    direct.reset();
+    telegram.block(BLOCKED_CHAT);
+
+    const stubs = plannerStubs(structureOf(1, 3));
+    const seeded = await seed(briefOf({ product: 'Курсы английского в никуда' }));
+    // Карточки уезжают в отдельный чат (так же делает `--chat` в CLI): заблокировав
+    // чат самого клиента, мы отняли бы у бота и возможность ответить человеку.
+    const bot = await botWith(stubs, { chatId: BLOCKED_CHAT });
+
+    await bot.handleUpdate(commandUpdate(seeded.tgUserId, '/launch'));
+    messages = [...telegram.sent];
+    approvals = await prisma.pendingApproval.findMany({
+      where: { clientId: seeded.clientId },
+      select: { error: true, decision: true },
+    });
+    calls = [...direct.calls];
+  });
+
+  it('заявка создана, но помечена ошибкой доставки', () => {
+    expect(approvals).toHaveLength(2);
+    for (const approval of approvals) {
+      expect(approval.decision).toBe(ApprovalDecision.PENDING);
+      expect(approval.error).toContain('bot was blocked');
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('человеку сказано, что нажимать нечего, а не «карточек на решение: 2»', () => {
+    const text = textsOf(messages);
+    expect(text).toContain('Не доставлено карточек: 2');
+    expect(text).toContain('Карточек на решение: 0');
+  });
+
+  /**
+   * Отказы площадки проверяются напрямую через тот же транспорт, которым бот шлёт
+   * карточки. Длинное сообщение сценарием не рождается — тексты входа короткие, а
+   * бот вдобавок режет их сам (`MESSAGE_MAX_CHARS`), — и именно поэтому предел
+   * должен стоять в моке: иначе снятая резка ничем не ловится и уедет в прод.
+   */
+  it('мок отказывает ровно там же, где площадка', async () => {
+    const messenger = getMessenger();
+    await expect(messenger.sendMessage('4242', 'x'.repeat(TELEGRAM_TEXT_MAX + 1))).rejects.toThrow(
+      'message is too long',
+    );
+    await expect(messenger.sendMessage('4242', '')).rejects.toThrow('message text is empty');
+    await expect(messenger.sendMessage(BLOCKED_CHAT, 'привет')).rejects.toThrow('bot was blocked');
+    await expect(
+      messenger.sendMessage('4242', 'x'.repeat(TELEGRAM_TEXT_MAX)),
+    ).resolves.toBeTruthy();
+  });
+});
+
 describe('CLI: проверка готовности не тратит ни рубля', () => {
   /**
    * Команда запускается настоящим процессом, а не импортом: `cli.ts` — точка входа,
@@ -435,17 +564,31 @@ describe('CLI: проверка готовности не тратит ни ру
     NODE_ENV: 'test',
   };
 
-  async function cli(args: string[]): Promise<{ stdout: string; code: number }> {
+  async function cli(
+    args: string[],
+    envOver: Record<string, string> = {},
+  ): Promise<{ stdout: string; code: number }> {
     try {
       const { stdout } = await run('node_modules/.bin/tsx', ['src/apps/cli.ts', ...args], {
         cwd: repoRoot,
-        env: cliEnv,
+        env: { ...cliEnv, ...envOver },
       });
       return { stdout, code: 0 };
     } catch (err) {
       const failure = err as { stdout?: string; code?: number };
       return { stdout: failure.stdout ?? '', code: failure.code ?? 1 };
     }
+  }
+
+  /** Клиент с одной кампанией в плане: 350 ₽ на поиск, РСЯ не проходит минимум. */
+  async function seedSingleCampaign(product: string): Promise<{
+    clientId: string;
+    tgUserId: bigint;
+    stubs: PlannerStubs;
+  }> {
+    const stubs = plannerStubs(structureOf(1, 3));
+    const seeded = await seed(briefOf({ product, dailyBudgetRub: 500 }));
+    return { ...seeded, stubs };
   }
 
   it('печатает раскладку бюджета, регионы и режим — и честно говорит, что ничего не сделала', async () => {
@@ -493,5 +636,68 @@ describe('CLI: проверка готовности не тратит ни ру
   it('команда есть в справке — иначе её никто не найдёт', async () => {
     const { stdout } = await cli(['--help']);
     expect(stdout).toContain('campaign');
+  });
+
+  /**
+   * Код возврата отвечает на вопрос «нужно ли человеку что-то починить», а не
+   * «готов ли клиент к запуску». Пока ненулевым завершался любой исход, кроме
+   * готовности, скрипт, обходящий клиентов, читал штатное «всё уже создано» как
+   * поломку — и будил дежурного из-за кампании, которая исправно работает.
+   */
+  it('«карточка ждёт решения» — не поломка: код 0', async () => {
+    telegram.reset();
+    direct.reset();
+    const { tgUserId, clientId, stubs } = await seedSingleCampaign('Курсы английского в ожидании');
+    const bot = await botWith(stubs);
+    await bot.handleUpdate(commandUpdate(tgUserId, '/launch'));
+
+    const { stdout, code } = await cli(['campaign', '--client', clientId]);
+    expect(stdout).toContain('ждёт твоего решения');
+    expect(code).toBe(0);
+  });
+
+  it('«всё уже создано» — не поломка: код 0 и с --apply, и без него', async () => {
+    telegram.reset();
+    direct.reset();
+    const { tgUserId, clientId, stubs } = await seedSingleCampaign('Курсы английского под ключ');
+    const bot = await botWith(stubs);
+    await bot.handleUpdate(commandUpdate(tgUserId, '/launch'));
+    const card = telegram.cards()[0];
+    await bot.handleUpdate(
+      callbackUpdate(tgUserId, buttonData(card?.keyboard, 'Одобрить'), card?.messageId ?? 0),
+    );
+
+    const check = await cli(['campaign', '--client', clientId]);
+    expect(check.stdout).toContain('уже созданы');
+    expect(check.code).toBe(0);
+
+    const apply = await cli(['campaign', '--client', clientId, '--apply']);
+    expect(apply.stdout).toContain('уже созданы');
+    expect(apply.stdout).toContain('--new');
+    expect(apply.code).toBe(0);
+  });
+
+  it('недоставленные карточки — ненулевой код и предупреждение', async () => {
+    telegram.reset();
+    direct.reset();
+    const { clientId, stubs } = await seedSingleCampaign('Курсы английского без телеграма');
+
+    // План собирается здесь, чтобы `--apply` в отдельном процессе переиспользовал
+    // готовый и не звал модель: msw живёт в этом процессе, а CLI — в другом.
+    const built = await launchCampaign(clientId, {
+      plan: { runStructure: stubs.runStructure, runTexts: stubs.runTexts },
+      submit: () => Promise.resolve([]),
+    });
+    expect(built.kind).toBe('submitted');
+
+    // Токена нет — `getMessenger()` отказывает, и это ровно та ветка, ради которой
+    // в CLI написан блок с предупреждением: заявка есть, нажать её некому.
+    const { stdout, code } = await cli(['campaign', '--client', clientId, '--apply'], {
+      TELEGRAM_BOT_TOKEN: '',
+    });
+
+    expect(stdout).toContain('НЕ ДОСТАВЛЕНА');
+    expect(stdout).toContain('Карточек не доставлено: 1');
+    expect(code).not.toBe(0);
   });
 });

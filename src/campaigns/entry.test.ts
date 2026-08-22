@@ -337,6 +337,28 @@ describe('checkCampaignEntry: что уже происходит с клиент
     expect(renderEntryBlock(outcome as never)).toContain('вручную');
   });
 
+  it('по наполовину созданному плану переспрашиваем только про нетронутые кампании', async () => {
+    const outcome = await checkCampaignEntry(CLIENT_ID, {
+      db: fakeStore(
+        ready({
+          plan: planOf(2),
+          // Первую кампанию создали, по второй человек нажал ❌ — ключа нет.
+          keys: [{ key: campaignCreateKey(PLAN_ID, 0), entityId: '777' }],
+        }),
+      ),
+      now,
+    });
+    expect(outcome.kind).toBe('ready');
+    if (outcome.kind !== 'ready') return;
+
+    expect(outcome.reusablePlan?.untouched).toEqual([1]);
+    expect(outcome.notes.join(' ')).toContain('уже создана: 1 из 2');
+
+    const text = renderReadiness(outcome);
+    expect(text).toContain('модель звать не буду');
+    expect(text).toContain('которых ещё нет в кабинете: 1 из 2');
+  });
+
   it('план, собранный до правки брифа, переиспользованию не подлежит', async () => {
     const outcome = await checkCampaignEntry(CLIENT_ID, {
       db: fakeStore(
@@ -395,6 +417,26 @@ describe('launchCampaign', () => {
     expect(planner).not.toHaveBeenCalled();
     expect(submit).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ kind: 'submitted', reused: true });
+  });
+
+  it('карточки по наполовину созданному плану выпускаются только на нетронутые', async () => {
+    const submit = vi.fn().mockResolvedValue([{ id: 'appr-2' }]);
+
+    const outcome = await launchCampaign(CLIENT_ID, {
+      db: fakeStore(
+        ready({
+          plan: planOf(2),
+          keys: [{ key: campaignCreateKey(PLAN_ID, 0), entityId: '777' }],
+        }),
+      ),
+      planner: vi.fn() as never,
+      submit: submit as never,
+    });
+
+    // Позиции плана, а не порядковые номера в отфильтрованном списке: из позиции
+    // выводится ключ идемпотентности.
+    expect(submit.mock.calls[0]?.[1]).toMatchObject({ campaignIndexes: [1] });
+    expect(outcome).toMatchObject({ kind: 'submitted', reused: true, campaignIndexes: [1] });
   });
 
   it('--new собирает новый план поверх уже созданных кампаний', async () => {
@@ -457,18 +499,33 @@ describe('launchCampaign', () => {
     ).rejects.toThrow('postgres упал');
   });
 
-  it('dry-run из окружения уезжает в карточку, а опция может только усилить его', async () => {
+  it('dry-run из окружения уезжает в карточку, и опция его не снимает', async () => {
+    // Предпосылка, а не проверяемое поведение: предохранитель в тестах включён
+    // (vitest.setup.ts). Ожидание ниже — литерал: взять его из того же
+    // `env.DRY_RUN`, который читает проверяемая функция, значило бы сверить код
+    // сам с собой — такая проверка зелена при любой формуле внутри.
+    expect(env.DRY_RUN).toBe(true);
+
     const submit = vi.fn().mockResolvedValue([]);
     await launchCampaign(CLIENT_ID, {
       db: fakeStore(ready({ plan: planOf() })),
       submit: submit as never,
     });
-    expect(submit.mock.calls[0]?.[1]).toMatchObject({ dryRun: env.DRY_RUN });
+    expect(submit.mock.calls[0]?.[1]).toMatchObject({ dryRun: true });
 
     submit.mockClear();
     await launchCampaign(CLIENT_ID, {
       db: fakeStore(ready({ plan: planOf() })),
       dryRun: true,
+      submit: submit as never,
+    });
+    expect(submit.mock.calls[0]?.[1]).toMatchObject({ dryRun: true });
+
+    // Опция умеет только усилить защиту: снять её отсюда нельзя.
+    submit.mockClear();
+    await launchCampaign(CLIENT_ID, {
+      db: fakeStore(ready({ plan: planOf() })),
+      dryRun: false,
       submit: submit as never,
     });
     expect(submit.mock.calls[0]?.[1]).toMatchObject({ dryRun: true });
@@ -483,6 +540,27 @@ describe('renderPlanSummary', () => {
     expect(text).toContain('Групп: 1, фраз: 1, объявлений: 1');
     expect(text).toContain('Регионы: Москва');
     expect(text).toContain('DRY_RUN снят');
+  });
+
+  it('часть плана считает деньги по себе, а не по всему плану', () => {
+    const text = renderPlanSummary(planOf(2), { dryRun: false, only: [1] });
+
+    // 7 000 ₽ здесь было бы обещанием списать и то, что уже списывается.
+    expect(text).toContain('Общий дневной бюджет: 3 500 ₽/сут');
+    expect(text).toContain('из них уже создано: 1');
+    expect(text).toContain('Поиск — Курсы 2');
+    expect(text).not.toContain('Поиск — Курсы 1');
+  });
+
+  it('группа без фраз показывает «не задано», а не ставку в ноль рублей', () => {
+    const plan = planOf();
+    const group = plan.campaigns[0]?.adGroups[0];
+    if (!group || !plan.campaigns[0]) throw new Error('фикстура плана сломана');
+    plan.campaigns[0].adGroups = [{ ...group, keywords: [] }];
+
+    const text = renderPlanSummary(plan, { dryRun: false });
+    expect(text).toContain('ставка не задана');
+    expect(text).not.toContain('ставка 0');
   });
 
   it('длинный план не перечисляет все группы поимённо', () => {

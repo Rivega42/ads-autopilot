@@ -27,6 +27,14 @@ const log = logger.child({ scope: 'campaigns:approval' });
 const REASON_WARNINGS_LIMIT = 300;
 
 export interface SubmitCampaignPlanOptions extends CreateApprovalOptions {
+  /**
+   * Позиции кампаний плана, по которым нужны карточки. По умолчанию — все.
+   *
+   * Существует ради повторного входа по наполовину созданному плану: карточка на
+   * уже созданную кампанию нажимается впустую (ключ идемпотентности отдаёт
+   * дубликат), а человеку она обещает списание дневного бюджета, которое уже идёт.
+   */
+  campaignIndexes?: readonly number[];
   /** Подменяется в тестах: настоящий создаёт строку в БД и шлёт сообщение в TG. */
   createApproval?: (
     action: ApprovalAction,
@@ -52,10 +60,12 @@ export async function submitCampaignPlan(
     });
   }
 
-  const { createApproval: create = createApproval, ...approvalOpts } = opts;
+  const { createApproval: create = createApproval, campaignIndexes, ...approvalOpts } = opts;
+  const wanted = campaignIndexes === undefined ? null : new Set(campaignIndexes);
   const approvals: PendingApproval[] = [];
 
   for (const [index, item] of plan.campaigns.entries()) {
+    if (wanted !== null && !wanted.has(index)) continue;
     const action: ApprovalAction = {
       kind: 'create_campaign',
       clientId: plan.clientId,

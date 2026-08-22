@@ -176,13 +176,23 @@ export function renderReadiness(ready: CampaignEntryReady): string {
 
   for (const note of ready.notes) lines.push(`  ⚠️ ${note}`);
 
-  lines.push(
-    ready.reusablePlan
-      ? 'План с прошлого захода сохранён — карточки выпущу по нему, модель звать не буду.'
-      : 'План собирают два платных вызова модели: стратег (структура) и копирайтер (тексты).',
-  );
+  lines.push(reusePlanLine(ready.reusablePlan));
   lines.push(dryRunNotice(ready.dryRun));
   return lines.join('\n');
+}
+
+function reusePlanLine(reusable: CampaignEntryReady['reusablePlan']): string {
+  if (!reusable) {
+    return 'План собирают два платных вызова модели: стратег (структура) и копирайтер (тексты).';
+  }
+  const total = reusable.plan.campaigns.length;
+  if (reusable.untouched.length === total) {
+    return 'План с прошлого захода сохранён — карточки выпущу по нему, модель звать не буду.';
+  }
+  return (
+    'План с прошлого захода сохранён, модель звать не буду. Карточки выпущу только ' +
+    `по кампаниям, которых ещё нет в кабинете: ${reusable.untouched.length} из ${total}.`
+  );
 }
 
 /** Одна и та же формулировка везде: человек должен знать, чем кончится нажатие. */
@@ -197,6 +207,14 @@ export function dryRunNotice(dryRun: boolean): string {
 export interface PlanSummaryOptions {
   /** Сколько групп перечислять поимённо. Остальные — строкой «и ещё N». */
   maxGroups?: number;
+  /**
+   * Позиции кампаний плана, о которых идёт речь. По умолчанию — весь план.
+   *
+   * Нужно повторному входу по наполовину созданному плану: сводка описывает то,
+   * что человек сейчас одобряет, а созданная кампания уже тратит бюджет и в счёт
+   * этого решения не входит.
+   */
+  only?: readonly number[];
 }
 
 /**
@@ -211,13 +229,26 @@ export function renderPlanSummary(
   opts: PlanSummaryOptions & { dryRun: boolean },
 ): string {
   const maxGroups = opts.maxGroups ?? 8;
+  const only = opts.only === undefined ? null : new Set(opts.only);
+  const shown = plan.campaigns.filter((_, index) => only === null || only.has(index));
+  // Сумма считается по показанным кампаниям, а не берётся из `totalDailyBudgetRub`:
+  // для части плана поле плана — это чужой счёт, куда посчитаны деньги, которые
+  // уже тратятся. Для целого плана схема гарантирует равенство (plan.schema.ts).
+  const total = shown.reduce((acc, c) => acc + c.dailyBudgetRub, 0);
+
   const lines = [
     `📊 План кампании: ${plan.summary}`,
-    `Общий дневной бюджет: ${formatAmount(plan.totalDailyBudgetRub)} ₽/сут`,
-    '',
+    `Общий дневной бюджет: ${formatAmount(total)} ₽/сут`,
   ];
+  if (shown.length < plan.campaigns.length) {
+    lines.push(
+      `Кампаний в плане: ${plan.campaigns.length}, из них уже создано: ` +
+        `${plan.campaigns.length - shown.length}. Ниже — только то, что будет создано.`,
+    );
+  }
+  lines.push('');
 
-  for (const campaign of plan.campaigns) {
+  for (const campaign of shown) {
     const keywords = campaign.adGroups.reduce((acc, g) => acc + g.keywords.length, 0);
     const ads = campaign.adGroups.reduce((acc, g) => acc + g.ads.length, 0);
     const regions = campaign.adGroups[0]?.regionIds ?? [];
@@ -231,9 +262,14 @@ export function renderPlanSummary(
       `  Минус-слов на кампанию: ${campaign.negativeKeywords.length}`,
     );
     for (const group of campaign.adGroups.slice(0, maxGroups)) {
+      // Ставка группы — ставка её первой фразы. Если фраз нет, ставки нет, и
+      // писать вместо неё ноль нельзя: в этом проекте ноль и «не задано» разведены
+      // намеренно (обоснование — `toGroupBid`, src/clients/vk-ads/adapter.ts), а
+      // «ставка 0.00 ₽» читается как решение системы торговаться за бесплатно.
+      const bid = group.keywords[0]?.bidRub;
       lines.push(
         `    – ${group.name}: ${group.keywords.length} фраз, ` +
-          `ставка ${formatAmount(group.keywords[0]?.bidRub ?? 0)} ₽`,
+          (bid === undefined ? 'ставка не задана' : `ставка ${formatAmount(bid)} ₽`),
       );
     }
     if (campaign.adGroups.length > maxGroups) {

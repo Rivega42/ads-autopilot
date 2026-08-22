@@ -7,6 +7,7 @@ import {
   renderEntryBlock,
   renderPlanSummary,
   renderReadiness,
+  type CampaignEntryBlock,
   type CampaignLaunchOptions,
 } from '@/campaigns/index.js';
 import { bootstrapChannels } from '@/channels/bootstrap.js';
@@ -277,6 +278,30 @@ async function cmdCreatives(
 }
 
 /**
+ * Штатные состояния клиента: команда ответила, чинить нечего.
+ *
+ * «Уже создано» — работа сделана; «карточка ждёт решения» — система дошла до
+ * человека и ждёт нажатия. Ненулевой код на них означал бы поломку, а в скрипте,
+ * обходящем клиентов, читался бы именно так — и разбудил бы дежурного из-за
+ * кампании, которая исправно работает.
+ */
+const SETTLED_BLOCKS: ReadonlySet<CampaignEntryBlock['kind']> = new Set([
+  'already_created',
+  'awaiting_decision',
+]);
+
+/**
+ * Нужно ли вмешательство человека, чтобы запуск вообще стал возможен.
+ *
+ * Это и есть смысл ненулевого кода возврата: не «ответ отрицательный», а «без
+ * тебя дальше не поедет» — дыра в брифе, отсутствующий токен, незавершённая
+ * попытка создания, неизвестный клиент в аргументе.
+ */
+function needsHumanFix(block: CampaignEntryBlock): boolean {
+  return !SETTLED_BLOCKS.has(block.kind);
+}
+
+/**
  * Вход в создание кампании (пункт приёмки ТЗ §9.1).
  *
  * Без `--apply` не тратится ничего: команда только сверяет бриф, доступы, бюджет
@@ -306,7 +331,7 @@ async function cmdCampaign(
     const check = await checkCampaignEntry(clientId, launchOptions);
     if (check.kind !== 'ready') {
       process.stdout.write(`${renderEntryBlock(check)}\n`);
-      process.exitCode = 1;
+      if (needsHumanFix(check)) process.exitCode = 1;
       return;
     }
     process.stdout.write(`${renderReadiness(check)}\n\n`);
@@ -331,11 +356,16 @@ async function cmdCampaign(
     if (outcome.kind === 'already_created') {
       process.stdout.write('Собрать новый план поверх созданных: повторить с --new\n');
     }
-    process.exitCode = 1;
+    if (needsHumanFix(outcome)) process.exitCode = 1;
     return;
   }
 
-  process.stdout.write(`\n${renderPlanSummary(outcome.plan, { dryRun: outcome.dryRun })}\n`);
+  process.stdout.write(
+    `\n${renderPlanSummary(outcome.plan, {
+      dryRun: outcome.dryRun,
+      only: outcome.campaignIndexes,
+    })}\n`,
+  );
   if (outcome.reused) {
     process.stdout.write('\nПлан взят с прошлого захода — модель не звали, денег не потрачено.\n');
   }

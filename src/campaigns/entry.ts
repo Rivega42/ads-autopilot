@@ -76,6 +76,18 @@ export interface CreatedCampaignRef {
   externalId: string;
 }
 
+/** План прошлого захода, годный к переиспользованию, и то, что от него осталось. */
+export interface ReusablePlan {
+  plan: CampaignPlan;
+  /**
+   * Позиции кампаний, которых ещё нет в кабинете, — только по ним выпускаются
+   * карточки. Именно позиции плана, а не порядок в отфильтрованном списке: из
+   * позиции выводится ключ идемпотентности (`campaignCreateKey`), и перенумерация
+   * означала бы вторую кампанию на те же деньги.
+   */
+  untouched: number[];
+}
+
 /**
  * Причина, по которой дальше идти нельзя (или не нужно).
  *
@@ -108,7 +120,7 @@ export interface CampaignEntryReady {
   regionIds: number[];
   dryRun: boolean;
   /** Готовый план прошлого захода: если он есть, модель звать не придётся. */
-  reusablePlan: CampaignPlan | null;
+  reusablePlan: ReusablePlan | null;
 }
 
 export type CampaignEntryCheck = CampaignEntryBlock | CampaignEntryReady;
@@ -123,6 +135,13 @@ export type CampaignLaunchOutcome =
       dryRun: boolean;
       /** true — карточки выпущены по ранее собранному плану, модель не звали. */
       reused: boolean;
+      /**
+       * Позиции кампаний плана, по которым выпущены карточки. Совпадает со всем
+       * планом, кроме случая, когда часть кампаний уже создана: сводку человеку
+       * нужно показывать по этому списку, иначе она посчитает в дневной расход
+       * деньги, которые уже тратятся.
+       */
+      campaignIndexes: number[];
     };
 
 export interface CampaignEntryOptions {
@@ -259,6 +278,7 @@ export async function checkCampaignEntry(
    * что уже произошло, а не про то, что будет.
    */
   const staleBy = plan === null ? null : briefRow.updatedAt > new Date(plan.createdAt);
+  let reusable: ReusablePlan | null = null;
   if (plan?.id) {
     const states = await planCampaignStates(db, plan.id, plan.campaigns);
     const unresolved = states.filter((s) => s.state === 'unfinished');
@@ -281,6 +301,27 @@ export async function checkCampaignEntry(
         })),
       };
     }
+
+    /**
+     * План создан наполовину: по одной кампании нажали ✅, по другой — ❌.
+     *
+     * Дальше идут только нетронутые. Выпустить карточку на созданную кампанию
+     * деньгами не грозит — ключ идемпотентности не даст создать вторую, — но
+     * человеку показали бы сводку с дневным расходом, куда посчитаны и те деньги,
+     * что уже тратятся, и подписью «после одобрения кампания начинает тратить
+     * дневной бюджет». Нажатие по такой карточке не делает ничего: врёт текст.
+     */
+    if (created.length > 0) {
+      notes.push(
+        `Часть кампаний прошлого плана уже создана: ${created.length} из ${states.length}.`,
+      );
+    }
+    if (staleBy === false) {
+      reusable = {
+        plan,
+        untouched: states.filter((s) => s.state === 'untouched').map((s) => s.campaignIndex),
+      };
+    }
   }
 
   if (staleBy === true) {
@@ -295,7 +336,7 @@ export async function checkCampaignEntry(
     notes,
     regionIds: targeting.regionIds,
     dryRun: effectiveDryRun(opts.dryRun),
-    reusablePlan: staleBy === false ? plan : null,
+    reusablePlan: reusable,
   };
 }
 
@@ -322,8 +363,10 @@ export async function launchCampaign(
   const reusable = check.kind === 'ready' && opts.fresh !== true ? check.reusablePlan : null;
 
   let plan: CampaignPlan;
+  let campaignIndexes: number[];
   if (reusable) {
-    plan = reusable;
+    plan = reusable.plan;
+    campaignIndexes = reusable.untouched;
   } else {
     const build = opts.planner ?? planCampaigns;
     try {
@@ -336,12 +379,14 @@ export async function launchCampaign(
       }
       throw err;
     }
+    campaignIndexes = plan.campaigns.map((_, index) => index);
   }
 
   const submit = opts.submit ?? submitCampaignPlan;
   const approvals = await submit(plan, {
     ...(opts.chatId === undefined ? {} : { chatId: opts.chatId }),
     dryRun,
+    campaignIndexes,
   });
 
   log.info(
@@ -349,7 +394,7 @@ export async function launchCampaign(
     'campaign plan submitted from entry point',
   );
 
-  return { kind: 'submitted', plan, approvals, dryRun, reused: reusable !== null };
+  return { kind: 'submitted', plan, approvals, dryRun, reused: reusable !== null, campaignIndexes };
 }
 
 /** Планировщик отказал по данным клиента, а не сломался. */

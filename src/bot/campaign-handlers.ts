@@ -87,12 +87,26 @@ export function registerCampaignHandlers(bot: Bot, deps: CampaignHandlerDeps = {
 
       const outcome = await launchCampaign(clientId, opts);
       if (outcome.kind === 'submitted') {
-        await say(ctx, renderPlanSummary(outcome.plan, { dryRun: outcome.dryRun }));
         await say(
           ctx,
-          `Карточек на решение: ${outcome.approvals.length}. ` +
+          renderPlanSummary(outcome.plan, {
+            dryRun: outcome.dryRun,
+            only: outcome.campaignIndexes,
+          }),
+        );
+        // Недоставленная карточка нажимается некем, а заявка при этом создана и
+        // тихо истечёт. Сказать «карточек на решение: 2», когда до чата доехало
+        // ноль, — пообещать запуск, которого не будет.
+        const undelivered = outcome.approvals.filter((a) => a.error !== null).length;
+        await say(
+          ctx,
+          `Карточек на решение: ${outcome.approvals.length - undelivered}. ` +
             'Каждая — отдельная кампания: можно одобрить одну и отказаться от другой. ' +
-            'Пока не нажмёшь ✅, в кабинет не уходит ничего.',
+            'Пока не нажмёшь ✅, в кабинет не уходит ничего.' +
+            (undelivered === 0
+              ? ''
+              : `\n\n⚠️ Не доставлено карточек: ${undelivered} — Telegram их не принял. ` +
+                'Нажать их некому, запуск по ним не случится: напиши Роману.'),
         );
         return;
       }

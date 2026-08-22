@@ -13,7 +13,21 @@ import { http, HttpResponse, type HttpHandler } from 'msw';
  * Поэтому перехват на уровне HTTP: msw отвечает вместо api.telegram.org, а тест
  * видит ровно те тела запросов, которые ушли бы в сеть. Незнакомый метод роняет
  * прогон — мок, отвечающий «ok» на что угодно, спрятал бы неотправленную карточку.
+ *
+ * Отказы — те же, на которых отказывает площадка, и ни одного послабления
+ * (docs/LESSONS.md: мок, отвечающий удобно, прячет блокеры):
+ *
+ *  • текст длиннее 4096 символов — 400 «message is too long». Наш код режет сам
+ *    (`MESSAGE_MAX_CHARS` в боте), и без этой проверки его резка ничем не
+ *    подтверждена: сломай её — и тесты останутся зелёными, а карточка в проде нет;
+ *  • пустой текст — 400 «message text is empty»;
+ *  • чат, где бота заблокировали, — 403 «bot was blocked by the user». Ветка
+ *    «карточка не доставлена» есть и в CLI, и в боте; пока мок принимал что угодно,
+ *    ни одна из них сценарием не проходилась.
  */
+
+/** Предел `sendMessage`; Telegram отвечает на перебор 400, а не режет сам. */
+export const TELEGRAM_TEXT_MAX = 4_096;
 
 export interface SentMessage {
   chatId: string;
@@ -41,6 +55,8 @@ export interface TelegramApiMock {
   answers: AnsweredCallback[];
   /** Сообщения с инлайн-клавиатурой — это карточки апрува, остальное текст бота. */
   cards(): SentMessage[];
+  /** Клиент заблокировал бота: дальше этот чат отвечает 403 на любую отправку. */
+  block(chatId: string): void;
   reset(): void;
 }
 
@@ -67,7 +83,20 @@ export function createTelegramApiMock(token: string): TelegramApiMock {
   const sent: SentMessage[] = [];
   const edited: EditedMessage[] = [];
   const answers: AnsweredCallback[] = [];
+  const blocked = new Set<string>();
   let nextMessageId = 5_000;
+
+  /** Ответ площадки на отказ: тело то же, что при 200, но `ok: false`. */
+  const refuse = (status: number, description: string): HttpResponse =>
+    HttpResponse.json({ ok: false, error_code: status, description }, { status });
+
+  /** Проверки, общие для `sendMessage` и `editMessageText`. */
+  const rejectText = (chatId: string, text: string): HttpResponse | null => {
+    if (blocked.has(chatId)) return refuse(403, 'Forbidden: bot was blocked by the user');
+    if (text.length === 0) return refuse(400, 'Bad Request: message text is empty');
+    if (text.length > TELEGRAM_TEXT_MAX) return refuse(400, 'Bad Request: message is too long');
+    return null;
+  };
 
   const handler = http.post(
     `https://api.telegram.org/bot${token}/:method`,
@@ -80,8 +109,11 @@ export function createTelegramApiMock(token: string): TelegramApiMock {
           return HttpResponse.json({ ok: true, result: BOT_USER });
 
         case 'sendMessage': {
-          nextMessageId += 1;
           const chatId = String(body.chat_id ?? '');
+          const refused = rejectText(chatId, String(body.text ?? ''));
+          if (refused) return refused;
+
+          nextMessageId += 1;
           sent.push({
             chatId,
             text: String(body.text ?? ''),
@@ -99,13 +131,18 @@ export function createTelegramApiMock(token: string): TelegramApiMock {
           });
         }
 
-        case 'editMessageText':
+        case 'editMessageText': {
+          const chatId = String(body.chat_id ?? '');
+          const refused = rejectText(chatId, String(body.text ?? ''));
+          if (refused) return refused;
+
           edited.push({
-            chatId: String(body.chat_id ?? ''),
+            chatId,
             messageId: Number(body.message_id ?? 0),
             text: String(body.text ?? ''),
           });
           return HttpResponse.json({ ok: true, result: true });
+        }
 
         case 'answerCallbackQuery':
           answers.push({
@@ -127,10 +164,15 @@ export function createTelegramApiMock(token: string): TelegramApiMock {
     edited,
     answers,
     cards: (): SentMessage[] => sent.filter((m) => m.keyboard !== undefined),
+    block: (chatId: string): void => {
+      blocked.add(chatId);
+    },
     reset: (): void => {
       sent.length = 0;
       edited.length = 0;
       answers.length = 0;
+      // Блокировку не снимаем: она свойство чата, а не журнала вызовов, и
+      // «клиент разблокировал бота между шагами сценария» — не то, что тут бывает.
     },
   };
 }

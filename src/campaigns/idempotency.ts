@@ -21,8 +21,30 @@ export const CAMPAIGN_CREATE_SCOPE = 'campaigns.create';
 /** Заглушка до присвоения внешнего id: колонка `entityId` обязательная. */
 export const PENDING_EXTERNAL_ID = 'pending';
 
-/** Сколько живёт ключ. Кампанию не создают дважды и через месяц. */
-export const CAMPAIGN_KEY_TTL_DAYS = 90;
+/**
+ * Ключ создания не истекает.
+ *
+ * Строка отвечает на два разных вопроса, и сроки давности у них разные. «Можно ли
+ * повторить отправку прямо сейчас» живёт минуты. «Создавалась ли эта кампания
+ * вообще» не имеет срока давности: пока кампания есть в кабинете и тратит деньги,
+ * ответ «да» остаётся верным. `checkCampaignEntry` спрашивает именно второе — и
+ * отсутствие строки читает как «не создавали».
+ *
+ * Пока здесь стоял TTL в 90 дней, второй ответ портился в день чистки: крон
+ * (src/scheduler/purge.ts, предикат `expiresAt <= now`) удалял строку, кампания
+ * января в апреле выглядела нетронутой, план переиспользовался целиком, и нажатие
+ * ✅ создавало вторую кампанию с тем же именем и тем же дневным бюджетом. Ни один
+ * экран об этом не предупреждал: все они выводят «создано» из этих же строк.
+ *
+ * Цена решения — две:
+ *  • строки этого scope копятся навсегда. Их считанные штуки на клиента (одна на
+ *    кампанию плана), и таблицу растит не они, а превью креативов, ради которых
+ *    крон и писался;
+ *  • незавершённая попытка (`entityId = pending`) блокирует запуск клиента до
+ *    разбора человеком, а не до истечения срока. Так и надо: раньше блокировка
+ *    снималась молча, и первый же `/launch` после этого создавал вторую кампанию.
+ */
+export const CAMPAIGN_KEY_NEVER_EXPIRES_AT = '9999-12-31T00:00:00.000Z';
 
 export type IdempotencyStore = Pick<PrismaClient, 'idempotencyKey'>;
 
@@ -54,10 +76,7 @@ function isUniqueViolation(err: unknown): boolean {
   );
 }
 
-export function createPrismaCampaignIdempotency(
-  db: IdempotencyStore,
-  ttlDays: number = CAMPAIGN_KEY_TTL_DAYS,
-): CampaignIdempotency {
+export function createPrismaCampaignIdempotency(db: IdempotencyStore): CampaignIdempotency {
   return {
     async reserve(key: string): Promise<Reservation> {
       try {
@@ -67,7 +86,7 @@ export function createPrismaCampaignIdempotency(
             scope: CAMPAIGN_CREATE_SCOPE,
             entityType: 'campaign',
             entityId: PENDING_EXTERNAL_ID,
-            expiresAt: new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000),
+            expiresAt: new Date(CAMPAIGN_KEY_NEVER_EXPIRES_AT),
           },
         });
         return { status: 'reserved' };

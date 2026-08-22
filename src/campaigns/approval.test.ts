@@ -91,6 +91,24 @@ describe('submitCampaignPlan', () => {
     });
   });
 
+  it('карточки выпускаются только по названным позициям плана', async () => {
+    const actions: ApprovalAction[] = [];
+    const approvals = await submitCampaignPlan(planWith('plan-1'), {
+      campaignIndexes: [1],
+      createApproval: (action) => {
+        actions.push(action);
+        return Promise.resolve(fakeApproval(action));
+      },
+    });
+
+    expect(approvals).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ campaignName: 'РСЯ — Курсы', dailyBudget: 1_500 });
+    // Позиция в ссылке — та же, что в плане: из неё выводится ключ идемпотентности,
+    // и перенумерация отфильтрованного списка означала бы вторую кампанию.
+    const ref = actions[0]?.kind === 'create_campaign' ? readPlanRef(actions[0].strategy) : null;
+    expect(ref?.campaignIndex).toBe(1);
+  });
+
   it('причина карточки несёт и вывод стратега, и предупреждения плана', async () => {
     const actions: ApprovalAction[] = [];
     await submitCampaignPlan(planWith('plan-1'), {

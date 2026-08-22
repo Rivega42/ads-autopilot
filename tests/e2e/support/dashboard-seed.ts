@@ -1,5 +1,5 @@
-import { ConversionSource, Provider, StatEntityType } from '@prisma/client';
-import type { CampaignStatus, ClientStatus } from '@prisma/client';
+import { ChangeActor, ConversionSource, Provider, StatEntityType } from '@prisma/client';
+import type { AdGroupStatus, CampaignStatus, ClientStatus } from '@prisma/client';
 
 import { prisma } from '@/db/prisma.js';
 
@@ -668,5 +668,139 @@ async function seedApprovals(clientId: string): Promise<void> {
         decidedAt: mskInstant(DAY_AFTER_TO, '09:00:00.000'),
       },
     ],
+  });
+}
+
+/**
+ * Группы объявлений со ставками.
+ *
+ * Ставка задаётся строкой по той же причине, что и деньги выше: `AdGroup.bid` —
+ * `DECIMAL(12,2)`, и JS-число потеряло бы копейки ещё до вставки.
+ *
+ * `null` и `'0.00'` в одном наборе стоят намеренно: это два разных состояния —
+ * «ручной ставки нет, цену назначает площадка» и «ставка ноль». Витрина обязана
+ * различать их, а не показывать одинаковый прочерк или одинаковый ноль.
+ */
+export interface AdGroupSeed {
+  readonly externalId: string;
+  readonly name: string;
+  readonly status?: AdGroupStatus;
+  readonly bid: string | null;
+}
+
+export async function seedAdGroups(
+  campaignId: string,
+  groups: readonly AdGroupSeed[],
+): Promise<void> {
+  if (groups.length === 0) return;
+  await prisma.adGroup.createMany({
+    data: groups.map((group) => ({
+      campaignId,
+      externalId: group.externalId,
+      name: group.name,
+      status: group.status ?? 'ACTIVE',
+      bid: group.bid,
+    })),
+  });
+}
+
+/**
+ * Группы кампании VK: у канала нет ключевых слов вовсе, и ставка группы —
+ * единственный рычаг управления ценой. Ряд подобран так, чтобы на нём было видно
+ * и «ноль», и «не задано», и разброс между минимумом и максимумом.
+ */
+export const VK_AD_GROUPS: readonly AdGroupSeed[] = [
+  { externalId: 'ext-vk-group-1', name: 'Аудитория — похожие', bid: '12.34' },
+  { externalId: 'ext-vk-group-2', name: 'Аудитория — ретаргет', bid: '0.00' },
+  { externalId: 'ext-vk-group-3', name: 'Аудитория — автостратегия', bid: null },
+  { externalId: 'ext-vk-group-4', name: 'Аудитория — широкая', bid: '99.99', status: 'PAUSED' },
+];
+
+export const VK_BID_MIN = 0;
+export const VK_BID_MAX = 99.99;
+export const VK_BID_SET = 3;
+
+/**
+ * Пара строк журнала за одно изменение ставки, выпущенное человеком.
+ *
+ * Ровно то, что пишет `approval/apply.ts` вместе с `approval/bid-journal.ts`:
+ * аудиторская строка про решение (внешний id площадки, `entityType` в нижнем
+ * регистре, `approvedBy` только внутри `newValue`) и каноническая строка про
+ * ставку (наш id, верхний регистр, заполненные колонки `approvedBy` и `provider`).
+ * Формы скопированы с настоящих писателей — иначе сценарий проверял бы выдумку.
+ */
+export const BID_PAIR = {
+  keywordExternalId: 'ext-kw-77',
+  bidBefore: 30,
+  bidAfter: 24,
+  approvedBy: 'roman',
+  reason: 'CPA выше цели третьи сутки',
+  at: mskInstant('2026-07-16', '11:00:00.000'),
+} as const;
+
+export async function seedApprovedBidChange(
+  campaignId: string,
+  entityId: string,
+  provider: Provider = Provider.YANDEX_DIRECT,
+): Promise<void> {
+  await prisma.changeLog.create({
+    data: {
+      // Аудиторская строка кампанию не проставляет: у `bid_change` нет внешнего
+      // id кампании, по которому её можно было бы найти (см. `changeSnapshot`).
+      campaignId: null,
+      entityType: 'keyword',
+      entityId: BID_PAIR.keywordExternalId,
+      action: 'bid_change',
+      prevValue: [{ keywordExternalId: BID_PAIR.keywordExternalId, bid: BID_PAIR.bidBefore }],
+      newValue: {
+        change: [{ keywordExternalId: BID_PAIR.keywordExternalId, bid: BID_PAIR.bidAfter }],
+        dryRun: false,
+        applied: true,
+        plan: {},
+        provider,
+        approvedBy: BID_PAIR.approvedBy,
+      },
+      reason: BID_PAIR.reason,
+      actor: ChangeActor.USER,
+      appliedAt: BID_PAIR.at,
+    },
+  });
+
+  await prisma.changeLog.create({
+    data: {
+      campaignId,
+      entityType: 'KEYWORD',
+      entityId,
+      action: 'BID_DECREASE',
+      prevValue: { kind: 'bid', amount: BID_PAIR.bidBefore },
+      newValue: { kind: 'bid', amount: BID_PAIR.bidAfter },
+      reason: BID_PAIR.reason,
+      actor: ChangeActor.USER,
+      approvedBy: BID_PAIR.approvedBy,
+      provider,
+      appliedAt: new Date(BID_PAIR.at.getTime() + 1_000),
+    },
+  });
+}
+
+/** Та же ставка, но от ночного прогона: пары у неё нет и быть не может. */
+export async function seedOptimizerBidChange(
+  campaignId: string,
+  entityId: string,
+  provider: Provider = Provider.YANDEX_DIRECT,
+): Promise<void> {
+  await prisma.changeLog.create({
+    data: {
+      campaignId,
+      entityType: 'KEYWORD',
+      entityId,
+      action: 'BID_INCREASE',
+      prevValue: { kind: 'bid', amount: 10 },
+      newValue: { kind: 'bid', amount: 12 },
+      reason: 'CPA ниже цели',
+      actor: ChangeActor.AI,
+      provider,
+      appliedAt: mskInstant('2026-07-17', '03:00:00.000'),
+    },
   });
 }
