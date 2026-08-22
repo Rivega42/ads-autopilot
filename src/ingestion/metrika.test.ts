@@ -294,6 +294,62 @@ describe('syncMetrikaConversions', () => {
     expect(second?.['conversions']).toBe(0);
   });
 
+  it('неоднозначная строка защищает от обнуления обе свои кампании', async () => {
+    // «Копия 100 из 200» называет два номера, и оба — кампании этого клиента.
+    // Строку адресовать нельзя, но известно, кому она могла принадлежать: обнулить
+    // любую из двух значит выключить рабочую кампанию за то, что мы не поняли имя.
+    db.seed('campaign', [
+      { id: 'camp-2', clientId: CLIENT, provider: 'YANDEX_DIRECT', externalId: '200' },
+    ]);
+    db.seed('campaignStat', [
+      {
+        entityType: 'CAMPAIGN',
+        entityId: 'camp-2',
+        date: new Date('2026-08-01T00:00:00.000Z'),
+        spend: 10_000,
+        conversions: 9,
+        conversionSource: 'PLATFORM',
+      },
+    ]);
+
+    const result = await syncMetrikaConversions(
+      CLIENT,
+      deps([goalStat(), goalStat({ campaignLabel: 'Копия 100 из 200' })]),
+    );
+
+    expect(result).toMatchObject({ unresolved: 1, shielded: 2, zeroingSuspended: false });
+    const second = db.store.campaignStat.find((r) => r['entityId'] === 'camp-2');
+    expect(second?.['conversions']).toBe(9);
+    expect(second?.['conversionSource']).toBe('PLATFORM');
+  });
+
+  it('строка без единого опознавательного знака отменяет обнуление окна', async () => {
+    // Ни номера в срезе, ни цифр в имени: строка могла принадлежать любой
+    // кампании клиента, и исключить из обнуления некого. Единственный честный
+    // ответ — не обнулять ничего.
+    db.seed('campaignStat', [
+      {
+        entityType: 'CAMPAIGN',
+        entityId: 'camp-1',
+        date: new Date('2026-08-02T00:00:00.000Z'),
+        spend: 5000,
+        conversions: 4,
+        conversionSource: 'PLATFORM',
+      },
+    ]);
+
+    const result = await syncMetrikaConversions(
+      CLIENT,
+      deps([goalStat(), goalStat({ campaignLabel: 'Поиск — окна' })]),
+    );
+
+    expect(result).toMatchObject({ unresolved: 1, zeroingSuspended: true, zeroed: 0 });
+    const untouched = db.store.campaignStat.find(
+      (r) => r['date'] instanceof Date && (r['date'] as Date).getUTCDate() === 2,
+    );
+    expect(untouched?.['conversions']).toBe(4);
+  });
+
   it('складывает конверсии одной кампании за один день', async () => {
     const result = await syncMetrikaConversions(
       CLIENT,

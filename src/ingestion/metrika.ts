@@ -72,6 +72,14 @@ export interface MetrikaSyncResult {
    */
   unresolvedSamples: string[];
   /**
+   * Кампаний, выведенных из-под обнуления, потому что несопоставленная строка
+   * могла принадлежать им.
+   *
+   * Ненулевое означает, что окно приведено к ответу Метрики не целиком, — и это
+   * лучше, чем обнулить работающую кампанию за то, что мы не разобрали имя.
+   */
+  shielded: number;
+  /**
    * Обнуление окна отменено, потому что ответ Метрики не лёг ни на одну кампанию.
    *
    * Обнуление по молчанию Метрики — задуманное поведение (см. докблок
@@ -261,6 +269,7 @@ export async function syncMetrikaConversions(
     zeroed: 0,
     unresolved: 0,
     unresolvedSamples: [],
+    shielded: 0,
     zeroingSuspended: false,
     attribution: emptyAttribution(),
   };
@@ -309,8 +318,11 @@ export async function syncMetrikaConversions(
     return { ...base, configured: true, attribution: await audit() };
   }
 
-  const { totals, unresolved, unresolvedSamples } = groupByCampaignDate(rows, byExternalId);
-  const seen = { fetched: rows.length, unresolved, unresolvedSamples };
+  const { totals, unresolved, unresolvedSamples, shielded, blind } = groupByCampaignDate(
+    rows,
+    byExternalId,
+  );
+  const seen = { fetched: rows.length, unresolved, unresolvedSamples, shielded: shielded.size };
 
   if (unresolved > 0) {
     // Раньше несопоставленная строка не оставляла в логе ничего: счётчик уезжал
@@ -326,10 +338,12 @@ export async function syncMetrikaConversions(
   // Ни одна строка не легла на кампании клиента — та же ситуация, что и пустой
   // ответ: сопоставление сломано, и обнулять по нему окно нельзя. Разница только
   // в том, что здесь конверсии Метрика прислала, а адресовать их некуда.
-  if (totals.length === 0) {
+  if (totals.length === 0 || blind) {
     log.warn(
       { clientId, ...range, ...seen },
-      'no metrika row matched a campaign of this client, keeping stored conversions',
+      blind
+        ? 'a metrika row named no campaign at all, keeping stored conversions'
+        : 'no metrika row matched a campaign of this client, keeping stored conversions',
     );
     return {
       ...base,
@@ -343,12 +357,15 @@ export async function syncMetrikaConversions(
   const written = await applyConversions(deps.db, totals);
   const zeroed = await zeroUnreported(
     deps.db,
-    campaignIds,
+    campaignIds.filter((id) => !shielded.has(id)),
     range,
     new Set(totals.map((t) => `${t.entityId} ${t.date}`)),
   );
 
-  log.info({ clientId, ...range, written, zeroed, unresolved }, 'metrika conversions applied');
+  log.info(
+    { clientId, ...range, written, zeroed, unresolved, shielded: shielded.size },
+    'metrika conversions applied',
+  );
   return {
     ...base,
     ...seen,
@@ -400,14 +417,47 @@ interface ConversionTotal {
   conversions: number;
 }
 
+interface Grouped {
+  totals: ConversionTotal[];
+  unresolved: number;
+  unresolvedSamples: string[];
+  /**
+   * Кампании, которые нельзя обнулять: несопоставленная строка называла их номер,
+   * значит могла принадлежать любой из них.
+   */
+  shielded: Set<string>;
+  /**
+   * Хотя бы одна строка не дала ни номера, ни цифр в имени. Кому она принадлежит,
+   * неизвестно вообще, поэтому вывести из-под обнуления некого — и обнулять окно
+   * нельзя целиком.
+   */
+  blind: boolean;
+}
+
+/**
+ * Разложить ответ Метрики по кампаниям-дням и понять, чего мы про него не знаем.
+ *
+ * Несопоставленные строки бывают трёх разных сортов, и путать их дорого:
+ *
+ * - строка назвала номера, и несколько из них — кампании этого клиента
+ *   (`ambiguous`): адресовать нельзя, но круг подозреваемых известен, и каждый
+ *   из них выводится из-под обнуления;
+ * - строка назвала номера, и ни один не наш: это чужое или давно удалённое —
+ *   штатное поведение Метрики, помнящей кампанию дольше кабинета. На обнуление
+ *   остальных не влияет;
+ * - строка не назвала ничего (`blind`): принадлежать она могла любой кампании
+ *   клиента, вывести из-под обнуления некого — значит не обнуляем ничего.
+ */
 function groupByCampaignDate(
   rows: readonly MetrikaGoalStat[],
   byExternalId: Map<string, string>,
-): { totals: ConversionTotal[]; unresolved: number; unresolvedSamples: string[] } {
+): Grouped {
   const byKey = new Map<string, ConversionTotal>();
   const known = new Set(byExternalId.keys());
   const samples = new Set<string>();
+  const shielded = new Set<string>();
   let unresolved = 0;
+  let blind = false;
 
   for (const row of rows) {
     const match = directCampaignId(row, known);
@@ -415,6 +465,14 @@ function groupByCampaignDate(
     if (entityId === undefined) {
       unresolved += 1;
       if (samples.size < UNRESOLVED_SAMPLE_LIMIT) samples.add(unresolvedLabel(row));
+      if (match.status === 'ambiguous') {
+        for (const candidate of match.candidates) {
+          const ours = byExternalId.get(candidate);
+          if (ours !== undefined) shielded.add(ours);
+        }
+      } else if (match.status === 'unmatched' && match.candidates.length === 0) {
+        blind = true;
+      }
       continue;
     }
     const key = `${entityId} ${row.date}`;
@@ -423,7 +481,13 @@ function groupByCampaignDate(
     byKey.set(key, total);
   }
 
-  return { totals: [...byKey.values()], unresolved, unresolvedSamples: [...samples] };
+  return {
+    totals: [...byKey.values()],
+    unresolved,
+    unresolvedSamples: [...samples],
+    shielded,
+    blind,
+  };
 }
 
 /**
