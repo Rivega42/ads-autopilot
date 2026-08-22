@@ -274,6 +274,47 @@ describe('sendWeeklyReport', () => {
     expect(metrics.review.summary).toBe(REVIEW.summary);
     expect(metrics.aiRunId).toBe('42');
   });
+
+  it('в строке отчёта лежит причина, по которой разбора нет', async () => {
+    const failed = await sendWeeklyReport(RECIPIENT, {
+      ...deps(),
+      run: runner(new Error('LLM down')),
+    });
+    expect(failed).toMatchObject({ reviewStatus: 'failed', degraded: true });
+    expect(db.reports[0]?.metrics).toMatchObject({ reviewStatus: 'failed', degraded: true });
+
+    const empty = await sendWeeklyReport(RECIPIENT, {
+      ...deps(),
+      period: { from: '2026-08-17', to: '2026-08-23' },
+      run: runner(),
+    });
+    // Модель не звали — и `degraded` в строке обязан это отражать: иначе
+    // переотправка отчитается об аварии, которой не было.
+    expect(empty).toMatchObject({ reviewStatus: 'skipped', degraded: false });
+    expect(db.reports[1]?.metrics).toMatchObject({ reviewStatus: 'skipped', degraded: false });
+  });
+
+  it('переотправка читает причину из строки, а не выдумывает её заново', async () => {
+    messenger.failWith = new Error('timeout');
+    await expect(
+      sendWeeklyReport(RECIPIENT, {
+        ...deps(),
+        period: { from: '2026-08-17', to: '2026-08-23' },
+        run: runner(),
+      }),
+    ).rejects.toThrow();
+
+    messenger.failWith = null;
+    const retry = await sendWeeklyReport(RECIPIENT, {
+      ...deps(),
+      period: { from: '2026-08-17', to: '2026-08-23' },
+      run: runner(),
+    });
+
+    expect(retry.reused).toBe(true);
+    expect(retry.reviewStatus).toBe('skipped');
+    expect(retry.degraded).toBe(false);
+  });
 });
 
 describe('runWeeklyReports', () => {
@@ -282,7 +323,24 @@ describe('runWeeklyReports', () => {
 
     expect(summary.sent).toBe(1);
     expect(summary.degraded).toBe(1);
+    // Модель звали — значит это отказ провайдера, а не пропущенный вызов.
+    expect(summary.reviewSkipped).toBe(0);
     expect(summary.period).toEqual({ from: '2026-08-03', to: '2026-08-09' });
+  });
+
+  it('клиент без статистики не считается деградировавшим', async () => {
+    // 17.08–23.08 в базе нет вовсе: модель не зовут намеренно, чтобы не жечь
+    // деньги клиента. Это не авария провайдера, и в сводке она обязана лежать
+    // в другой графе — иначе партия новых клиентов читается как отказ LLM.
+    const summary = await runWeeklyReports({
+      ...deps(new Date('2026-08-24T07:00:00Z')),
+      run: runner(),
+    });
+
+    expect(calls).toHaveLength(0);
+    expect(summary.sent).toBe(1);
+    expect(summary.degraded).toBe(0);
+    expect(summary.reviewSkipped).toBe(1);
   });
 
   it('переотправленный из БД разбор остаётся деградировавшим в сводке', async () => {

@@ -21,11 +21,14 @@ import { plain, type SeededReportClient } from './support/reporter-seed.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import {
+  ALERT_SCAN_INTERVAL_MINUTES,
   CooldownLimiter,
   ERROR_BURST_THRESHOLD,
+  ERROR_LOOKBACK_MINUTES,
   ERROR_LOOKBACK_OVERLAP_MINUTES,
   ERROR_WINDOW_MINUTES,
   MAX_ALERTS_PER_RUN,
+  PROVIDER_BURST_THRESHOLD,
   runAlertScan,
   setReportMessenger,
   SPEND_ALERT_COOLDOWN_MS,
@@ -153,9 +156,9 @@ describe('тревоги администратору', () => {
     });
 
     it('окно всплеска — ровно пять минут, хотя из журнала выбирается больше', async () => {
-      // Выборка заходит на две минуты за окно: без этого разовые поводы (401,
-      // units) терялись бы на дрожании крона. Но всплеск обязан считаться строго
-      // по окну — иначе порог из ТЗ на деле оказывается ниже заявленного.
+      // Выборка заходит за окно на период крона: без этого разовые поводы (401,
+      // units) терялись бы на пропущенном тике. Но всплеск обязан считаться
+      // строго по окну — иначе порог из ТЗ на деле оказывается ниже заявленного.
       await seedErrors([
         {
           clientId: alpha.clientId,
@@ -181,7 +184,14 @@ describe('тревоги администратору', () => {
       expect(tg.sent).toHaveLength(0);
     });
 
-    it('поломка, размазанная по двум кабинетам, тревоги не даёт', async () => {
+    /**
+     * Было сломано: порог всплеска считался только по бакету «клиент +
+     * площадка», и общая поломка площадки, поделённая между кабинетами поровну,
+     * не перебирала порог ни в одном бакете. Двенадцать ошибок за пять минут
+     * давали тишину: отвалившаяся у всех сразу площадка выглядела как норма.
+     * Теперь тот же счёт идёт и по площадке целиком.
+     */
+    it('поломка, размазанная по двум кабинетам, поднимает тревогу по площадке', async () => {
       await seedErrors([
         { clientId: alpha.clientId, provider: 'YANDEX_DIRECT', minutes: -3, count: 6 },
         { clientId: beta.clientId, provider: 'YANDEX_DIRECT', minutes: -3, count: 6 },
@@ -189,14 +199,50 @@ describe('тревоги администратору', () => {
 
       const summary = await scan();
 
-      // Двенадцать ошибок за пять минут — и тишина: порог считается по бакету
-      // «клиент + площадка». Это осознанное поведение (иначе один сломанный
-      // кабинет глушил бы остальные), но у него есть цена: общая поломка
-      // площадки, размазанная по кабинетам поровну, остаётся незамеченной.
-      expect(summary).toMatchObject({ detected: 0, sent: 0 });
+      expect(kindsOf(summary)).toEqual(['provider_burst']);
+      expect(summary).toMatchObject({ detected: 1, sent: 1, suppressed: 0, truncated: 0 });
+      expect(summary.alerts[0]).toMatchObject({
+        severity: 'critical',
+        // Клиента нет намеренно: поломка не принадлежит ни одному кабинету.
+        clientId: null,
+        provider: 'YANDEX_DIRECT',
+      });
+
+      const text = plain(tg.last().text);
+      expect(text).toContain('🚨 *12 ошибок YANDEX_DIRECT за 5 мин*');
+      expect(text).toContain('Кабинетов задето: 2');
+
+      // Порог по площадке — тот же, что по кабинету: ниже он превратил бы
+      // тревогу в фоновый шум от площадки с сотней клиентов.
+      expect(PROVIDER_BURST_THRESHOLD).toBe(ERROR_BURST_THRESHOLD);
     });
 
-    it('одиночная запись в журнале не доезжает до человека никогда', async () => {
+    it('поломка площадки отменяет кабинетные всплески, а не добавляется к ним', async () => {
+      await seedErrors([
+        { clientId: alpha.clientId, provider: 'VK_ADS', minutes: -3, count: 11 },
+        { clientId: beta.clientId, provider: 'VK_ADS', minutes: -3, count: 4 },
+      ]);
+
+      const summary = await scan();
+
+      // Громкий кабинет сам перебирает порог, но разговор идёт о площадке: два
+      // сообщения об одной поломке — начало флуда, а не полнота картины. Именно
+      // это удерживает от спама отвалившуюся площадку с полусотней клиентов.
+      expect(kindsOf(summary)).toEqual(['provider_burst']);
+      expect(tg.sent).toHaveLength(1);
+      expect(plain(tg.last().text)).toContain(`${alpha.clientId}: 11`);
+    });
+
+    it('всплеск одного кабинета остаётся кабинетным и называет кабинет', async () => {
+      await seedErrors([{ clientId: alpha.clientId, provider: 'VK_ADS', minutes: -3, count: 11 }]);
+
+      const summary = await scan();
+
+      expect(kindsOf(summary)).toEqual(['error_burst']);
+      expect(summary.alerts[0]).toMatchObject({ clientId: alpha.clientId, provider: 'VK_ADS' });
+    });
+
+    it('одиночная запись в журнале без своего повода никого не будит', async () => {
       await seedErrors([
         {
           clientId: alpha.clientId,
@@ -210,10 +256,9 @@ describe('тревоги администратору', () => {
 
       const summary = await scan();
 
-      // Запись в `ErrorLog` сама по себе никого не будит: повод должен либо
-      // попасть в набор кодов (401, units), либо перебрать порог всплеска.
-      // «Записали в журнал» и «сообщили человеку» — разные вещи, и первое
-      // регулярно принимают за второе.
+      // Обратная сторона поштучных поводов: кричат ровно перечисленные коды —
+      // 401, units, отказ отчётности. Всё остальное по-прежнему должно набрать
+      // порог, иначе любая запись в журнале становилась бы сообщением в чат.
       expect(summary).toMatchObject({ detected: 0, sent: 0 });
       expect(tg.sent).toHaveLength(0);
     });
@@ -269,17 +314,136 @@ describe('тревоги администратору', () => {
         { clientId: beta.clientId, provider: 'YANDEX_DIRECT', code: '401', minutes: -visible },
       ]);
       expect(await scan()).toMatchObject({ detected: 1, sent: 1 });
+    });
 
-      // ДЕФЕКТ (описан в отчёте, здесь не чинится). Комментарий к
-      // `ERROR_LOOKBACK_OVERLAP_MINUTES` обещает, что заход за окно закрывает
-      // слепую зону от пропущенного тика — рестарта воркера или залипшей
-      // очереди. Арифметика этого не подтверждает: крон ходит раз в 5 минут, а
-      // заход всего на 2, и один пропущенный тик оставляет непросмотренными
-      // 3 минуты журнала. Разовый повод — 401 или units — из этой дырки не
-      // увидит ни один прогон: назад никто не смотрит. Проверка выше намеренно
-      // выражена через сами константы, поэтому увеличение оверлапа до периода
-      // крона её не сломает.
-      expect(ERROR_LOOKBACK_OVERLAP_MINUTES).toBeLessThan(ERROR_WINDOW_MINUTES);
+    /**
+     * Было сломано: заход за окно был отдельной константой в 2 минуты при кроне
+     * «раз в 5 минут». Тик в T смотрел `[T−7, T]`, следующий после пропущенного
+     * — `[T+3, T+10]`, и интервал `(T, T+3)` не просматривал никто. Разовый
+     * повод — 401 или исчерпание units — из этой дырки не видел ни один прогон:
+     * назад не смотрит никто, а второй раз такая ошибка может не повториться.
+     * Теперь глубина выборки выводится из самого расписания крона и обязана
+     * перекрывать два его периода.
+     */
+    it('401 из пропущенного тика доезжает до человека следующим прогоном', async () => {
+      expect(ERROR_LOOKBACK_MINUTES).toBeGreaterThanOrEqual(2 * ALERT_SCAN_INTERVAL_MINUTES);
+      expect(ERROR_LOOKBACK_OVERLAP_MINUTES).toBeGreaterThanOrEqual(ALERT_SCAN_INTERVAL_MINUTES);
+
+      // Ошибка легла сразу после тика в T, а тик в T+период не состоялся:
+      // рестарт воркера, залипшая очередь. Смотрит на неё только прогон в T+2·период.
+      await seedErrors([
+        {
+          clientId: beta.clientId,
+          provider: 'YANDEX_DIRECT',
+          code: '401',
+          message: 'Токен кабинета отозван',
+          minutes: 0.5,
+        },
+      ]);
+
+      const missedTick = await scan({ now: () => at(2 * ALERT_SCAN_INTERVAL_MINUTES) });
+
+      expect(missedTick).toMatchObject({ detected: 1, sent: 1 });
+      expect(plain(tg.last().text)).toContain('🚨 *Токен не принят площадкой*');
+    });
+
+    /**
+     * Было сломано: недоставленный отчёт писал в `ErrorLog` строку с кодом
+     * `REPORT_FAILED`, и на неё не поднималось ничего — кода нет ни в наборе
+     * авторизационных, ни в наборе units, а до порога всплеска одной записи не
+     * хватает. Человек узнавал о неушедшем отчёте, только если сам лез в
+     * журнал. Теперь такой код кричит поштучно.
+     */
+    it('недоставленный отчёт поднимает тревогу с первой записи', async () => {
+      await seedErrors([
+        {
+          clientId: alpha.clientId,
+          provider: null,
+          scope: 'reporter:daily',
+          code: 'REPORT_FAILED',
+          message: 'Failed to deliver report rep-1 for client alpha',
+          minutes: -1,
+        },
+      ]);
+
+      const summary = await scan();
+
+      expect(kindsOf(summary)).toEqual(['report_failed']);
+      expect(summary).toMatchObject({ detected: 1, sent: 1, suppressed: 0 });
+      expect(summary.alerts[0]).toMatchObject({
+        severity: 'critical',
+        clientId: alpha.clientId,
+      });
+
+      const text = plain(tg.last().text);
+      expect(text).toContain('🚨 *Отчёт не ушёл клиенту (daily)*');
+      expect(text).toContain('Клиент за этот период отчёта не получил.');
+
+      // И при этом не спамит: пока запись лежит в выборке, тревога одна.
+      const nextTick = await scan({ now: () => at(1) });
+      expect(nextTick).toMatchObject({ detected: 1, sent: 0, suppressed: 1 });
+      expect(tg.sent).toHaveLength(1);
+    });
+
+    it('отказ дневного отчёта и отказ недельного — разные поводы', async () => {
+      await seedErrors([
+        {
+          clientId: alpha.clientId,
+          scope: 'reporter:daily',
+          code: 'REPORT_FAILED',
+          message: 'Failed to deliver report rep-1 for client alpha',
+          minutes: -2,
+        },
+        {
+          clientId: alpha.clientId,
+          scope: 'reporter:weekly',
+          code: 'REPORT_FAILED',
+          message: 'Failed to deliver report rep-2 for client alpha',
+          minutes: -1,
+        },
+      ]);
+
+      const summary = await scan();
+
+      // Один кабинет, но две разные поломки: недельный разбор не должен молчать
+      // полчаса из-за того, что утром не ушёл дневной отчёт.
+      expect(kindsOf(summary)).toEqual(['report_failed', 'report_failed']);
+      expect(summary.sent).toBe(2);
+      expect(tg.plainTexts().some((text) => text.includes('(weekly)'))).toBe(true);
+    });
+
+    it('прогон, упавший по всем клиентам, не заливает чат', async () => {
+      const clients = [alpha.clientId, beta.clientId, spike.clientId, collapse.clientId];
+      await seedErrors(
+        clients.flatMap((clientId) => [
+          {
+            clientId,
+            scope: 'reporter:daily',
+            code: 'REPORT_FAILED',
+            message: `Failed to deliver report for client ${clientId}`,
+            minutes: -2,
+          },
+          // Вторая попытка того же отчёта — та же поломка, не новая.
+          {
+            clientId,
+            scope: 'reporter:daily',
+            code: 'REPORT_FAILED',
+            message: `Failed to deliver report for client ${clientId}`,
+            minutes: -1,
+          },
+        ]),
+      );
+
+      const summary = await scan();
+
+      // Четыре клиента, восемь записей — четыре сообщения, а не восемь. Дальше
+      // работает лимит прогона: чат, в который валится поток, перестают читать.
+      expect(summary).toMatchObject({ detected: 4, sent: 4, truncated: 0 });
+      expect(tg.sent).toHaveLength(4);
+      expect(
+        tg.plainTexts().every((text) => text.includes('🚨 *Отчёт не ушёл клиенту (daily)*')),
+      ).toBe(true);
+      expect(tg.plainTexts().some((text) => text.includes('Отказов за выборку: 2'))).toBe(true);
     });
 
     it('кончившиеся units — предупреждение, а не критическая тревога', async () => {

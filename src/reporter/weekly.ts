@@ -78,6 +78,20 @@ export const weeklyReviewSchema = z.object({
 
 export type WeeklyReview = z.infer<typeof weeklyReviewSchema>;
 
+/**
+ * Что случилось с моделью при сборке разбора.
+ *
+ * Три состояния, а не два: «разбора нет» — это либо авария провайдера LLM,
+ * либо осознанное решение не звать модель, когда разбирать нечего. По сводке
+ * их обязано быть видно порознь, иначе партия новых клиентов без статистики
+ * читается как отказ провайдера, а настоящий отказ среди них — как норма.
+ *
+ *  • `ok`      — модель ответила, разбор в отчёте;
+ *  • `failed`  — модель звали, вызов упал, отчёт ушёл без разбора (деградация);
+ *  • `skipped` — модель не звали намеренно: за период нет ни строки статистики.
+ */
+export type WeeklyReviewStatus = 'ok' | 'failed' | 'skipped';
+
 /** Тот же вызов, что делает `runAgent`, но не генерик — так его проще подменить в тестах. */
 export type RunWeeklyReview = (
   opts: RunAgentOptions<WeeklyReview>,
@@ -121,6 +135,8 @@ export interface WeeklyReportContent {
   chartUrl: string | null;
   facts: WeeklyFacts;
   review: WeeklyReview | null;
+  /** Почему разбора нет, если его нет: `failed` — упала, `skipped` — не звали. */
+  reviewStatus: WeeklyReviewStatus;
   metrics: PeriodMetrics;
   previous: PeriodMetrics;
   anomalies: Anomaly[];
@@ -144,7 +160,12 @@ export interface WeeklyReportOutcome {
   sent: boolean;
   reused: boolean;
   skipped: 'already_sent' | null;
-  /** true — разбор собран без модели: она упала, а отчёт всё равно должен уйти. */
+  /** Что случилось с моделью у того отчёта, который ушёл. */
+  reviewStatus: WeeklyReviewStatus;
+  /**
+   * true — разбор собран без модели, потому что она упала: отчёт всё равно
+   * должен уйти. Клиент без статистики сюда не попадает — там модель не звали.
+   */
   degraded: boolean;
 }
 
@@ -153,7 +174,10 @@ export interface WeeklyRunSummary {
   clients: number;
   sent: number;
   skipped: number;
+  /** Модель звали, и она упала. Это авария провайдера LLM — повод смотреть логи. */
   degraded: number;
+  /** Модель не звали: разбирать нечего. Норма для клиента, у которого ещё нет откруток. */
+  reviewSkipped: number;
   failures: Array<{ clientId: string; message: string }>;
 }
 
@@ -261,6 +285,7 @@ export async function buildWeeklyReport(
   const chartUrl = current.coverage.hasData ? spendLeadsChartUrl(current.byDate) : null;
 
   let review: WeeklyReview | null = null;
+  let reviewStatus: WeeklyReviewStatus = 'ok';
   let aiRunId: string | null = null;
 
   // Разбирать нечего: фактов нет, а вызов Opus стоит денег клиента (ТЗ §13).
@@ -274,6 +299,7 @@ export async function buildWeeklyReport(
       chartUrl,
       facts,
       review: null,
+      reviewStatus: 'skipped',
       metrics: current,
       previous,
       anomalies,
@@ -294,6 +320,7 @@ export async function buildWeeklyReport(
     review = result.data;
     aiRunId = result.aiRunId;
   } catch (err) {
+    reviewStatus = 'failed';
     // Разбор без модели хуже, чем с моделью, но лучше, чем молчание в понедельник:
     // цифры и аномалии посчитаны здесь и от LLM не зависят.
     log.error(
@@ -307,6 +334,7 @@ export async function buildWeeklyReport(
     chartUrl,
     facts,
     review,
+    reviewStatus,
     metrics: current,
     previous,
     anomalies,
@@ -458,7 +486,8 @@ export async function sendWeeklyReport(
       sent: false,
       reused: true,
       skipped: 'already_sent',
-      degraded: storedDegraded(existing.metrics),
+      reviewStatus: storedReviewStatus(existing.metrics),
+      degraded: storedReviewStatus(existing.metrics) === 'failed',
     };
   }
 
@@ -483,8 +512,11 @@ export async function sendWeeklyReport(
             aiRunId: content.aiRunId,
             promptVersion: WEEKLY_PROMPT_VERSION,
             // Пишем в строку, а не выводим при переотправке из `review`: сводка
-            // должна знать про деградацию того отчёта, который лежит в БД.
-            degraded: content.review === null,
+            // должна знать про судьбу модели у того отчёта, который лежит в БД.
+            // Причина важна не меньше факта: `null` в `review` бывает и от
+            // упавшей модели, и от осознанного решения её не звать.
+            reviewStatus: content.reviewStatus,
+            degraded: content.reviewStatus === 'failed',
           }),
         });
 
@@ -498,6 +530,8 @@ export async function sendWeeklyReport(
 
   await markReportSent(deps.db, stored.id, deps.now());
 
+  const reviewStatus = content === null ? storedReviewStatus(stored.metrics) : content.reviewStatus;
+
   return {
     clientId: recipient.clientId,
     period,
@@ -505,15 +539,25 @@ export async function sendWeeklyReport(
     sent: true,
     reused: reuse,
     skipped: null,
-    degraded: content === null ? storedDegraded(stored.metrics) : content.review === null,
+    reviewStatus,
+    degraded: reviewStatus === 'failed',
   };
 }
 
-/** Признак деградации из сохранённого слепка метрик. Незнакомая форма — считаем полноценным. */
-function storedDegraded(metrics: unknown): boolean {
-  if (typeof metrics !== 'object' || metrics === null) return false;
-  const value = (metrics as Record<string, unknown>)['degraded'];
-  return value === true;
+/**
+ * Судьба модели из сохранённого слепка метрик.
+ *
+ * Строки, записанные до разделения причин, знают только булев `degraded` —
+ * читаем его как `failed`: тогда поле выставлялось и на упавшей модели, и на
+ * пропущенном вызове, а различить их задним числом не по чему. Незнакомая
+ * форма — считаем разбор полноценным: выдуманная авария хуже её отсутствия.
+ */
+function storedReviewStatus(metrics: unknown): WeeklyReviewStatus {
+  if (typeof metrics !== 'object' || metrics === null) return 'ok';
+  const record = metrics as Record<string, unknown>;
+  const status = record['reviewStatus'];
+  if (status === 'ok' || status === 'failed' || status === 'skipped') return status;
+  return record['degraded'] === true ? 'failed' : 'ok';
 }
 
 /** Точка входа очереди `weekly-report`. */
@@ -530,6 +574,7 @@ export async function runWeeklyReports(
     sent: 0,
     skipped: 0,
     degraded: 0,
+    reviewSkipped: 0,
     failures: [],
   };
 
@@ -538,7 +583,8 @@ export async function runWeeklyReports(
       const outcome = await sendWeeklyReport(recipient, { ...options, ...deps, period });
       if (outcome.sent) summary.sent += 1;
       else summary.skipped += 1;
-      if (outcome.degraded) summary.degraded += 1;
+      if (outcome.reviewStatus === 'failed') summary.degraded += 1;
+      if (outcome.reviewStatus === 'skipped') summary.reviewSkipped += 1;
     } catch (err) {
       const failure = describeFailure(recipient.clientId, 'weekly', err);
       summary.failures.push({ clientId: recipient.clientId, message: failure.message });
@@ -552,6 +598,7 @@ export async function runWeeklyReports(
       clients: summary.clients,
       sent: summary.sent,
       degraded: summary.degraded,
+      reviewSkipped: summary.reviewSkipped,
       failures: summary.failures.length,
     },
     'weekly reports finished',

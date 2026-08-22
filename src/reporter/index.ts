@@ -9,14 +9,20 @@
  * Всё остальное экспортируется ради тестов, дашборда и команды `/report`.
  */
 export {
+  cronIntervalMinutes,
   detectAlerts,
   renderAlert,
   runAlertScan,
+  ALERT_SCAN_INTERVAL_MINUTES,
   ERROR_BURST_THRESHOLD,
+  ERROR_LOOKBACK_JITTER_MINUTES,
+  ERROR_LOOKBACK_MINUTES,
   ERROR_LOOKBACK_OVERLAP_MINUTES,
   ERROR_WINDOW_MINUTES,
   MAX_ALERTS_PER_RUN,
   MAX_ERROR_ROWS,
+  PROVIDER_BURST_MIN_CLIENTS,
+  PROVIDER_BURST_THRESHOLD,
   SPEND_ALERT_COOLDOWN_MS,
   SPEND_BASELINE_DAYS,
   SPEND_SCAN_INTERVAL_MS,
@@ -124,6 +130,7 @@ export {
   type WeeklyReportOptions,
   type WeeklyReportOutcome,
   type WeeklyReview,
+  type WeeklyReviewStatus,
   type WeeklyRunSummary,
 } from '@/reporter/weekly.js';
 export { WEEKLY_PROMPT_VERSION, WEEKLY_SYSTEM_PROMPT } from '@/reporter/weekly-prompt.js';

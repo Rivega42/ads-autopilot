@@ -370,28 +370,48 @@ describe('отчёты клиенту: дневной и недельный', ()
       expect(marked.sentAt).not.toBeNull();
     });
 
-    it('отказ записан в ErrorLog — и одиночной записи не хватает ни на одну тревогу', async () => {
+    /**
+     * Было сломано: отказ доставки писался в `ErrorLog` кодом `REPORT_FAILED`, и
+     * на эту строку не поднималось ничего. Порог всплеска — больше 10 ошибок за
+     * 5 минут в одном бакете, а кода не было ни в наборе авторизационных, ни в
+     * наборе units: недоставленный отчёт не будил никого никогда, и человек
+     * узнавал о нём, только если сам лез в журнал. «Записали в журнал» и
+     * «сообщили человеку» — разные вещи, и первое регулярно принимают за второе.
+     */
+    it('отказ записан в ErrorLog — и одной записи хватает на тревогу', async () => {
       const failures = await prisma.errorLog.findMany({ where: { scope: 'reporter:daily' } });
       expect(failures).toHaveLength(1);
       expect(failures[0]).toMatchObject({ clientId: flaky.clientId, code: 'REPORT_FAILED' });
       expect(failures[0]?.message).toContain('Failed to deliver report');
 
-      // И вот цена этой записи. `now` здесь настоящий — строка создана секунду
-      // назад и лежит в самом центре окна всплеска.
-      const scan = await runAlertScan({
+      const sentBefore = tg.sent.length;
+      const limiter = new CooldownLimiter();
+      const alertOptions = {
         chatId: 'admin-chat',
         messenger: () => tg,
-        now: () => new Date(),
-        limiter: new CooldownLimiter(),
+        limiter,
         checkSpend: false,
-      });
+      };
 
-      // ДЕФЕКТ (описан в отчёте, не чинится здесь): порог всплеска — больше 10
-      // ошибок за 5 минут в одном бакете, а код `REPORT_FAILED` не входит ни в
-      // набор авторизационных, ни в набор units. Значит недоставленный отчёт не
-      // поднимает тревогу никогда: человек узнаёт о нём, только если сам полезет
-      // в `ErrorLog`. «Записали в журнал» и «сообщили человеку» — разные вещи.
-      expect(scan).toMatchObject({ detected: 0, sent: 0, suppressed: 0 });
+      // `now` здесь настоящий — строка создана секунду назад и лежит в самом
+      // центре окна всплеска.
+      const scan = await runAlertScan({ ...alertOptions, now: () => new Date() });
+
+      expect(scan).toMatchObject({ detected: 1, sent: 1, suppressed: 0 });
+      expect(scan.alerts[0]).toMatchObject({
+        kind: 'report_failed',
+        severity: 'critical',
+        clientId: flaky.clientId,
+      });
+      expect(tg.sent).toHaveLength(sentBefore + 1);
+      const text = plain(tg.last().text);
+      expect(text).toContain('Отчёт не ушёл клиенту (daily)');
+      expect(text).toContain(flaky.clientId);
+
+      // И не спамит: следующий тик крона видит ту же строку и молчит.
+      const repeat = await runAlertScan({ ...alertOptions, now: () => new Date() });
+      expect(repeat).toMatchObject({ detected: 1, sent: 0, suppressed: 1 });
+      expect(tg.sent).toHaveLength(sentBefore + 1);
     });
   });
 
@@ -414,6 +434,7 @@ describe('отчёты клиенту: дневной и недельный', ()
         clients: 1,
         sent: 1,
         degraded: 0,
+        reviewSkipped: 0,
         failures: [],
       });
       expect(review.calls).toHaveLength(1);
@@ -540,9 +561,15 @@ describe('отчёты клиенту: дневной и недельный', ()
       expect(weeklyConfig.data.labels).toHaveLength(7);
       expect(weeklyConfig.data.labels[0]).toBe('14 авг');
 
-      const metrics = weekly.metrics as { kind: string; degraded: boolean; promptVersion: string };
+      const metrics = weekly.metrics as {
+        kind: string;
+        degraded: boolean;
+        reviewStatus: string;
+        promptVersion: string;
+      };
       expect(metrics.kind).toBe('weekly');
       expect(metrics.degraded).toBe(false);
+      expect(metrics.reviewStatus).toBe('ok');
       expect(metrics.promptVersion).toBe(WEEKLY_PROMPT_VERSION);
     });
 
@@ -568,7 +595,14 @@ describe('отчёты клиенту: дневной и недельный', ()
         ...deps(),
       });
 
-      expect(summary).toMatchObject({ clients: 1, sent: 1, degraded: 1, failures: [] });
+      // Модель звали, и она упала: это деградация, а не пропущенный вызов.
+      expect(summary).toMatchObject({
+        clients: 1,
+        sent: 1,
+        degraded: 1,
+        reviewSkipped: 0,
+        failures: [],
+      });
       expect(tg.sent).toHaveLength(sentBefore + 1);
 
       const week = await totalsFromDb(bakery.allCampaignIds, PREVIOUS_WEEK);
@@ -590,8 +624,9 @@ describe('отчёты клиенту: дневной и недельный', ()
         },
       });
       // Признак деградации лежит в строке: переотправка обязана знать, что она
-      // шлёт разбор без модели, а не полноценный.
-      expect((stored.metrics as { degraded: boolean }).degraded).toBe(true);
+      // шлёт разбор без модели, а не полноценный. Причина — там же: разбора нет
+      // потому, что модель упала.
+      expect(stored.metrics).toMatchObject({ degraded: true, reviewStatus: 'failed' });
     });
   });
 
@@ -638,18 +673,45 @@ describe('отчёты клиенту: дневной и недельный', ()
       // Разбирать нечего, а вызов стоит денег клиента: модель не должна звучать вовсе.
       expect(review.calls).toHaveLength(callsBefore);
       expect(lastPlain()).toContain(NO_DATA_NOTE);
+    });
 
-      // ДЕФЕКТ (описан в отчёте, здесь не чинится): в сводке такой прогон
-      // помечен как деградировавший, хотя модель не падала — её осознанно не
-      // звали. Поле `degraded` объявлено как «модель упала, а отчёт всё равно
-      // ушёл», а считается по «разбора нет», и эти два условия совпадают не
-      // всегда. Цена: партия новых клиентов без данных читается по сводке как
-      // отказ провайдера LLM, а настоящий отказ среди них — как норма.
-      expect(summary.degraded).toBe(1);
+    /**
+     * Было сломано: такой прогон приезжал в сводку деградировавшим, хотя модель
+     * не падала — её осознанно не звали. Поле `degraded` объявлено как «модель
+     * упала, а отчёт всё равно ушёл», а считалось по «разбора нет», и эти два
+     * условия совпадают не всегда. Цена: партия новых клиентов без данных
+     * читается по сводке как отказ провайдера LLM, а настоящий отказ среди них
+     * — как норма. Теперь причины разведены: `degraded` — только упавшая
+     * модель, `reviewSkipped` — та, которую не звали.
+     */
+    it('несостоявшийся вызов модели не выдаётся за её отказ', async () => {
+      const summary = await runWeeklyReports({
+        clientId: silent.clientId,
+        run: review.run,
+        ...deps(),
+        force: true,
+      });
+
+      expect(summary).toMatchObject({
+        clients: 1,
+        sent: 1,
+        degraded: 0,
+        reviewSkipped: 1,
+        failures: [],
+      });
+
       const stored = await prisma.report.findFirstOrThrow({
         where: { clientId: silent.clientId, kind: ReportKind.WEEKLY },
       });
-      expect((stored.metrics as { degraded: boolean; aiRunId: string | null }).degraded).toBe(true);
+      const metrics = stored.metrics as {
+        degraded: boolean;
+        reviewStatus: string;
+        aiRunId: string | null;
+      };
+      // В строке — та же правда, что в сводке: переотправка читает её оттуда.
+      expect(metrics.degraded).toBe(false);
+      expect(metrics.reviewStatus).toBe('skipped');
+      expect(metrics.aiRunId).toBeNull();
     });
   });
 
