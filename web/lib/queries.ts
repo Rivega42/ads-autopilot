@@ -24,6 +24,26 @@ import type { JsonSafe } from './serialize';
 const ROW_LIMIT = 200;
 
 /**
+ * Сколько id уезжает в один `where: { in: [...] }`.
+ *
+ * `CampaignStat` полиморфна и внешнего ключа на `Campaign` не имеет, поэтому
+ * агрегат по набору кампаний собирается списком id — а каждый id это отдельный
+ * bind-параметр, и их у Prisma не больше 32 767 (int16). Дальше запрос не
+ * тормозит, а падает с `P2029`, и страница отвечает 500. Замерено на живой базе:
+ * 32 000 кампаний под фильтром — 142 мс, 33 000 — отказ. Чанк держится на
+ * порядок ниже стены, чтобы в неё упирался не размер кабинета, а память.
+ */
+export const STAT_ID_CHUNK = 5_000;
+
+function chunkIds(ids: readonly string[]): readonly (readonly string[])[] {
+  const chunks: string[][] = [];
+  for (let start = 0; start < ids.length; start += STAT_ID_CHUNK) {
+    chunks.push(ids.slice(start, start + STAT_ID_CHUNK));
+  }
+  return chunks;
+}
+
+/**
  * Список для страницы: строки и честный размер набора за ними.
  *
  * `total` считается по тому же фильтру, что и строки, поэтому обрезка перестаёт
@@ -54,6 +74,15 @@ export type ChangesView = ListWindow<ChangeRow>;
 export interface ApprovalsView extends ListWindow<ApprovalRow> {
   /** false — это очередь ждущих решения, и она периодом не режется. */
   readonly periodApplies: boolean;
+  /**
+   * Вся очередь ждущих решения — ровно то число, что стоит в шапке.
+   *
+   * Отличается от `total`, когда фильтр по клиенту сузил набор страницы. Тогда
+   * страница обязана назвать оба числа: снять фильтр с бейджа нельзя (layout не
+   * получает `searchParams`), а молчащее расхождение читается как ошибка.
+   * `null` — показана история решений, с очередью её никто не сравнивает.
+   */
+  readonly queueTotal: number | null;
 }
 
 export interface PeriodTotals {
@@ -196,33 +225,35 @@ async function campaignTotals(
   const result = new Map<string, PeriodTotals>();
   if (campaignIds.length === 0) return result;
 
-  const grouped = await getPrisma().campaignStat.groupBy({
-    by: ['entityId', 'conversionSource'],
-    where: {
-      entityType: StatEntityType.CAMPAIGN,
-      entityId: { in: [...campaignIds] },
-      date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
-    },
-    _sum: { impressions: true, clicks: true, spend: true, conversions: true },
-    _count: { _all: true },
-  });
-
   const accumulated = new Map<string, { totals: RawTotals; counts: ConversionSourceCounts }>();
-  for (const row of grouped) {
-    const previous = accumulated.get(row.entityId) ?? { totals: ZERO, counts: emptyCounts() };
-    const counts = emptyCounts();
-    counts[row.conversionSource] = row._count._all;
-
-    accumulated.set(row.entityId, {
-      totals: addRaw(previous.totals, {
-        impressions: row._sum.impressions ?? 0,
-        clicks: row._sum.clicks ?? 0,
-        // spend — Decimal: без явного преобразования сюда приехал бы объект.
-        spend: decimalToNumberOr(row._sum.spend, 0),
-        conversions: row._sum.conversions ?? 0,
-      }),
-      counts: addCounts(previous.counts, counts),
+  for (const chunk of chunkIds(campaignIds)) {
+    const grouped = await getPrisma().campaignStat.groupBy({
+      by: ['entityId', 'conversionSource'],
+      where: {
+        entityType: StatEntityType.CAMPAIGN,
+        entityId: { in: [...chunk] },
+        date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
+      },
+      _sum: { impressions: true, clicks: true, spend: true, conversions: true },
+      _count: { _all: true },
     });
+
+    for (const row of grouped) {
+      const previous = accumulated.get(row.entityId) ?? { totals: ZERO, counts: emptyCounts() };
+      const counts = emptyCounts();
+      counts[row.conversionSource] = row._count._all;
+
+      accumulated.set(row.entityId, {
+        totals: addRaw(previous.totals, {
+          impressions: row._sum.impressions ?? 0,
+          clicks: row._sum.clicks ?? 0,
+          // spend — Decimal: без явного преобразования сюда приехал бы объект.
+          spend: decimalToNumberOr(row._sum.spend, 0),
+          conversions: row._sum.conversions ?? 0,
+        }),
+        counts: addCounts(previous.counts, counts),
+      });
+    }
   }
 
   for (const [entityId, entry] of accumulated) {
@@ -234,10 +265,10 @@ async function campaignTotals(
 /**
  * Итог за период по набору кампаний целиком.
  *
- * Суммирует Postgres: одна строка на источник конверсий на весь набор. Список
- * id передаётся явно, потому что `CampaignStat` полиморфна и внешнего ключа на
- * `Campaign` у неё нет — join'а, который сделал бы фильтр кампаний частью
- * агрегата, в схеме просто нет.
+ * Суммирует Postgres: одна строка на источник конверсий на каждый чанк id,
+ * чанки складываются здесь. Список id передаётся явно, потому что
+ * `CampaignStat` полиморфна и внешнего ключа на `Campaign` у неё нет — join'а,
+ * который сделал бы фильтр кампаний частью агрегата, в схеме просто нет.
  */
 async function periodTotals(
   campaignIds: readonly string[],
@@ -246,29 +277,31 @@ async function periodTotals(
 ): Promise<PeriodTotals> {
   if (campaignIds.length === 0) return totalsOf(ZERO);
 
-  const grouped = await getPrisma().campaignStat.groupBy({
-    by: ['conversionSource'],
-    where: {
-      entityType: StatEntityType.CAMPAIGN,
-      entityId: { in: [...campaignIds] },
-      date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
-    },
-    _sum: { impressions: true, clicks: true, spend: true, conversions: true },
-    _count: { _all: true },
-  });
-
   let raw = ZERO;
   let counts: ConversionSourceCounts = emptyCounts();
-  for (const row of grouped) {
-    raw = addRaw(raw, {
-      impressions: row._sum.impressions ?? 0,
-      clicks: row._sum.clicks ?? 0,
-      spend: decimalToNumberOr(row._sum.spend, 0),
-      conversions: row._sum.conversions ?? 0,
+  for (const chunk of chunkIds(campaignIds)) {
+    const grouped = await getPrisma().campaignStat.groupBy({
+      by: ['conversionSource'],
+      where: {
+        entityType: StatEntityType.CAMPAIGN,
+        entityId: { in: [...chunk] },
+        date: { gte: ymdToDateColumn(from), lte: ymdToDateColumn(to) },
+      },
+      _sum: { impressions: true, clicks: true, spend: true, conversions: true },
+      _count: { _all: true },
     });
-    const one = emptyCounts();
-    one[row.conversionSource] = row._count._all;
-    counts = addCounts(counts, one);
+
+    for (const row of grouped) {
+      raw = addRaw(raw, {
+        impressions: row._sum.impressions ?? 0,
+        clicks: row._sum.clicks ?? 0,
+        spend: decimalToNumberOr(row._sum.spend, 0),
+        conversions: row._sum.conversions ?? 0,
+      });
+      const one = emptyCounts();
+      one[row.conversionSource] = row._count._all;
+      counts = addCounts(counts, one);
+    }
   }
 
   return totalsOf(raw, counts);
@@ -411,6 +444,11 @@ export async function listClientsView(filters: DashboardFilters): Promise<Client
  * Плитки считаются не по `rows`: на 205 кампаниях свёртка обрезка показывала бы
  * 2000 ₽ там, где `/clients` за тот же период показывает 2050 ₽. Две страницы за
  * один период не имеют права показывать разные деньги.
+ *
+ * Id всего набора тянутся без потолка намеренно: агрегат собирается списком id
+ * (`STAT_ID_CHUNK`), а `JOIN` потребовал бы продублировать `campaignWhere` в
+ * сыром SQL — и первая же правка фильтров развела бы строки и итог. Цена
+ * известна и линейна: 32 000 кампаний — 780 КиБ id и 142 мс на всю страницу.
  */
 export async function listCampaignsView(filters: DashboardFilters): Promise<CampaignsView> {
   const [rows, matching] = await Promise.all([
@@ -647,9 +685,11 @@ export async function listApprovals(filters: DashboardFilters): Promise<Approval
 }
 
 export async function listApprovalsView(filters: DashboardFilters): Promise<ApprovalsView> {
-  const [rows, total] = await Promise.all([
+  const periodApplies = approvalsArePeriodBound(filters);
+  const [rows, total, queueTotal] = await Promise.all([
     listApprovals(filters),
     getPrisma().pendingApproval.count({ where: approvalWhere(filters) }),
+    periodApplies ? null : countPendingApprovals(),
   ]);
 
   return {
@@ -657,7 +697,8 @@ export async function listApprovalsView(filters: DashboardFilters): Promise<Appr
     total,
     limit: ROW_LIMIT,
     truncated: rows.length < total,
-    periodApplies: approvalsArePeriodBound(filters),
+    periodApplies,
+    queueTotal,
   };
 }
 
@@ -682,11 +723,13 @@ export async function listChangesView(
 }
 
 /**
- * Счётчик у ссылки «Апрувы» в шапке.
+ * Счётчик у ссылки «Апрувы» в шапке: вся очередь ждущих решения.
  *
- * Периода не знает намеренно: layout Next.js не получает `searchParams`, а
- * очередь ждущих решения периодом и не режется (`approvalsArePeriodBound`).
- * Поэтому бейдж и таблица на `/approvals` считают одно и то же множество.
+ * Фильтров интерфейса он не знает и знать не может — layout Next.js не получает
+ * `searchParams`. Периодом очередь и не режется (`approvalsArePeriodBound`), а
+ * вот фильтры по клиенту (`clientId`, `clientStatus`) на `/approvals` набор
+ * сужают: тогда это законно другое число, чем `total` страницы, и назвать оба
+ * обязана страница (`ApprovalsView.queueTotal`). Совпадение здесь не обещано.
  */
 export async function countPendingApprovals(): Promise<number> {
   return getPrisma().pendingApproval.count({ where: { decision: 'PENDING' } });

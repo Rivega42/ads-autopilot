@@ -3,7 +3,8 @@ import Link from 'next/link';
 import { Badge } from '../../components/badge';
 import { EmptyState } from '../../components/empty-state';
 import { FilterBar } from '../../components/filter-bar';
-import { formatMskDateTime, formatYmd } from '../../lib/dates';
+import { approvalsEmptyText, approvalsSubtitle } from '../../lib/approvals';
+import { formatMskDateTime } from '../../lib/dates';
 import type { SearchParams } from '../../lib/filters';
 import { parseFilters, rangeLength, withFilters } from '../../lib/filters';
 import { formatInteger, formatRelativeMinutes } from '../../lib/format';
@@ -30,9 +31,14 @@ export default async function ApprovalsPage({
           <h1>Очередь апрувов</h1>
           <p className="page-sub">
             Решения принимаются в Telegram-боте — здесь только просмотр.{' '}
-            {view.periodApplies
-              ? `${rangeLength(filters)} дн.: ${formatYmd(filters.from)} — ${formatYmd(filters.to)} (МСК)`
-              : `Ждут решения: ${formatInteger(view.total)} — очередь показана целиком, период (${formatYmd(filters.from)} — ${formatYmd(filters.to)}) фильтрует только принятые решения.`}
+            {approvalsSubtitle({
+              periodApplies: view.periodApplies,
+              total: view.total,
+              queueTotal: view.queueTotal,
+              from: filters.from,
+              to: filters.to,
+              rangeDays: rangeLength(filters),
+            })}
           </p>
         </div>
       </div>
@@ -46,7 +52,7 @@ export default async function ApprovalsPage({
           </strong>
           <p className="notice-text">
             Список обрезан потолком витрины — остальные строки не пропали, их просто здесь нет.
-            Счётчик в шапке считает очередь целиком.
+            Счётчик в шапке считает всю очередь, без фильтров по клиенту.
           </p>
         </section>
       ) : null}
@@ -54,9 +60,10 @@ export default async function ApprovalsPage({
       <section className="card">
         {approvals.length === 0 ? (
           <EmptyState>
-            {view.periodApplies
-              ? 'Решений с таким статусом за выбранный период нет.'
-              : 'Ничего не ждёт решения.'}
+            {approvalsEmptyText({
+              periodApplies: view.periodApplies,
+              queueTotal: view.queueTotal,
+            })}
           </EmptyState>
         ) : (
           <div className="table-wrap">

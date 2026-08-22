@@ -248,12 +248,15 @@ describe('дашборд: границы периода в журналах', ()
     expect(await listApprovals(laterWindow)).toHaveLength(PENDING_APPROVAL_COUNT);
   });
 
-  it('счётчик в шапке и таблица на странице считают одно и то же множество', async () => {
+  it('без фильтров по клиенту счётчик в шапке и таблица считают одно множество', async () => {
+    // Одно — именно без фильтров: `clientStatus` и `clientId` набор страницы
+    // сужают законно, и тогда числа расходятся (см. `dashboard-badge.e2e.ts`).
     const badge = await countPendingApprovals();
     const view = await listApprovalsView(dashboardFilters());
 
     expect(badge).toBe(PENDING_APPROVAL_COUNT);
     expect(view.total).toBe(badge);
+    expect(view.queueTotal).toBe(badge);
     expect(view.rows).toHaveLength(badge);
     expect(view.truncated).toBe(false);
     expect(view.periodApplies).toBe(false);
