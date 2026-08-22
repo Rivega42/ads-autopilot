@@ -14,6 +14,9 @@ import type { SearchQueryMetrics } from './types.js';
 
 import { createApproval } from '@/approval/index.js';
 import type { ApprovalAction } from '@/approval/index.js';
+// Не через фасад: гейт исполнимости — лист без БД и Telegram, и тащить ради него
+// весь approval-модуль в воркер незачем.
+import { unsupportedActionReason } from '@/approval/supported.js';
 import { prisma } from '@/db/prisma.js';
 import { describeError } from '@/lib/errors.js';
 import { logger } from '@/logger.js';
@@ -448,6 +451,20 @@ async function createApprovalCards(
 
   const outcome: ApprovalCardsOutcome = { created: 0, duplicate: 0, unbuildable: 0 };
   for (const action of actions) {
+    // Пара «вид действия × канал» бывает неисполнимой: канал берётся из кампании, а
+    // умеет каждый своё (у VK нет ни фраз, ни минус-слов). Отсеиваем здесь, до
+    // человека: `createApproval` такую заявку всё равно не выпустит, но бросит — и
+    // унесёт с собой остальные карточки волны, которые исполнимы.
+    const unsupported = unsupportedActionReason(action);
+    if (unsupported !== null) {
+      outcome.unbuildable += 1;
+      log.warn(
+        { campaignId: campaign.id, kind: action.kind, channel: action.channel, unsupported },
+        'approval card skipped: channel cannot execute this action',
+      );
+      continue;
+    }
+
     const key = approvalIdempotencyKey(deps.runId, action);
     if ((await deps.idempotency.reserve(key)) === 'duplicate') {
       outcome.duplicate += 1;

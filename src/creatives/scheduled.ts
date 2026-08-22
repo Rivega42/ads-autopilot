@@ -13,6 +13,7 @@ import { evaluateAdExperiment, type AdExperiment } from './ab/experiment.js';
 import { losingVariantIds, type AbTestConfig } from './ab/select.js';
 
 import { approvalActionSchema, createApproval, type ApprovalAction } from '@/approval/index.js';
+import { unsupportedActionReason } from '@/approval/supported.js';
 import { prisma } from '@/db/prisma.js';
 import { env } from '@/env.js';
 import { describeError } from '@/lib/errors.js';
@@ -308,6 +309,18 @@ async function requestLoserPause(
       },
       'A/B winner declared on a partial set: some variants are paused in the cabinet',
     );
+  }
+
+  // Канал берётся из кампании, а паузу объявлений умеет не всякий: у канала без
+  // адаптера применять карточку будет некому. Ключ идемпотентности при этом ещё не
+  // занят — иначе завтрашний прогон промолчал бы про ту же группу.
+  const unsupported = unsupportedActionReason(action);
+  if (unsupported !== null) {
+    log.warn(
+      { adGroupId: group.id, channel: group.campaign.provider, unsupported },
+      'A/B pause card skipped: channel cannot execute this action',
+    );
+    return { created: 0, duplicate: 0, unbuildable: 1 };
   }
 
   const key = abApprovalIdempotencyKey(group.id, externalIds, { dryRun: deps.dryRun });

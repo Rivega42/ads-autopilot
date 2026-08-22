@@ -174,6 +174,43 @@ describe('createApproval', () => {
     expect(h.state.created?.payload).toMatchObject({ meta: { dryRun: true } });
   });
 
+  // ── неисполнимая пара «вид действия × канал» ──────────────────────────────
+  it('не выпускает карточку, которую некому будет применить', async () => {
+    // VK не умеет минус-слов: у канала нет ни фраз, ни поисковых запросов. Такая
+    // карточка доходила до человека и падала уже после нажатия ✅ — то есть тогда,
+    // когда он уверен, что дело сделано.
+    const vkNegatives: ApprovalAction = {
+      kind: 'add_negatives',
+      clientId: 'cl1',
+      channel: 'VK_ADS',
+      reason: 'CTR 0.2% при 40 кликах',
+      campaignExternalId: '777',
+      phrases: ['бесплатно'],
+    };
+
+    await expect(createApproval(vkNegatives, { now: NOW })).rejects.toMatchObject({
+      code: 'ACTION_NOT_SUPPORTED',
+    });
+    expect(h.prisma.pendingApproval.create).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('отказ звучит одинаково и для того, кто спрашивает политику', async () => {
+    const vkKeywordPause: ApprovalAction = {
+      kind: 'pause_entities',
+      clientId: 'cl1',
+      channel: 'VK_ADS',
+      reason: 'Пауза: 0 конверсий',
+      level: 'keyword',
+      externalIds: ['1', '2'],
+    };
+
+    await expect(requestApprovalIfNeeded(vkKeywordPause, { now: NOW })).rejects.toMatchObject({
+      code: 'ACTION_NOT_SUPPORTED',
+    });
+    expect(h.prisma.pendingApproval.create).not.toHaveBeenCalled();
+  });
+
   // ── #19: карточка уже в чате — её нельзя потерять ─────────────────────────
   it('не роняет создание, если tgMessageId не записался после отправки', async () => {
     h.state.updateError = 'connection pool timeout';

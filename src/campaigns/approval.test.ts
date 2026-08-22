@@ -67,6 +67,32 @@ function fakeApproval(action: ApprovalAction): PendingApproval {
 }
 
 describe('submitCampaignPlan', () => {
+  it('не выпускает карточку на канал, которому нечем залить план', async () => {
+    // Веса каналов в планировщике уже делят бюджет между Директом и VK, а
+    // `CampaignWriter` написан только для Директа: карточка на кампанию VK
+    // доходила до человека и падала после нажатия ✅ — «нет реализации создания».
+    const plan = planWith('plan-1');
+    const mixed: CampaignPlan = {
+      ...plan,
+      campaigns: [
+        plan.campaigns[0] as CampaignPlan['campaigns'][number],
+        { ...(plan.campaigns[1] as CampaignPlan['campaigns'][number]), channel: Provider.VK_ADS },
+      ],
+    };
+
+    const actions: ApprovalAction[] = [];
+    const approvals = await submitCampaignPlan(mixed, {
+      createApproval: (action) => {
+        actions.push(action);
+        return Promise.resolve(fakeApproval(action));
+      },
+    });
+
+    // Исполнимая половина плана человеку всё равно уходит.
+    expect(approvals).toHaveLength(1);
+    expect(actions.map((a) => a.channel)).toEqual([Provider.YANDEX_DIRECT]);
+  });
+
   it('выпускает по карточке на кампанию со ссылкой на план', async () => {
     const actions: ApprovalAction[] = [];
     const approvals = await submitCampaignPlan(planWith('plan-1'), {

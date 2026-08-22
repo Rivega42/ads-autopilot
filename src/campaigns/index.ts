@@ -26,6 +26,7 @@ export {
 export {
   applyPlan,
   applyLoadedPlan,
+  campaignWriters,
   describeCampaign,
   type ApplyPlanDeps,
   type ApplyPlanOptions,

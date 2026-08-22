@@ -6,7 +6,7 @@ interface CampaignRow {
   id: string;
   name: string;
   clientId: string;
-  provider: 'YANDEX_DIRECT';
+  provider: 'YANDEX_DIRECT' | 'VK_ADS';
   externalId: string | null;
 }
 
@@ -67,7 +67,12 @@ const h = vi.hoisted(() => {
         }),
       },
       adGroup: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 1 })) },
-      ad: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 1 })) },
+      ad: {
+        // Тип ответа шире пустого массива: сценарий с исполнимой паузой объявлений
+        // подменяет реализацию, а `never[]` не дал бы вернуть ни одной строки.
+        findMany: vi.fn(async (): Promise<Array<{ id: string; externalId: string }>> => []),
+        updateMany: vi.fn(async () => ({ count: 1 })),
+      },
       keyword: { findMany: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
     },
     runtime: {
@@ -254,6 +259,66 @@ describe('runScheduledOptimization: IMPORT_HANDOVER', () => {
     const summary = await runScheduledOptimization({ dryRun: false, now: NOW });
 
     expect(h.createApproval).not.toHaveBeenCalled();
+    expect(summary.approvalsFailed).toBe(1);
+  });
+});
+
+describe('runScheduledOptimization: неисполнимая пара «действие × канал»', () => {
+  function pausedAd(id: string): DecisionLike {
+    return { ...pause(id), entityType: 'AD', entityId: id, label: `объявление ${id}` };
+  }
+
+  beforeEach(() => {
+    h.state.campaigns = [{ ...CAMPAIGN, provider: 'VK_ADS' }];
+  });
+
+  it('не зовёт человека к минус-словам VK: у канала их нет, применить будет нечем', async () => {
+    h.runOptimizer.mockResolvedValue(
+      run({
+        approvals: [
+          {
+            kind: 'IMPORT_HANDOVER',
+            decisions: [negative('дёшево')],
+            summary: 'Режим передачи управления',
+          },
+        ],
+      }),
+    );
+
+    const summary = await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    expect(h.createApproval).not.toHaveBeenCalled();
+    expect(summary.approvals).toBe(0);
+    // Не «успех без карточки»: человек ничего не получил, и это видно в сводке.
+    expect(summary.approvalsFailed).toBe(1);
+  });
+
+  it('роняет только неисполнимую половину волны, остальные карточки уходят', async () => {
+    h.runOptimizer.mockResolvedValue(
+      run({
+        approvals: [
+          {
+            kind: 'IMPORT_HANDOVER',
+            // У VK нет уровня фраз, зато есть баннеры: первая пауза неисполнима,
+            // вторая — обычное действие, и её нельзя терять вместе с первой.
+            decisions: [pause('kw-1'), pausedAd('ad-1')],
+            summary: 'Режим передачи управления',
+          },
+        ],
+      }),
+    );
+    // Один вызов на тип сущности; `Once`, чтобы реализация не утекла в соседние сценарии.
+    h.prisma.ad.findMany.mockImplementationOnce(async () => [
+      { id: 'ad-1', externalId: 'ext-ad-1' },
+    ]);
+
+    const summary = await runScheduledOptimization({ dryRun: false, now: NOW });
+
+    const levels = h.createApproval.mock.calls.map(([action]) =>
+      action.kind === 'pause_entities' ? action.level : action.kind,
+    );
+    expect(levels).toEqual(['ad']);
+    expect(summary.approvals).toBe(1);
     expect(summary.approvalsFailed).toBe(1);
   });
 });

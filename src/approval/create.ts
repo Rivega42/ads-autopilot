@@ -2,6 +2,7 @@ import type { PendingApproval } from '@prisma/client';
 
 import { buildApprovalKeyboard, renderApprovalCard } from '@/approval/card.js';
 import { matchApprovalRule } from '@/approval/policy.js';
+import { assertActionExecutable } from '@/approval/supported.js';
 import { getMessenger } from '@/approval/telegram.js';
 import {
   approvalKindOf,
@@ -53,6 +54,10 @@ export async function createApproval(
   opts: CreateApprovalOptions = {},
 ): Promise<PendingApproval> {
   const action = parseAction(input);
+  // До строки в БД и до сообщения в чат: пара «вид действия × канал» бывает
+  // неисполнимой (VK не умеет минус-слов, Директ — паузы групп), и узнать об этом
+  // человек обязан не после нажатия ✅, а вместо карточки.
+  assertActionExecutable(action);
   const now = opts.now ?? new Date();
   const expiresAt = new Date(now.getTime() + APPROVAL_TTL_MINUTES * 60_000);
 
@@ -135,6 +140,9 @@ export async function requestApprovalIfNeeded(
   opts: CreateApprovalOptions = {},
 ): Promise<PendingApproval | null> {
   const action = parseAction(input);
+  // Раньше политики: `null` здесь означает «применяй сам», и для неисполнимой пары
+  // это отправило бы вызывающего прямо в отказ площадки.
+  assertActionExecutable(action);
   if (!matchApprovalRule(action)) return null;
   return createApproval(action, opts);
 }

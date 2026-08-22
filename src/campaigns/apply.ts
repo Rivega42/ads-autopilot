@@ -107,7 +107,15 @@ export interface PlanApplyResult {
   campaigns: CampaignApplyResult[];
 }
 
-function defaultWriters(): Partial<Record<Provider, CampaignWriter>> {
+/**
+ * Реализации создания по каналам.
+ *
+ * Экспортируется не ради подмены (для неё есть `ApplyPlanDeps.writers`), а ради
+ * сверки: `src/channels/capabilities.ts` объявляет, какой канал умеет создавать
+ * кампанию, и это объявление обязано совпадать с этим списком — иначе карточка
+ * `create_campaign` выпускается на канал, которому нечем залить план.
+ */
+export function campaignWriters(): Partial<Record<Provider, CampaignWriter>> {
   return { [Provider.YANDEX_DIRECT]: yandexCampaignWriter };
 }
 
@@ -141,7 +149,7 @@ export async function applyLoadedPlan(
   }
 
   const db = opts.db ?? prisma;
-  const writers = opts.writers ?? defaultWriters();
+  const writers = opts.writers ?? campaignWriters();
   const buildContext = opts.buildContext ?? buildChannelContext;
   const idempotency = opts.idempotency ?? createPrismaCampaignIdempotency(db);
 

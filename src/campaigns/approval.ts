@@ -2,6 +2,7 @@ import type { PendingApproval } from '@prisma/client';
 
 import { createApproval, type CreateApprovalOptions } from '@/approval/create.js';
 import { registerActionExecutor } from '@/approval/execute.js';
+import { unsupportedActionReason } from '@/approval/supported.js';
 import type { ApprovalAction } from '@/approval/types.js';
 import { applyPlan, type ApplyPlanDeps, type CampaignApplyResult } from '@/campaigns/apply.js';
 import { readPlanRef, type CampaignPlan } from '@/campaigns/plan.schema.js';
@@ -77,6 +78,19 @@ export async function submitCampaignPlan(
       // одним alert'ом Telegram, а он обрезается на 200 символах.
       strategy: { planId, campaignIndex: index, placement: item.placement },
     };
+
+    // Канал берётся из плана, а `CampaignWriter` есть не у каждого: карточка на
+    // канал без реализации создания падала бы уже после нажатия ✅. Пропускаем
+    // именно её, а не весь план: исполнимые кампании человек получить обязан.
+    const unsupported = unsupportedActionReason(action);
+    if (unsupported !== null) {
+      log.warn(
+        { planId, campaignIndex: index, channel: item.channel, unsupported },
+        'campaign approval card skipped: channel cannot create campaigns',
+      );
+      continue;
+    }
+
     approvals.push(await create(action, approvalOpts));
   }
 

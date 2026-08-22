@@ -48,6 +48,13 @@ export {
   type ApprovalMeta,
 } from '@/approval/types.js';
 export { registerActionExecutor, type ActionExecutor } from '@/approval/execute.js';
+// Гейт исполнимости пары «вид действия × канал». Выпускающие карточку спрашивают
+// его сами: `createApproval` на неисполнимую пару бросает, а не молчит.
+export {
+  assertActionExecutable,
+  isActionExecutable,
+  unsupportedActionReason,
+} from '@/approval/supported.js';
 // Пометка применённых минус-фраз нужна обоим путям применения — через апрув и
 // напрямую из оптимизатора, — поэтому лежит здесь, а не внутри одного из них.
 export { markNegatedQueries, type MarkNegatedInput } from '@/approval/mark-negated.js';
