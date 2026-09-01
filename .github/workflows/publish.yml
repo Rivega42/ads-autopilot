@@ -53,7 +53,7 @@ jobs:
       # уже опубликован, в реестре расходятся latest бэкенда и дашборда: они
       # поедут с разных коммитов на одну схему БД, и заметить это нечем.
       # Отдельный job publish ниже стартует только когда собрались обе.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: ${{ matrix.target }}
@@ -104,7 +104,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
 
       # Собирается по кешу предыдущего job'а, то есть это почти чистый push.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           target: ${{ matrix.target }}

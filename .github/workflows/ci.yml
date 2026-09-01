@@ -154,7 +154,7 @@ jobs:
       # Разные scope обязательны: с общим (дефолтным) второй шаг затирает манифест
       # первого, и кеша не будет ни у одного.
       - name: build backend image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: app
@@ -163,7 +163,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=app
 
       - name: build dashboard image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: web
